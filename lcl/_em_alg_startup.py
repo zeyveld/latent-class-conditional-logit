@@ -1,4 +1,4 @@
-"""EM algorithm initialization."""
+"""Expectation-Maximization (EM) algorithm initialization routines."""
 
 import jax.numpy as jnp
 import numpy as onp
@@ -20,7 +20,34 @@ def _get_starting_vals(
     mle_config: MleConfig,
     numeraire_idx: int | None = None,
 ) -> EMVars:
-    """Obtain starting values for betas and class probs."""
+    """Generate robust initial parameter estimates to seed the EM algorithm.
+
+    Because the EM objective function is highly non-convex for latent class models,
+    careful initialization is required to avoid local optima. This function randomly
+    partitions decision-makers into `num_classes` subsets and estimates a standard
+    conditional logit model on each subset to derive distinct starting taste parameters.
+
+    Parameters
+    ----------
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        The differenced design matrix for the full sample.
+    data : :class:`~lcl._struct.Data`
+        The core estimation data and metadata.
+    num_classes : int
+        The number of latent classes to initialize.
+    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
+        Configuration containing the JAX PRNG seed for reproducible partitioning.
+    mle_config : :class:`~lcl._struct.MleConfig`
+        Optimization settings for the subset-level L-BFGS routines.
+    numeraire_idx : int | None, optional
+        Column index of the numeraire variable, if applicable.
+
+    Returns
+    -------
+    :class:`~lcl._struct.EMVars`
+        Container holding the initialized taste parameters, uniform starting shares,
+        and first-pass posterior class probabilities.
+    """
     diff_unchosen_chosen_by_class = _random_class_partition(
         diff_unchosen_chosen, data, num_classes, em_alg_config
     )
@@ -62,7 +89,29 @@ def _random_class_partition(
     num_classes: int,
     em_alg_config: EMAlgConfig,
 ) -> list[DiffUnchosenChosen]:
-    """Randomly divide panels into classes."""
+    """Randomly partition decision-makers to initialize class-specific parameters.
+
+    Ensures that all choice situations belonging to a specific decision-maker (panel)
+    are kept together within the same random subset to preserve panel structure
+    during the initial subset MLE optimizations.
+
+    Parameters
+    ----------
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        The complete differenced design matrix.
+    data : :class:`~lcl._struct.Data`
+        The core estimation data and metadata.
+    num_classes : int
+        The number of mutually exclusive subsets to generate.
+    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
+        Configuration containing the PRNG seed for reproducibility.
+
+    Returns
+    -------
+    list[:class:`~lcl._struct.DiffUnchosenChosen`]
+        A list of length `num_classes`, where each element is a valid, independent
+        differenced design matrix subset ready for conditional logit estimation.
+    """
     assert data.panels is not None and data.num_panels is not None
     panels_unique = onp.unique(data.panels)
     num_panels_per_class = -(data.num_panels // -num_classes)  # Ceiling division
