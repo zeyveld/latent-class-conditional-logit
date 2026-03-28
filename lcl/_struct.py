@@ -10,7 +10,38 @@ from jaxtyping import Bool, Float64, UInt
 
 
 class Data(NamedTuple):
-    """Container for choice data used by ConditionalLogit and LCL classes"""
+    """Container for choice data used by the estimation engine.
+
+    This immutable struct houses the primary design matrices and metadata required
+    to evaluate conditional logit likelihoods across choice situations and decision-makers.
+
+    Attributes
+    ----------
+    X : Float64[Array, "alts_by_case alt_vars"]
+        The design matrix of alternative-specific characteristics (features) in long format.
+    dems : Float64[Array, "panels dem_vars"] | None
+        The matrix of decision-maker (panel) demographic characteristics.
+    y : Bool[Array, "alts_by_case"] | None
+        Boolean array indicating the chosen alternatives.
+    alts : UInt[Array, "alts_by_case"]
+        Vector of alternative IDs corresponding to each row in the design matrix.
+    cases : UInt[Array, "alts_by_case"]
+        Vector grouping rows into distinct choice situations (cases).
+    panels : UInt[Array, "alts_by_case"] | None
+        Vector mapping rows to specific decision-makers (panels).
+    panels_of_cases : UInt[Array, "cases"] | None
+        Vector mapping each choice situation (case) to its respective decision-maker.
+    num_cases_per_panel : UInt[Array, "panels"] | None
+        Vector containing the count of choice situations observed per decision-maker.
+    num_cases : int
+        Total number of choice situations observed.
+    num_alt_vars : int
+        Number of alternative-specific characteristics (taste parameters).
+    num_panels : int | None
+        Total number of unique decision-makers.
+    num_dem_vars : int
+        Number of demographic variables.
+    """
 
     X: Float64[Array, "alts_by_case alt_vars"]
     dems: Float64[Array, "panels dem_vars"] | None
@@ -27,7 +58,25 @@ class Data(NamedTuple):
 
 
 class DiffUnchosenChosen(NamedTuple):
-    """Container for"""
+    """Container for the differenced design matrix.
+
+    To efficiently compute the log-likelihood, the characteristics of the chosen
+    alternative are subtracted from the characteristics of the unchosen alternatives
+    within each choice situation.
+
+    Attributes
+    ----------
+    X : Float64[Array, "unchosen_alts_by_case alt_vars"]
+        Differenced design matrix: :math:`X_{ij} - X_{iy_i}`.
+    alts : UInt[Array, "unchosen_alts_by_case"]
+        Alternative IDs for the unchosen alternatives.
+    cases : UInt[Array, "unchosen_alts_by_case"]
+        Choice situation IDs for the unchosen alternatives.
+    panels : UInt[Array, "unchosen_alts_by_case"] | None
+        Decision-maker IDs for the unchosen alternatives.
+    num_cases : int
+        Total number of choice situations.
+    """
 
     X: Float64[Array, "unchosen_alts_by_case alt_vars"]
     alts: UInt[Array, "unchosen_alts_by_case"]
@@ -38,7 +87,7 @@ class DiffUnchosenChosen(NamedTuple):
 
 @dataclass
 class MleConfig:
-    """Container for MLE optimization options."""
+    """Container for Maximum Likelihood Estimation (MLE) optimization options."""
 
     maxiter: int = 75
     ftol: float = 1e-5
@@ -46,7 +95,7 @@ class MleConfig:
 
 @dataclass  # (frozen=True)
 class EMAlgConfig:
-    """Container for EM algorithm options."""
+    """Container for Expectation-Maximization (EM) algorithm options."""
 
     jax_prng_seed: int = 0
     loglik_tol: float = 1e-6
@@ -55,7 +104,7 @@ class EMAlgConfig:
 
 @dataclass  # (frozen=True)
 class ErrorConfig:
-    """Container for standard error options."""
+    """Container for standard error and covariance matrix options."""
 
     robust: bool = True
     skip_std_errs: bool = False
@@ -69,7 +118,6 @@ class OptimizeResult:
         Matt Haberland, Tyler Reddy, David Cournapeau, Evgeni Burovski et al.
         "SciPy 1.0: fundamental algorithms for scientific computing in Python."
         Nature methods 17, no. 3 (2020): 261-272.
-
     """
 
     success: bool
@@ -85,7 +133,24 @@ class OptimizeResult:
 
 
 class EMVars(NamedTuple):
-    """Container for variables updated by EM algorithm."""
+    """Container for parameters iteratively updated by the EM algorithm.
+
+    Attributes
+    ----------
+    latent_betas : Float64[Array, "alt_vars classes"] | None
+        Unconstrained taste parameters optimized by the MLE solver.
+    structural_betas : Float64[Array, "alt_vars classes"] | None
+        Structural taste parameters (e.g., enforcing sign constraints on the numeraire).
+    thetas : Float64[Array, "dem_vars+1 classes-1"] | None
+        Coefficients relating demographic variables to latent class membership.
+    shares : Float64[Array, "classes"] | None
+        Aggregate unconditional class shares (used when demographics are absent).
+    unconditional_loglik : Float64[Array, ""]
+        Scalar unconditional log-likelihood for the current EM step.
+    class_probs_by_panel : Float64[Array, "panels classes"] | None
+        Posterior probabilities of class membership for each decision-maker, conditional
+        on their observed choice sequence.
+    """
 
     latent_betas: Float64[Array, "alt_vars classes"] | None
     structural_betas: Float64[Array, "alt_vars classes"] | None
@@ -99,11 +164,10 @@ class EMVars(NamedTuple):
 
 @dataclass
 class PastChoicesData:
-    """
-    Container for a panel's past choices.
+    """Container for a decision-maker's historical choices.
 
     Pass to predict() to update conditional class membership probabilities
-    for out-of-sample prediction.
+    using Bayesian updating for out-of-sample counterfactual prediction.
     """
 
     X: ArrayLike

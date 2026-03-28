@@ -21,60 +21,32 @@ def _em_alg(
     mle_config: MleConfig,
     numeraire_idx: int | None = None,
 ) -> EMVars:
-    """Run EM algorithm, which proceeds as follows:
-        1. Update conditional class membership probabilities associated with each panel
-        2. Update class coefficients
-        3. Update aggregate class shares
+    """Execute a single step of the Expectation-Maximization (EM) algorithm.
+
+    The step proceeds iteratively:
+    1. (E-Step) Update conditional class membership probabilities for each decision-maker.
+    2. (M-Step 1) Update taste coefficients for each latent class via MLE.
+    3. (M-Step 2) Update aggregate class shares or demographic regression coefficients.
 
     Parameters
     ----------
-    betas : array
-        (K, C) matrix of coefficients associated with each latent class.
-    shares : array
-        (C,) vector of class shares.
-    Xd : array
-        (N, K) tensor of differences in explanatory variables between unchosen and
-        chosen alternatives.
-    cases : array
-        (N,) vector of choice situation cases.
-    panels_of_cases : array
-        (Nc,) vector of consumer cases, one per choice situation.
-    num_alt_vars : int
-        Number of explanatory variables
-    num_classes: int
-        Number of latent classes
-    num_cases : int
-        Number of choices observed.
-    num_panels : int
-        Number of consumers in data.
-    dems : array, optional
-        (Np, D) matrix of panel demographic characteristics.
-    thetas : array, optional
-        (D, C) matrix of coefficients relating demographic variables to
-        membership in specific latent classes.
-    _grouped_data_loglik_fn : fun, optional
-        Function that computes log-likelihood given class membership coefficients
-        and explanatory variables.
-    _class_membership_probs_fn : fun, optional
-        Function that computes class membership probabilities given class membership
-        coefficients and explanatory variables.
+    em_vars : :class:`~lcl._struct.EMVars`
+        Container holding the current state of betas, thetas, and class shares.
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix.
+    data : :class:`~lcl._struct.Data`
+        Core choice data and metadata.
+    num_classes : int
+        Number of latent classes.
+    mle_config : :class:`~lcl._struct.MleConfig`
+        Optimization settings for the MLE solver (L-BFGS).
+    numeraire_idx : int | None, optional
+        Column index of the numeraire variable.
 
     Returns
     -------
-    updated_betas : array
-        (K, C) matrix of coefficients associated with each latent class.
-    updated_thetas : array, optional
-        (D, C) matrix of coefficients relating demographic variables to
-        membership in specific latent classes. Only returned if demographic
-        variables are provided.
-    updated_shares : array, optional
-        (C,) vector of class shares.
-    _unconditional_loglik : float
-        Unconditional log-likelihood of parameters.
-    updated_class_probs_by_panel : array
-        (Np, C) array of conditional class membership probabilities, given observed
-        choices and demographics.
-
+    :class:`~lcl._struct.EMVars`
+        Updated parameter state following the complete EM recursion.
     """
 
     # 1. Compute conditional class membership probabilities given choices and demographics
@@ -156,45 +128,31 @@ def _compute_conditional_class_probs(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
 ) -> tuple[Float64[Array, "panels classes"], Float64[Array, "cases classes"]]:
-    """Update conditional class membership probabilities of all classes.
+    """Compute posterior probabilities of class membership for each decision-maker.
+
+    Uses Bayesian updating to weight the unconditional prior probabilities (either
+    fixed shares or demographic predictions) by the likelihood of observing the
+    decision-maker's actual choice sequence.
 
     Parameters
     ----------
-    betas : array
-        (K, C) matrix of coefficients associated with each latent class.
-    Xd : array
-        (N, K) tensor of differences in explanatory variables between unchosen and
-        chosen alternatives.
-    cases : array
-        (N,) vector of choice situation cases.
-    panels_of_cases : array
-        (Nc,) vector of consumer cases, one per choice situation.
-    num_cases_per_panel : array
-        (Np,) vector with each panel's number of observed choices.
-    num_cases : int
-        Number of choices observed.
-    num_panels : int
-        Number of consumers in data.
-    num_classes: int
-        Number of latent classes.
-    thetas : array, optional
-        (D, C) matrix of coefficients relating demographic variables to
-        membership in specific latent classes.
-    dems : array, optional
-        (Np, D) matrix of demographic variables.
-    _class_membership_probs_fn : fun, optional
-        Function that computes predicted probabilities of class membership
-        based on demographics
-    shares : array, optional
-        (C,) vector of class shares.
+    structural_betas : Float64[Array, "alt_vars classes"]
+        Taste parameters for each latent class.
+    thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"] | None
+        Coefficients for the fractional response regression on demographics.
+    shares : Float64[Array, "classes"]
+        Aggregate unconditional class shares.
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix.
+    data : :class:`~lcl._struct.Data`
+        Core choice data and metadata.
 
     Returns
     -------
-    updated_class_probs_by_panel : array
-        (Np, C) matrix of conditional class membership probabilities for each panel.
-    updated_class_probs_by_choice : array
-        (N, C) matrix of conditional class membership probabilities for each choice situation.
-
+    updated_class_probs_by_panel : Float64[Array, "panels classes"]
+        Matrix of posterior class probabilities assigned to each decision-maker.
+    updated_class_probs_by_choice : Float64[Array, "cases classes"]
+        Matrix of posterior class probabilities expanded to each choice situation.
     """
     kernels = _compute_kernels(structural_betas, diff_unchosen_chosen, data)
     if thetas is None:
@@ -202,7 +160,6 @@ def _compute_conditional_class_probs(
 
     else:
         class_probs_given_dems, *_ = _predict_class_membership_probs(thetas, data)
-        # _class_membership_probs_fn(thetas, dems)  # (Np, C)
         weighted_kernels = kernels * class_probs_given_dems  # (Np, C)
 
     # Remove zero kernels from floating point errors
@@ -233,31 +190,25 @@ def _update_betas(
     mle_config: MleConfig,
     numeraire_idx: int | None,
 ) -> Float64[Array, "alt_vars classes"]:
-    """Update the coefficients of each class (contained in a matrix)
+    """Optimize the taste parameters for all latent classes simultaneously via `jax.lax.map`.
 
     Parameters
     ----------
-    betas : array
-        (K, C) matrix of coefficients associated with each latent class.
-    Xd : array
-        (N, K) tensor of differences in explanatory variables between unchosen and
-        chosen alternatives.
-    class_probs_by_choice : array
-        (Np, C) matrix of conditional class membership probabilities for each panel.
-    cases : array
-        (N,) vector of choice situation cases.
-    num_alt_vars : int
-        Number of explanatory variables.
-    num_classes: int
-        Number of latent classes.
-    num_cases : int
-        Number of choices observed.
+    betas : Float64[Array, "alt_vars classes"]
+        Current unconstrained taste parameters.
+    class_probs_by_choice : Float64[Array, "cases classes"]
+        Posterior class membership probabilities to act as case weights.
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix.
+    mle_config : :class:`~lcl._struct.MleConfig`
+        MLE solver configurations.
+    numeraire_idx : int | None
+        Column index of the numeraire variable.
 
     Returns
     -------
-    updated_betas : array
-        (K, C) matrix of coefficients associated with each latent class.
-
+    Float64[Array, "alt_vars classes"]
+        Updated taste parameters optimized for the current EM step.
     """
 
     # Separate the PyTree into dynamic arrays and static metadata
@@ -316,33 +267,23 @@ def _compute_panel_logliks(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
 ) -> Float64[Array, "panels"]:
-    """Compute unconditional log-likelihood for each panel.
+    """Compute the unconditional log-likelihood contribution of each decision-maker.
 
     Parameters
     ----------
-    betas : array
-        (K, C) matrix of coefficients associated with each latent class.
-    unconditional_class_probs_by_panel : array
-        (Np, C) matrix of unconditional probabilities that each panel belongs to each
-        class. May depend on panels_of_cases' demographic characteristics, but does NOT directly
-        reflect their respective choices.
-    Xd : array
-        (N, K) tensor of differences in explanatory variables between unchosen and
-        chosen alternatives.
-    cases : array
-        (N,) vector of choice situation cases.
-    panels_of_cases : array
-        (Nc,) vector of consumer cases, one per choice situation.
-    num_cases : int
-        Number of choices observed.
-    num_panels : int
-        Number of consumers in data.
+    betas : Float64[Array, "alt_vars classes"]
+        Current taste parameters.
+    unconditional_class_probs_by_panel : Float64[Array, "panels classes"]
+        Prior probabilities of class membership (does not reflect their observed choices).
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix.
+    data : :class:`~lcl._struct.Data`
+        Core choice data and metadata.
 
     Returns
     -------
-    panel_logliks : array
-        Vector of panels' log-likelihood contributions.
-
+    Float64[Array, "panels"]
+        Vector of log-likelihood contributions per decision-maker.
     """
     kernels = _compute_kernels(betas, diff_unchosen_chosen, data)
     weighted_kernels = jnp.einsum(
@@ -358,7 +299,7 @@ def _compute_unconditional_loglik(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
 ) -> Float64[Array, ""]:
-    """Wrapper to compute scalar log-likelihood for EM alg convergence check."""
+    """Wrapper to aggregate panel log-likelihoods to a scalar for convergence checking."""
 
     # Call the array function and sum it to a scalar
     panel_logliks = _compute_panel_logliks(
@@ -373,29 +314,22 @@ def _compute_kernels(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
 ) -> Float64[Array, "panels classes"]:
-    """Compute conditional probabilities of observed choice sequences.
+    """Compute the probability of observing a decision-maker's entire sequence of choices.
 
     Parameters
     ----------
-    betas : array
-        (K, C) matrix of coefficients associated with each latent class.
-    Xd : array
-        (N, K) tensor of differences in explanatory variables between unchosen and
-        chosen alternatives.
-    cases : array
-        (N,) vector of choice situation cases.
-    panels_of_cases : array
-        (Nc,) vector of consumer cases, one per choice situation.
-    num_cases : int
-        Number of choices observed.
-    num_panels : int
-        Number of consumers in data.
+    betas : Float64[Array, "alt_vars classes"]
+        Taste parameters for each latent class.
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix.
+    data : :class:`~lcl._struct.Data`
+        Core choice data and metadata.
 
     Returns
     -------
-    kernels_by_class : array
-        (Np, C) matrix of logit kernels assocaited with each latent class.
-
+    Float64[Array, "panels classes"]
+        Matrix mapping the joint probability of each decision-maker's sequence
+        conditional on membership in each latent class.
     """
     Vd_by_class = jnp.einsum("nk,kc->nc", diff_unchosen_chosen.X, betas)
     eVd_by_class, Vd_by_class = jnp.exp(jnp.clip(Vd_by_class, a_max=700.0)), None
@@ -423,24 +357,21 @@ def _compute_kernels(
 def _compute_probs_and_exp_utility(
     latent_betas: Float64[Array, "alt_vars"], data: Data
 ) -> tuple[Float64[Array, "alts_by_case"], Float64[Array, "alts_by_case"]]:
-    """Compute conditional choice probabilities for an individual class.
+    """Compute conditional choice probabilities for an individual latent class.
 
     Parameters
     ----------
-    betas : array
-        (K, C) matrix of coefficients (which are transposed from their usual shape!)
-    cases : array
-        (N,) vector of choice situation cases.
-    num_cases : int
-        Number of choices observed.
+    latent_betas : Float64[Array, "alt_vars"]
+        Vector of taste parameters for a specific latent class.
+    data : :class:`~lcl._struct.Data`
+        Core choice data and metadata.
 
     Returns
     -------
-    probs : array
-        (N * J,) vector of conditional choice probabilities.
-    eV : array
-        Exponentiated representative utility.
-
+    probs : Float64[Array, "alts_by_case"]
+        Vector of conditional choice probabilities across all alternatives.
+    eV : Float64[Array, "alts_by_case"]
+        Exponentiated representative utility across all alternatives.
     """
     eV = jnp.exp(jnp.clip((data.X.dot(latent_betas.T)), a_max=700.0))
     probs = eV / segment_sum(eV, data.cases, num_segments=data.num_cases)[data.cases]

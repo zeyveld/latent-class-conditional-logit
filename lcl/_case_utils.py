@@ -18,25 +18,27 @@ def _loglik_gradient(
     tuple[Float64[Array, ""], Float64[Array, "cases alt_vars"]],
     Float64[Array, "alt_vars"],
 ]:
-    """Compute log-likelihood and (optionally) gradient and hessian.
+    """Compute the log-likelihood and analytic gradient for a conditional logit specification.
 
     Parameters
     ----------
-    betas
-        Vector of coefficients on alternative-specific variables.
-    weights
-        Vector of importance weights for each case in computing the likelihood,
-        gradient, and hessian.
-    case_data
-        Container for case-specific data. Must include the following:
-            * X: Matrix of characteristics for each alternative.
-            *
+    structural_betas : Float64[Array, "alt_vars"]
+        Vector of structural taste parameters corresponding to alternative characteristics.
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Struct containing the differenced design matrix :math:`X_{ij} - X_{iy_i}`.
+    weights : Float64[Array, "cases"]
+        Vector of importance weights (or class-assignment probabilities) for each
+        choice situation.
 
     Returns
     -------
-    grad_n
-        Vector of cases' contributions to the gradient. Used for conditional
-        logit standar errors.
+    objective_and_aux : tuple
+        A tuple containing:
+        * ``neg_loglik``: The scalar negative log-likelihood.
+        * ``grad_n``: A ``Float64[Array, "cases alt_vars"]`` matrix of case-level score
+          contributions utilized for robust sandwich covariance estimation.
+    grad : Float64[Array, "alt_vars"]
+        The analytic gradient of the negative log-likelihood with respect to ``structural_betas``.
     """
     # Compute representative utility and choice probabilities
     Vd: Float64[Array, "unchosen_alts_by_case"] = jnp.clip(
@@ -68,7 +70,23 @@ def _loglik_gradient(
 def _to_structural_betas(
     latent_betas: Float64[Array, "..."], numeraire_idx: int | None
 ) -> Float64[Array, "..."]:
-    """Transform latent optimization parameters into structural model parameters."""
+    """Transform unconstrained optimization parameters into structural parameters.
+
+    If a numeraire is specified (e.g., price or cost), its parameter is restricted
+    to be strictly positive via a softplus transformation.
+
+    Parameters
+    ----------
+    latent_betas : Float64[Array, "..."]
+        Unconstrained parameters managed by the L-BFGS solver.
+    numeraire_idx : int | None
+        The column index of the numeraire variable, if applicable.
+
+    Returns
+    -------
+    Float64[Array, "..."]
+        Structural parameters suitable for utility calculation.
+    """
     if numeraire_idx is not None:
         transformed_col = softplus(latent_betas[numeraire_idx]) + 1e-5
         return latent_betas.at[numeraire_idx].set(transformed_col)
@@ -76,14 +94,20 @@ def _to_structural_betas(
 
 
 def _diff_unchosen_chosen(case_data: Data) -> DiffUnchosenChosen:
-    """Compute differences between unchosen and chosen alternatives.
+    """Compute the differences between unchosen and chosen alternatives.
+
+    By transforming the design matrix to represent the difference from the chosen
+    alternative, we streamline the denominator of the logit probability computation.
 
     Parameters
     ----------
+    case_data : :class:`~lcl._struct.Data`
+        The core estimation data container.
 
     Returns
     -------
-
+    :class:`~lcl._struct.DiffUnchosenChosen`
+        Container holding the differenced design matrix and reduced dimensionality IDs.
     """
     assert isinstance(case_data.y, Array)
     _, num_unchosen_per_id = jnp.unique(

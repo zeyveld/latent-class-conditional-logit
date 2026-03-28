@@ -18,7 +18,36 @@ def _minimize(
     numeraire_idx: int | None = None,
     assert_converge=False,
 ) -> OptimizeResult:
-    """LBFGS optimization routine."""
+    """Execute the L-BFGS optimization routine for Maximum Likelihood Estimation.
+
+    Employs JAXopt's hardware-accelerated L-BFGS solver with zoom line-search.
+    Crucially, this function performs an internal scaling normalization to prevent
+    the optimizer from taking disastrously large initial steps that could push
+    latent variables into the zero-gradient region of the softplus transformation.
+
+    Parameters
+    ----------
+    loglik_fn : Callable
+        The objective function returning a tuple of `((neg_loglik, aux), gradient)`.
+    params : Array
+        Initial guess for the unconstrained parameters.
+    args : tuple
+        Tuple of static and dynamic arguments (e.g., design matrices, weights)
+        required by the objective function.
+    mle_config : :class:`~lcl._struct.MleConfig`, optional
+        Configuration holding tolerances and maximum iteration limits.
+    numeraire_idx : int | None, optional
+        Column index of the numeraire variable, if bounded to be strictly positive.
+    assert_converge : bool, default=False
+        If True, throws an AssertionError if the solver fails to reach the
+        specified tolerance.
+
+    Returns
+    -------
+    :class:`~lcl._struct.OptimizeResult`
+        Container holding the optimized parameters, the inverse Hessian, case-level
+        gradients, and solver diagnostics.
+    """
 
     dynamic_args, static_args = partition(args, is_array)
 

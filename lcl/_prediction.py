@@ -13,7 +13,26 @@ from lcl._struct import Data, PartitionType, WTPRequest
 
 
 class LCLPrediction:
-    """Container for out-of-sample predictions, consumer surplus, and WTP."""
+    """Container for counterfactual inference, consumer surplus, and willingness-to-pay (WTP).
+
+    Provides methods to analyze decision-maker behavior under new choice sets or
+    policy changes. Utilizes the Delta Method to compute rigorous standard errors
+    for non-linear combinations of parameters (e.g., marginal WTP).
+
+    Attributes
+    ----------
+    predicted_probs : pl.DataFrame
+        DataFrame of out-of-sample choice probabilities for each alternative.
+    surplus : pl.DataFrame
+        DataFrame of expected consumer surplus (inclusive value) per choice situation.
+    wtp_alt_vars_by_panel : pl.DataFrame
+        DataFrame of expected marginal WTP for each alternative-specific characteristic,
+        weighted by the decision-maker's posterior class membership probabilities.
+    predict_data : :class:`~lcl._struct.Data`
+        The parsed design matrices corresponding to the counterfactual scenarios.
+    results : :class:`~lcl._results.LCLResults`
+        Reference to the parent estimation results (required for Delta Method covariance).
+    """
 
     def __init__(
         self,
@@ -30,6 +49,18 @@ class LCLPrediction:
         self.results = results  # Link to the parent LCLResults instance
 
     def compute_wtp(self, *wtp_requests: WTPRequest | Iterable[WTPRequest]) -> None:
+        """Compute the Marginal Willingness-to-Pay (WTP) across demographic partitions.
+
+        Employs the Delta Method via JAX's forward/reverse-mode autodiff to calculate
+        analytical standard errors for the ratio of structural parameters
+        (:math:`\\beta_{target} / \\beta_{cost}`).
+
+        Parameters
+        ----------
+        *wtp_requests : :class:`~lcl._struct.WTPRequest`
+            One or more configuration objects specifying the target variable,
+            the demographic partitioning variable, and the binning strategy.
+        """
         if self.results.model.numeraire is None:
             raise ValueError("A numeraire must be defined to compute WTP.")
 
@@ -50,7 +81,7 @@ class LCLPrediction:
 
         df_with_idx = self.wtp_alt_vars_by_panel.join(panel_idx_map, on="panels")
 
-        # --- FIX: Reconstruct demographics DataFrame and join it ---
+        # Reconstruct demographics DataFrame and join it
         if (
             self.predict_data.dems is not None
             and self.results.model.dem_varnames is not None
@@ -61,14 +92,13 @@ class LCLPrediction:
             ).with_columns(pl.Series("panels", panel_ids_in_order, dtype=pl.UInt32))
 
             df_with_idx = df_with_idx.join(dems_df, on="panels")
-        # -----------------------------------------------------------
 
         cost_idx = self.results.model.case_varnames.index(self.results.model.numeraire)
 
         for req in _flatten(wtp_requests):
             # Dynamic binning via Polars
             demo_col = pl.col(req.demographic_var)
-            # ... [The rest of your code remains identical] ...
+
             if req.partition_type == PartitionType.CATEGORICAL:
                 group_expr = demo_col
             elif req.partition_type == PartitionType.QUINTILES:
@@ -120,6 +150,7 @@ class LCLPrediction:
         dems: Array | None,
         num_panels: int,
     ) -> Float64[Array, ""]:
+        """Internal objective function for Delta Method variance evaluation."""
         latent_betas, thetas = self.results._unpack_params(flat_params)
         class_probs = self.results._get_class_probs(thetas, dems, num_panels)
 

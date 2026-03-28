@@ -15,7 +15,11 @@ from lcl.utils import _as_array_or_none, _ensure_sequential
 
 
 class ChoiceModel(ABC):
-    """Base class for estimation of discrete choice models."""
+    """Base class for the specification and estimation of discrete choice models.
+
+    Provides core data validation, dimensionality reduction, and structural
+    preparation routines shared across cross-sectional and panel choice models.
+    """
 
     case_varnames: list[str]
     numeraire: str | None
@@ -40,6 +44,39 @@ class ChoiceModel(ABC):
         weights: ArrayLike | None = None,
         init_beta: ArrayLike | None = None,
     ) -> tuple[Data, Float64[Array, "cases"], Float64[Array, "alt_vars"]]:
+        """Validate and package raw arrays into the core estimation struct.
+
+        Ensures that cases and panels are contiguous and sequential, masks first
+        observations for differencing logic, and extracts observation counts.
+
+        Parameters
+        ----------
+        X : ArrayLike
+            ``(N, K)`` design matrix of alternative-specific characteristics in long format.
+        dems : ArrayLike | None
+            ``(Np, D)`` or ``(N, D)`` matrix of decision-maker demographic characteristics.
+        cases : ArrayLike
+            ``(N,)`` vector grouping rows into distinct choice situations.
+        alts : ArrayLike
+            ``(N,)`` vector of alternative identifiers.
+        y : ArrayLike | None
+            ``(N,)`` boolean vector indicating the chosen alternatives.
+        panels : ArrayLike | None
+            ``(N,)`` vector mapping observations to specific decision-makers.
+        weights : ArrayLike | None, optional
+            ``(Nc,)`` vector of choice situation importance weights.
+        init_beta : ArrayLike | None, optional
+            ``(K,)`` vector of initial taste parameters for the optimization routine.
+
+        Returns
+        -------
+        data : :class:`~lcl._struct.Data`
+            Immutable container holding the validated design matrices and metadata.
+        weights : Float64[Array, "cases"]
+            Vector of importance weights per choice situation.
+        init_beta : Float64[Array, "alt_vars"]
+            Vector of starting values for the structural parameters.
+        """
         # Convert args to arrays (when provided)
 
         X, dems, weights = tree.map(
@@ -144,7 +181,11 @@ class ChoiceModel(ABC):
         num_panels: int | None,
         num_cases: int,
     ) -> tuple[Float64[Array, "panels dem_vars"] | None, int]:
-        """Squeeze demographic variables to have one observation per panel."""
+        """Reduce demographic design matrix to a strict panel-level dimensionality.
+
+        Essential for the fractional response regression step, which models latent class
+        membership at the decision-maker level rather than the choice-situation level.
+        """
         if dems is None:
             return None, 0
 
@@ -172,7 +213,7 @@ class ChoiceModel(ABC):
     def _count_choices_per_panel(
         panels: UInt[Array, "alts_by_case"] | None, cases: UInt[Array, "alts_by_case"]
     ) -> tuple[UInt[Array, "panels"] | None, int | None]:
-        """Count the number of choices observed for each panel."""
+        """Determine the sequence length (number of choice situations) per decision-maker."""
         if panels is None:
             return None, None
 

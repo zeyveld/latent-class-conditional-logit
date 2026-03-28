@@ -6,16 +6,21 @@ from typing import Sequence
 
 from jax.typing import ArrayLike
 
-from lcl._case_utils import _diff_unchosen_chosen, _to_structural_betas
+from lcl._case_utils import _diff_unchosen_chosen
 from lcl._choice_model import ChoiceModel
 from lcl._em_alg_startup import _get_starting_vals
-from lcl._em_alg_steps import _em_alg, _update_betas
+from lcl._em_alg_steps import _em_alg
 from lcl._results import LCLResults
 from lcl._struct import EMAlgConfig, MleConfig
 
 
 class LatentClassConditionalLogit(ChoiceModel):
-    """Specification and estimation for latent-class conditional logit models."""
+    """Specification and estimation for latent-class conditional logit models.
+
+    This model accommodates unobserved heterogeneity by probabilistically assigning
+    decision-makers to one of ``C`` latent classes, each characterized by a distinct
+    vector of structural taste parameters.
+    """
 
     def __init__(
         self,
@@ -41,7 +46,39 @@ class LatentClassConditionalLogit(ChoiceModel):
         em_alg_config: EMAlgConfig = EMAlgConfig(),
         mle_config: MleConfig = MleConfig(),
     ) -> LCLResults:
-        """Fit the latent-class conditional logit model."""
+        """Fit the latent-class conditional logit model using the EM algorithm.
+
+        Parameters
+        ----------
+        X : ArrayLike
+            ``(N, K)`` design matrix of alternative-specific characteristics in long format.
+        y : ArrayLike
+            ``(N,)`` boolean array indicating chosen alternatives.
+        case_varnames : Sequence[str]
+            List of variable names corresponding to the columns of ``X``.
+        alts : ArrayLike
+            ``(N,)`` array of alternative identifiers.
+        cases : ArrayLike
+            ``(N,)`` array grouping observations into distinct choice situations.
+        panels : ArrayLike
+            ``(N,)`` array mapping observations to specific decision-makers. Required
+            to correctly model repeated choice sequences.
+        dems : ArrayLike, optional
+            ``(Np, D)`` matrix of decision-maker demographic variables. Used to model
+            latent class membership probabilities via fractional response regression.
+        dem_varnames : Sequence[str], optional
+            List of variable names corresponding to the columns of ``dems``.
+        em_alg_config : :class:`~lcl._struct.EMAlgConfig`, optional
+            Configuration for the Expectation-Maximization algorithm loop.
+        mle_config : :class:`~lcl._struct.MleConfig`, optional
+            Configuration for the inner L-BFGS optimization routines.
+
+        Returns
+        -------
+        :class:`~lcl._results.LCLResults`
+            Post-estimation results container housing parameters, standard errors,
+            information criteria, and out-of-sample prediction utilities.
+        """
 
         self._pre_fit(case_varnames, dem_varnames, self.numeraire)
         self.num_vars = len(case_varnames)

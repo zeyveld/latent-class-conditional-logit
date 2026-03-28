@@ -28,7 +28,11 @@ with install_import_hook("lcl", "beartype.beartype"):
 
 
 class ConditionalLogit(ChoiceModel):
-    """Specification and estimation for standard Conditional Logit models."""
+    """Specification and estimation for standard Multinomial Conditional Logit models.
+
+    Unlike the Latent Class variant, this model estimates a single vector of
+    homogenous taste parameters across the entire sample.
+    """
 
     def __init__(
         self, numeraire: str | None = None, numeraire_idx: int | None = None
@@ -50,7 +54,37 @@ class ConditionalLogit(ChoiceModel):
         mle_config: MleConfig = MleConfig(),
         error_config: ErrorConfig = ErrorConfig(),
     ) -> "CLResults":
-        """Fit the conditional logit model and return results container."""
+        """Fit the conditional logit model via Maximum Likelihood Estimation.
+
+        Parameters
+        ----------
+        X : ArrayLike
+            ``(N, K)`` design matrix of alternative-specific characteristics in long format.
+        y : ArrayLike
+            ``(N,)`` boolean array indicating chosen alternatives.
+        case_varnames : Sequence[str]
+            List of variable names corresponding to the columns of ``X``.
+        alts : ArrayLike
+            ``(N,)`` array of alternative identifiers.
+        cases : ArrayLike
+            ``(N,)`` array grouping observations into distinct choice situations.
+        panels : ArrayLike | None, optional
+            ``(N,)`` array mapping observations to specific decision-makers. If provided,
+            the covariance matrix is automatically clustered at the panel level.
+        weights : ArrayLike | None, optional
+            ``(Nc,)`` vector of choice situation importance weights.
+        init_beta : ArrayLike | None, optional
+            ``(K,)`` vector of initial taste parameters.
+        mle_config : :class:`~lcl._struct.MleConfig`, optional
+            Configuration for the L-BFGS optimization routine.
+        error_config : :class:`~lcl._struct.ErrorConfig`, optional
+            Configuration determining the robust covariance estimation strategy.
+
+        Returns
+        -------
+        :class:`~lcl.conditional_logit.CLResults`
+            Results container housing coefficients, robust standard errors, and fit statistics.
+        """
 
         self._pre_fit(case_varnames, None, self.numeraire)
         self.num_vars = len(case_varnames)
@@ -126,7 +160,11 @@ class ConditionalLogit(ChoiceModel):
 
 
 class CLResults:
-    """Post-estimation results and inference container for Conditional Logit."""
+    """Post-estimation results and inference container for Conditional Logit.
+
+    Automatically handles the derivation of standard errors via the Delta Method
+    if a softplus-constrained numeraire is specified in the model specification.
+    """
 
     def __init__(
         self,
@@ -198,7 +236,7 @@ class CLResults:
         header: tuple[str, str, str] = ("Variable", "Estimate", "Std. Error"),
         num_decimals: int = 3,
     ) -> None:
-        """Print LaTeX and plain-text tables mirroring the LCLResults format."""
+        """Print LaTeX and plain-text tables summarizing parameter estimates and standard errors."""
         body_rows, data_clean = [], []
         converter = LatexNodes2Text(math_mode="text")
         header_clean = [converter.latex_to_text(col) for col in header]
@@ -242,7 +280,28 @@ class CLResults:
         panels: ArrayLike | None = None,
         weights: ArrayLike | None = None,
     ) -> pl.DataFrame:
-        """Predict conditional choice probabilities."""
+        """Predict conditional choice probabilities for a given set of alternatives.
+
+        Parameters
+        ----------
+        X : ArrayLike
+            ``(N, K)`` counterfactual design matrix.
+        case_varnames : Sequence[str]
+            Must strictly match the specification stored in `self.model.case_varnames`.
+        alts : ArrayLike
+            ``(N,)`` vector of alternative IDs.
+        cases : ArrayLike
+            ``(N,)`` vector of choice situation IDs.
+        panels : ArrayLike | None, optional
+            ``(N,)`` vector mapping observations to specific decision-makers.
+        weights : ArrayLike | None, optional
+            ``(Nc,)`` vector of importance weights.
+
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame containing the computed out-of-sample choice probabilities.
+        """
         data, *_ = self.model._setup_data(
             X=X,
             dems=None,

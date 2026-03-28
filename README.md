@@ -60,7 +60,6 @@ print(results.summary())
 LCL is under active development. Although the core estimation engine is functional, we are actively working on expanding the package's accessibility and feature set. Upcoming milestones include:
 
 * **Comprehensive Documentation:** We are currently building a dedicated documentation website (probably using Sphinx/MkDocs) to host detailed tutorials, mathematical appendices, and full API references.
-* **Expanded Internal Docstrings:** The codebase will soon feature exhaustive, type-hinted docstrings for all exposed classes and JAX functions to aid local development.
 * **Companion Paper:** A scholarly working paper detailing the econometric framework, hardware benchmarking, and Monte Carlo simulations is currently in preparation. 
 
 **Feature Requests:** If there are specific constraints, optimization routines, or post-estimation tools you would like to see, please feel free to open a [Feature Request on our GitHub Issues page](https://github.com/your-username/latent-class-conditional-logit/issues)!

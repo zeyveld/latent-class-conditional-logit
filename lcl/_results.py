@@ -23,7 +23,23 @@ from lcl._struct import Data, EMVars, PastChoicesData
 
 
 class LCLResults:
-    """Post-estimation results and inference container."""
+    """Post-estimation results and inference container.
+
+    Computes robust sandwich covariance matrices (clustered at the decision-maker level)
+    and handles the extraction of population-level moments via the Delta Method.
+
+    Attributes
+    ----------
+    cov_matrix : Float64[Array, "all_params all_params"]
+        Robust cluster-adjusted covariance matrix, strictly aligned with the Stata
+        finite-sample correction multiplier :math:`(G / (G - 1))`.
+    caic : float
+        Consistent Akaike Information Criterion (Bozdogan, 1987).
+    bic : float
+        Bayesian Information Criterion (Schwarz, 1978).
+    adjusted_bic : float
+        Sample-size adjusted BIC (Sclove, 1987).
+    """
 
     def __init__(
         self,
@@ -130,6 +146,7 @@ class LCLResults:
         )
 
     def _pack_params(self) -> Float64[Array, "all_params"]:
+        """Flatten structural parameters and class memberships for Hessian calculation."""
         latent_betas_flat = self.em_res.latent_betas.ravel()
         if self.em_res.thetas is not None:
             theta_flat = self.em_res.thetas.ravel()
@@ -144,6 +161,7 @@ class LCLResults:
         Float64[Array, "alt_vars classes"],
         Float64[Array, "dem_vars_plus_one classes_minus_one"],
     ]:
+        """Reconstruct parameter matrices from the flattened array."""
         num_beta_params = self.model.num_vars * self.model.num_classes
         latent_betas = flat_params[:num_beta_params].reshape(
             self.model.num_vars, self.model.num_classes
@@ -165,6 +183,7 @@ class LCLResults:
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
     ) -> Float64[Array, "panels classes"]:
+        """Extract unconditional class probabilities (via fractional response)."""
         if dems is not None:
             V = thetas[None, 0] + dems @ thetas[1:]
         else:
@@ -179,7 +198,7 @@ class LCLResults:
     def _panel_loglik_fn(
         self, flat_params, diff_unchosen_chosen, data
     ) -> Float64[Array, "panels"]:
-        """Compute the log-likelihood for each panel."""
+        """Compute the log-likelihood for each panel (used to build the Jacobian)."""
         latent_betas, thetas = self._unpack_params(flat_params)
         structural_betas = _to_structural_betas(latent_betas, self.model.numeraire_idx)
         class_probs = self._get_class_probs(thetas, data.dems, data.num_panels)
@@ -196,6 +215,7 @@ class LCLResults:
     def _apply_delta_method(
         self, func, flat_params: Float64[Array, "all_params"], *args, **kwargs
     ) -> tuple[Float64[Array, "..."], Float64[Array, "..."]]:
+        """Apply the Delta Method to derive standard errors for non-linear parameter functions."""
         target_func = Partial(func, *args, **kwargs)
         val = target_func(flat_params)
         jac = jacrev(target_func)(flat_params)
@@ -213,6 +233,7 @@ class LCLResults:
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
     ) -> Float64[Array, "alt_vars"]:
+        """Compute the expectation of the structural taste parameters across the population."""
         latent_betas, thetas = self._unpack_params(flat_params)
 
         class_probs = self._get_class_probs(thetas, dems, num_panels)
@@ -227,6 +248,7 @@ class LCLResults:
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
     ) -> Float64[Array, "alt_vars"]:
+        """Compute the population variance of the structural taste parameters."""
         latent_betas, thetas = self._unpack_params(flat_params)
         if self.model.numeraire:
             numeraire_idx = self.model.case_varnames.index(self.model.numeraire)
@@ -258,6 +280,7 @@ class LCLResults:
         ),
         num_decimals: int = 3,
     ) -> None:
+        """Output population-level moments with Delta Method standard errors to the console and LaTeX."""
         assert self.data.num_panels is not None
 
         means, se_means = self._apply_delta_method(
@@ -327,7 +350,32 @@ class LCLResults:
         dems: ArrayLike | None = None,
         past_choices: PastChoicesData | None = None,
     ) -> LCLPrediction:
-        """Generate out-of-sample predictions and surplus calculations."""
+        """Generate out-of-sample predictions and counterfactual inclusive values (consumer surplus).
+
+        If a decision-maker's historical choice sequence is provided via `past_choices`,
+        the model utilizes Bayesian updating to rigorously re-weight their conditional
+        class membership probabilities before generating predictions.
+
+        Parameters
+        ----------
+        X : ArrayLike
+            ``(N, K)`` counterfactual design matrix.
+        alts : ArrayLike
+            ``(N,)`` vector of alternative IDs.
+        cases : ArrayLike
+            ``(N,)`` vector of choice situation IDs.
+        panels : ArrayLike
+            ``(N,)`` vector mapping observations to specific decision-makers.
+        dems : ArrayLike | None, optional
+            ``(N, D)`` matrix of demographic variables.
+        past_choices : :class:`~lcl._struct.PastChoicesData` | None, optional
+            Container housing the decision-maker's observed choice history for Bayesian updating.
+
+        Returns
+        -------
+        :class:`~lcl._prediction.LCLPrediction`
+            Container housing probabilities, surplus, and WTP evaluators.
+        """
         data, *_ = self.model._setup_data(
             X=X,
             dems=dems,
