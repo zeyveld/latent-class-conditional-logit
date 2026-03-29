@@ -90,7 +90,7 @@ If you use LCL in your research or publications, please consider citing it:
 
 ```bibtex
 @software{lcl_2026,
-  author = {Zeyveld, Andrew and Jeffries, Anna},
+  author = {Jeffries, Anna and Zeyveld, Andrew},
   title = {LCL: Latent-Class Conditional Logit Estimation in Python},
   year = {2026},
   url = {https://github.com/your-username/latent-class-conditional-logit}
