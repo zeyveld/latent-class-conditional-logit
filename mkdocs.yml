@@ -39,13 +39,18 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.snippets
   - pymdownx.superfences
-  - pymdownx.math:
-      enable_dollar_delimiter: true
-      enable_block_math: true
   - admonition
   - pymdownx.details
+  - pymdownx.arithmatex:
+      generic: true
 
 nav:
   - Home: index.md
   - API Reference:
-    - Estimator: api/estimator.md
+    - Latent-Class Logit: api/latent_class.md
+    - Standard Conditional Logit: api/conditional_logit.md
+    - Model Selection (WIP): api/cross_validation.md
+
+extra_javascript:
+  - https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?version=4.8.0&features=es6
+  - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js
