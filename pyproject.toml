@@ -1,6 +1,6 @@
 [project]
 name = "lcl-choice"
-version = "0.1.1"
+version = "0.1.2"
 description = "A high-performance Python package for estimating latent-class conditional logit models."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -32,4 +32,9 @@ dev = [
     "mypy>=1.19.1",
     "pytest>=9.0.2",
     "ruff>=0.15.8",
+]
+docs = [
+    "mkdocs-autorefs>=1.4.4",
+    "mkdocs-material>=9.7.6",
+    "mkdocstrings[python]>=1.0.3",
 ]

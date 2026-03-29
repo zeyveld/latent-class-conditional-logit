@@ -82,7 +82,7 @@ uv run pytest tests/
 
 ## 🤝 Acknowledgments
 
-In addition to the developers behind **JAX**, **Polars**, **Beartype**, and **Jaxtyping**, we are especially grateful to the creators of the [xlogit](https://github.com/arteagac/xlogit/tree/master) package (Cristian Arteaga, JeeWoong Park, Prithvi Bhat Beeramoole, and Alexander Paz). Their highly efficient conditional logit logic profoundly influenced the architecture of this package.
+In addition to the developers behind **JAX**, **Polars**, **Beartype**, and **Jaxtyping**, we are especially grateful to the creators of the [xlogit](https://github.com/arteagac/xlogit/tree/master) package (Cristian Arteaga, JeeWoong Park, Prithvi Bhat Beeramoole, and Alexander Paz). Their highly efficient conditional logit logic profoundly influenced this package.
 
 ## 📝 Citation
 
