@@ -62,7 +62,7 @@ LCL is under active development. Although the core estimation engine is function
 * **Comprehensive Documentation:** We are currently building a dedicated documentation website (probably using Sphinx/MkDocs) to host detailed tutorials, mathematical appendices, and full API references.
 * **Companion Paper:** A scholarly working paper detailing the econometric framework, hardware benchmarking, and Monte Carlo simulations is currently in preparation. 
 
-**Feature Requests:** If there are specific constraints, optimization routines, or post-estimation tools you would like to see, please feel free to open a [Feature Request on our GitHub Issues page](https://github.com/your-username/latent-class-conditional-logit/issues)!
+**Feature Requests:** If there are specific constraints, optimization routines, or post-estimation tools you would like to see, please feel free to open a [Feature Request on our GitHub Issues page](https://github.com/zeyveld/latent-class-conditional-logit/issues)!
 
 ## 🛠️ Development & Contributing
 
@@ -70,7 +70,7 @@ We welcome contributions! LCL uses `uv` for modern, isolated dependency manageme
 
 ```bash
 # Clone the repository
-git clone https://github.com/your-username/latent-class-conditional-logit.git
+git clone https://github.com/zeyveld/latent-class-conditional-logit.git
 cd latent-class-conditional-logit
 
 # Sync the virtual environment and install dev dependencies
@@ -93,6 +93,6 @@ If you use LCL in your research or publications, please consider citing it:
   author = {Jeffries, Anna and Zeyveld, Andrew},
   title = {LCL: Latent-Class Conditional Logit Estimation in Python},
   year = {2026},
-  url = {https://github.com/your-username/latent-class-conditional-logit}
+  url = {https://github.com/zeyveld/latent-class-conditional-logit}
 }
 ```
