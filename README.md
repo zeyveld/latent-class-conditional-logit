@@ -59,7 +59,7 @@ print(results.summary())
 
 LCL is under active development. Although the core estimation engine is functional, we are actively working on expanding the package's accessibility and feature set. Upcoming milestones include:
 
-* **Model Selection:** How many latent classes should you estimate? We're working on a blocked cross-validation utility to allow your data to speak for themselves. 
+* **Model Selection:** How many latent classes genuinely reflect your data? We are developing a blocked cross-validation utility to let your data speak for themselves.
 * **Comprehensive Documentation:** Detailed tutorials and mathematical appendices are in the works.
 * **Companion Paper:** A scholarly working paper detailing the econometric framework, hardware benchmarking, and Monte Carlo simulations is currently in preparation. 
 
