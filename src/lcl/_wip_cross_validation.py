@@ -87,7 +87,8 @@ def cv_optimal_k(
 
     results = []
 
-    for k in range(1, k_max + 1):
+    # Start evaluating at K=2, since K=1 is just a standard conditional logit
+    for k in range(2, k_max + 1):
         print(f"Evaluating K = {k}...")
         fold_lls = []
 

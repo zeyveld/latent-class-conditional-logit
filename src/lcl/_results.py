@@ -85,7 +85,6 @@ class LCLResults:
         robust_cov = H_inv @ B @ H_inv
 
         # Finite-sample cluster correction (G / (G - 1))
-        # See Stata manual
         assert self.data.num_panels is not None
         G = self.data.num_panels
         self.cov_matrix = robust_cov * (G / (G - 1))
@@ -95,13 +94,9 @@ class LCLResults:
         if self.em_res.thetas is not None:
             num_theta_params = self.em_res.thetas.size
         else:
-            num_theta_params = (
-                self.model.num_classes - 1
-            )  # Only C-1 shares are identified
+            num_theta_params = self.model.num_classes - 1
 
         self.num_params = num_beta_params + num_theta_params
-
-        assert self.data.num_panels is not None
 
         # Compute information criteria
         self.caic = (
@@ -189,10 +184,8 @@ class LCLResults:
         else:
             V = jnp.repeat(thetas, num_panels, axis=0)
 
-        # Prepend a column of zeros for the reference class
         V_ref = jnp.zeros((num_panels, 1))
         V_full = jnp.concatenate([V_ref, V], axis=1)
-        # Softmax uses log-sum-exp trick to avoid numerical overflow
         return softmax(V_full, axis=1)
 
     def _panel_loglik_fn(
@@ -200,7 +193,9 @@ class LCLResults:
     ) -> Float64[Array, "panels"]:
         """Compute the log-likelihood for each panel (used to build the Jacobian)."""
         latent_betas, thetas = self._unpack_params(flat_params)
-        structural_betas = _to_structural_betas(latent_betas, self.model.numeraire_idx)
+        structural_betas = _to_structural_betas(
+            latent_betas, getattr(self.model, "numeraire_idx", None)
+        )
         class_probs = self._get_class_probs(thetas, data.dems, data.num_panels)
         return _compute_panel_logliks(
             structural_betas, class_probs, diff_unchosen_chosen, data
@@ -239,7 +234,9 @@ class LCLResults:
         class_probs = self._get_class_probs(thetas, dems, num_panels)
         avg_shares = jnp.mean(class_probs, axis=0)
 
-        structural_betas = _to_structural_betas(latent_betas, self.model.numeraire_idx)
+        structural_betas = _to_structural_betas(
+            latent_betas, getattr(self.model, "numeraire_idx", None)
+        )
         return structural_betas @ avg_shares
 
     def _calc_population_std_betas(
@@ -250,19 +247,12 @@ class LCLResults:
     ) -> Float64[Array, "alt_vars"]:
         """Compute the population variance of the structural taste parameters."""
         latent_betas, thetas = self._unpack_params(flat_params)
-        if self.model.numeraire:
-            numeraire_idx = self.model.case_varnames.index(self.model.numeraire)
-        else:
-            numeraire_idx = None
+
+        numeraire_idx = getattr(self.model, "numeraire_idx", None)
 
         class_probs = self._get_class_probs(thetas, dems, num_panels)
         avg_shares = jnp.mean(class_probs, axis=0)
 
-        # Get structural betas
-        if self.model.numeraire:
-            numeraire_idx = self.model.case_varnames.index(self.model.numeraire)
-        else:
-            numeraire_idx = None
         structural_betas = _to_structural_betas(latent_betas, numeraire_idx)
 
         mean_betas = structural_betas @ avg_shares
@@ -309,7 +299,6 @@ class LCLResults:
             )
             var_clean = converter.latex_to_text(coeff_nm)
             data_clean.append(
-                # (var_clean, float(means[coeff_idx]), float(stds[coeff_idx]))
                 (
                     var_clean,
                     f"{means[coeff_idx]:.{num_decimals}f}",
@@ -341,133 +330,138 @@ class LCLResults:
             )
         )
 
+    def predict(
+        self,
+        X: ArrayLike,
+        alts: ArrayLike,
+        cases: ArrayLike,
+        panels: ArrayLike,
+        dems: ArrayLike | None = None,
+        past_choices: PastChoicesData | None = None,
+    ) -> LCLPrediction:
+        """Generate out-of-sample predictions and counterfactual inclusive values (consumer surplus)."""
 
-def predict(
-    self,
-    X: ArrayLike,
-    alts: ArrayLike,
-    cases: ArrayLike,
-    panels: ArrayLike,
-    dems: ArrayLike | None = None,
-    past_choices: PastChoicesData | None = None,
-) -> LCLPrediction:
-    """Generate out-of-sample predictions and counterfactual inclusive values (consumer surplus)."""
-    parsed_predict = ParsedData(
-        X=X,
-        dems=dems,
-        y=None,
-        cases=cases,
-        panels=panels,
-        alts=alts,
-        case_varnames=self.model.case_varnames,
-        dem_varnames=self.model.dem_varnames,
-    )
-    data, *_ = self.model._setup_data(parsed_predict)
-
-    if past_choices is not None:
-        data_past, *_ = self.model._setup_data(
-            X=past_choices.X,
-            dems=past_choices.dems,
-            y=past_choices.y,
-            cases=past_choices.cases,
-            panels=past_choices.panels,
-            alts=past_choices.alts,
+        parsed_predict = ParsedData(
+            X=X,
+            dems=dems,
+            y=None,
+            cases=cases,
+            panels=panels,
+            alts=alts,
+            case_varnames=self.model.case_varnames,
+            dem_varnames=self.model.dem_varnames,
         )
-        diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
-        class_probs_by_panel, _ = _compute_conditional_class_probs(
-            structural_betas=self.em_res.structural_betas,
-            thetas=self.em_res.thetas,
-            shares=self.em_res.shares,
-            diff_unchosen_chosen=diff_unchosen_chosen_past,
-            data=data_past,
+        data, *_ = self.model._setup_data(parsed_predict)
+
+        if past_choices is not None:
+            parsed_past = ParsedData(
+                X=past_choices.X,
+                dems=past_choices.dems,
+                y=past_choices.y,
+                cases=past_choices.cases,
+                panels=past_choices.panels,
+                alts=past_choices.alts,
+                case_varnames=self.model.case_varnames,
+                dem_varnames=self.model.dem_varnames,
+            )
+            data_past, *_ = self.model._setup_data(parsed_past)
+            diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
+            class_probs_by_panel, _ = _compute_conditional_class_probs(
+                structural_betas=self.em_res.structural_betas,
+                thetas=self.em_res.thetas,
+                shares=self.em_res.shares,
+                diff_unchosen_chosen=diff_unchosen_chosen_past,
+                data=data_past,
+            )
+        else:
+            assert data.num_panels is not None
+            class_probs_by_panel = jnp.repeat(
+                self.em_res.shares[None, :], data.num_panels, axis=0
+            )
+
+        choice_probs_by_class, exp_utility_by_class = lax.map(
+            lambda _beta: _compute_probs_and_exp_utility(_beta, data=data),
+            self.em_res.structural_betas.T,
         )
-    else:
-        assert data.num_panels is not None
-        class_probs_by_panel = jnp.repeat(
-            self.em_res.shares[None, :], data.num_panels, axis=0
+
+        conditional_choice_probs = (
+            class_probs_by_panel[panels] * choice_probs_by_class.T
+        )
+        sum_exp_utility = segment_sum(
+            exp_utility_by_class.T, cases, num_segments=data.num_cases
+        )
+        log_sum_exp_utility = jnp.log(jnp.clip(sum_exp_utility, a_min=1e-250))
+
+        # Ensure alpha (marginal utility of income) is correctly signed
+        numeraire_idx = getattr(self.model, "numeraire_idx", None)
+        if numeraire_idx is None:
+            marginal_utility_income = jnp.ones(self.model.num_classes)
+        else:
+            marginal_utility_income = -self.em_res.structural_betas[numeraire_idx, :]
+
+        surplus_by_class = (
+            log_sum_exp_utility / marginal_utility_income[None, :]
+        ).squeeze()
+
+        if numeraire_idx is not None:
+            betas_sans_numeraire = jnp.delete(
+                self.em_res.structural_betas, numeraire_idx, axis=0
+            )
+            wtp_alt_vars_by_class = betas_sans_numeraire / marginal_utility_income
+            wtp_alt_vars_by_panel = class_probs_by_panel @ wtp_alt_vars_by_class.T
+            schema = [
+                var for var in self.model.case_varnames if var != self.model.numeraire
+            ]
+        else:
+            wtp_alt_vars_by_panel = jnp.empty((data.num_panels, 0))
+            schema = []
+
+        panels_unique = onp.array(panels[panels != jnp.roll(panels, shift=1)])
+        wtp_alt_vars_by_panel_df = pl.DataFrame(
+            onp.array(wtp_alt_vars_by_panel), schema=schema
+        ).with_columns(pl.Series("panels", panels_unique, dtype=pl.UInt32))
+
+        assert data.num_cases_per_panel is not None
+        conditional_surplus = jnp.einsum(
+            "np,np->n",
+            jnp.repeat(class_probs_by_panel, data.num_cases_per_panel, axis=0),
+            surplus_by_class,
         )
 
-    choice_probs_by_class, exp_utility_by_class = lax.map(
-        lambda _beta: _compute_probs_and_exp_utility(_beta, data=data),
-        self.em_res.structural_betas.T,
-    )
-
-    sum_exp_utility = segment_sum(
-        exp_utility_by_class.T, cases, num_segments=data.num_cases
-    )
-    log_sum_exp_utility = jnp.log(jnp.clip(sum_exp_utility, a_min=1e-250))
-
-    if self.model.numeraire_idx is None:
-        marginal_utility_income = jnp.ones(self.model.num_classes)
-    else:
-        # We forced the structural cost parameter to be negative,
-        # so alpha (MU_income) is its negative.
-        marginal_utility_income = -self.em_res.structural_betas[
-            self.model.numeraire_idx, :
-        ]
-
-    surplus_by_class = (
-        log_sum_exp_utility / marginal_utility_income[None, :]
-    ).squeeze()
-
-    if self.model.numeraire_idx is not None:
-        betas_sans_numeraire = jnp.delete(
-            self.em_res.structural_betas, self.model.numeraire_idx, axis=0
+        unconditional_choice_probs = jnp.sum(
+            class_probs_by_panel[panels] * choice_probs_by_class.T, axis=1
         )
-        # WTP = beta / alpha
-        wtp_alt_vars_by_class = betas_sans_numeraire / marginal_utility_income
-        wtp_alt_vars_by_panel = class_probs_by_panel @ wtp_alt_vars_by_class.T
-        schema = [
-            var for var in self.model.case_varnames if var != self.model.numeraire
-        ]
-    else:
-        wtp_alt_vars_by_panel = jnp.empty((data.num_panels, 0))
-        schema = []
 
-    panels_unique = onp.array(panels[panels != jnp.roll(panels, shift=1)])
-    wtp_alt_vars_by_panel_df = pl.DataFrame(
-        onp.array(wtp_alt_vars_by_panel), schema=schema
-    ).with_columns(pl.Series("panels", panels_unique, dtype=pl.UInt32))
+        predicted_probs_df = pl.DataFrame(
+            {
+                "panels": onp.array(panels),
+                "cases": onp.array(cases),
+                "alts": onp.array(alts),
+                "choice_probs": onp.array(
+                    unconditional_choice_probs, dtype=onp.float64
+                ),
+            }
+        )
 
-    assert data.num_cases_per_panel is not None
-    conditional_surplus = jnp.einsum(
-        "np,np->n",
-        jnp.repeat(class_probs_by_panel, data.num_cases_per_panel, axis=0),
-        surplus_by_class,
-    )
+        assert data.panels is not None and isinstance(cases, Array)
+        surplus_df = pl.DataFrame(
+            {
+                "panels": onp.array(
+                    data.panels[data.cases != jnp.roll(data.cases, shift=1)]
+                ),
+                "cases": onp.array(cases[data.cases != jnp.roll(data.cases, shift=1)]),
+                "surplus": onp.array(conditional_surplus, dtype=onp.float64),
+            }
+        )
 
-    unconditional_choice_probs = jnp.sum(
-        class_probs_by_panel[panels] * choice_probs_by_class.T, axis=1
-    )
-
-    predicted_probs_df = pl.DataFrame(
-        {
-            "panels": onp.array(panels),
-            "cases": onp.array(cases),
-            "alts": onp.array(alts),
-            "choice_probs": onp.array(unconditional_choice_probs, dtype=onp.float64),
-        }
-    )
-
-    assert data.panels is not None and isinstance(cases, Array)
-    surplus_df = pl.DataFrame(
-        {
-            "panels": onp.array(
-                data.panels[data.cases != jnp.roll(data.cases, shift=1)]
-            ),
-            "cases": onp.array(cases[data.cases != jnp.roll(data.cases, shift=1)]),
-            "surplus": onp.array(conditional_surplus, dtype=onp.float64),
-        }
-    )
-
-    return LCLPrediction(
-        predicted_probs_df=predicted_probs_df,
-        surplus_df=surplus_df,
-        wtp_alt_vars_by_panel_df=wtp_alt_vars_by_panel_df,
-        predict_data=data,
-        results=self,
-        class_probs_by_panel=class_probs_by_panel,
-    )
+        return LCLPrediction(
+            predicted_probs_df=predicted_probs_df,
+            surplus_df=surplus_df,
+            wtp_alt_vars_by_panel_df=wtp_alt_vars_by_panel_df,
+            predict_data=data,
+            results=self,
+            class_probs_by_panel=class_probs_by_panel,
+        )
 
 
 # EOF
