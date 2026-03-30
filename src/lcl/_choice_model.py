@@ -87,7 +87,12 @@ class ChoiceModel(ABC):
             A container holding strictly aligned and sorted JAX arrays and their metadata.
         """
         # 1. Coerce to Polars DataFrame
-        df = pl.from_pandas(data) if hasattr(data, "columns") else pl.DataFrame(data)
+        if isinstance(data, pl.DataFrame):
+            df = data
+        elif hasattr(data, "columns"):
+            df = pl.from_pandas(data)
+        else:
+            df = pl.DataFrame(data)
 
         # CRITICAL: Sort values contiguously. JAX's `jnp.roll` masking relies entirely on
         # observations being grouped contiguously by panel and case.
@@ -159,11 +164,13 @@ class ChoiceModel(ABC):
         dems_array = None
         if dem_vars:
             if dems_data is not None:
-                dems_df_ext = (
-                    pl.from_pandas(dems_data)
-                    if hasattr(dems_data, "columns")
-                    else pl.DataFrame(dems_data)
-                )
+                if isinstance(dems_data, pl.DataFrame):
+                    dems_df_ext = dems_data
+                elif hasattr(dems_data, "columns"):
+                    dems_df_ext = pl.from_pandas(dems_data)
+                else:
+                    dems_df_ext = pl.DataFrame(dems_data)
+
                 unique_panels = df.select([panels_col, "_seq_panels"]).unique(
                     subset=[panels_col], maintain_order=True
                 )

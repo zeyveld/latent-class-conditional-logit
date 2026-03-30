@@ -71,7 +71,13 @@ def cv_optimal_k(
         A DataFrame containing the Average Out-of-Sample Log-Likelihood for each K.
     """
     # Unify input into Polars for easy fold splitting
-    df = pl.from_pandas(data) if hasattr(data, "columns") else pl.DataFrame(data)
+    # Unify input into Polars for easy fold splitting
+    if isinstance(data, pl.DataFrame):
+        df = data
+    elif hasattr(data, "columns"):
+        df = pl.from_pandas(data)
+    else:
+        df = pl.DataFrame(data)
 
     unique_panels = df[panels_col].unique().to_numpy()
 
