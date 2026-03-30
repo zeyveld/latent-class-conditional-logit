@@ -69,7 +69,8 @@ def _minimize(
 
         # Apply chain rule for numeraire
         if numeraire_idx is not None:
-            derivative = sigmoid(p[numeraire_idx])
+            # Derivative of -(softplus(x)) is -sigmoid(x)
+            derivative = -sigmoid(p[numeraire_idx])
             grad = grad.at[numeraire_idx].multiply(derivative)
             aux = aux.at[:, numeraire_idx].multiply(derivative)
 

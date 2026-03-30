@@ -26,7 +26,7 @@ def _as_array_or_none(
         The resulting JAX tensor, or None if the input was null.
     """
     if data is None:
-        return
+        return None
     else:
         return jnp.asarray(data, dtype=dtype)
 
@@ -56,26 +56,6 @@ def _robust_covariance(hess_inv: ArrayLike, grad_n: ArrayLike) -> ArrayLike:
     inner = jnp.transpose(grad_n_sub) @ grad_n_sub
     correction = (n) / (n - 1)
     return correction * (hess_inv @ inner @ hess_inv)
-
-
-def _ensure_sequential(vals) -> Array:
-    """Ensure vector IDs are contiguous and zero-indexed.
-
-    Crucial for safely utilizing JAX's `segment_sum`, which requires group IDs
-    to map perfectly to array indices.
-
-    Parameters
-    ----------
-    vals : ArrayLike
-        A 1D array of potentially non-sequential identifiers (e.g., [10, 10, 24, 24, 99]).
-
-    Returns
-    -------
-    Array
-        A 1D array of strictly sequential identifiers (e.g., [0, 0, 1, 1, 2]).
-    """
-    vals_change = vals != jnp.roll(vals, shift=1)
-    return (jnp.cumsum(vals_change) - 1).astype("uint32")
 
 
 # EOF

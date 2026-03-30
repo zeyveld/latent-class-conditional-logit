@@ -9,6 +9,40 @@ from jax.typing import ArrayLike
 from jaxtyping import Bool, Float64, UInt
 
 
+@dataclass
+class ParsedData:
+    """Intermediate container for aligned, JAX-ready arrays and metadata.
+
+    Attributes
+    ----------
+    X : Array
+        The design matrix of alternative-specific characteristics.
+    dems : Array | None
+        The matrix of decision-maker demographic characteristics, tightly aligned.
+    y : Array | None
+        Boolean array indicating the chosen alternatives.
+    cases : Array
+        Sequential, zero-indexed choice situation IDs.
+    alts : Array
+        Sequential, zero-indexed alternative IDs.
+    panels : Array
+        Sequential, zero-indexed decision-maker IDs.
+    case_varnames : list[str]
+        Extracted names of the alternative-specific features.
+    dem_varnames : list[str] | None
+        Extracted names of the demographic features.
+    """
+
+    X: Array
+    dems: Array | None
+    y: Array | None
+    cases: Array
+    alts: Array
+    panels: Array
+    case_varnames: list[str]
+    dem_varnames: Optional[list[str]]
+
+
 class Data(NamedTuple):
     """Container for choice data used by the estimation engine.
 
@@ -179,6 +213,8 @@ class PastChoicesData:
 
 
 class PartitionType(StrEnum):
+    """Supported binning strategies for marginal Willingness-To-Pay (WTP) analysis."""
+
     CATEGORICAL = "categorical"
     QUINTILES = "quintiles"
     CUSTOM_BREAKS = "custom_breaks"
@@ -186,6 +222,20 @@ class PartitionType(StrEnum):
 
 @dataclass
 class WTPRequest:
+    """Configuration object for calculating Marginal Willingness-to-Pay (WTP).
+
+    Attributes
+    ----------
+    alt_var : str
+        The target alternative-specific variable for the WTP numerator.
+    demographic_var : str
+        The demographic variable used to partition the decision-makers.
+    partition_type : PartitionType | str
+        The strategy for grouping the demographic variable (e.g., quintiles).
+    bins : int | list[float] | None, optional
+        Custom breakpoints if `partition_type` is 'custom_breaks'.
+    """
+
     alt_var: str
     demographic_var: str
     partition_type: PartitionType | str

@@ -1,24 +1,28 @@
-from abc import ABC
-from functools import partial
+from abc import ABC, abstractmethod
 from time import time
-from typing import Sequence
+from typing import Any, Sequence
 
 import jax.numpy as jnp
-import numpy as onp
 import polars as pl
-from jax import Array, tree
-from jax.typing import ArrayLike
-from jaxtyping import Bool, Float64, UInt
+from formulaic import Formula  # type: ignore
+from jax import Array
 
-from lcl._struct import Data
-from lcl.utils import _as_array_or_none, _ensure_sequential
+from lcl._struct import Data, ParsedData
 
 
 class ChoiceModel(ABC):
-    """Base class for the specification and estimation of discrete choice models.
+    """Abstract base class for discrete choice models.
 
-    Provides core data validation, dimensionality reduction, and structural
-    preparation routines shared across cross-sectional and panel choice models.
+    Attributes
+    ----------
+    case_varnames : list[str]
+        Names of the alternative-specific variables.
+    numeraire : str | None
+        The name of the numeraire variable, if specified.
+    dem_varnames : list[str] | None
+        Names of the demographic variables, if any.
+    convergence : bool
+        Indicates whether the optimization routine converged successfully.
     """
 
     case_varnames: list[str]
@@ -33,212 +37,235 @@ class ChoiceModel(ABC):
         self.convergence = False
         self._fit_start_time = 0.0
 
-    def _setup_data(
-        self,
-        X: ArrayLike,
-        dems: ArrayLike | None,
-        cases: ArrayLike,
-        alts: ArrayLike,
-        y: ArrayLike | None,
-        panels: ArrayLike | None,
-        weights: ArrayLike | None = None,
-        init_beta: ArrayLike | None = None,
-    ) -> tuple[Data, Float64[Array, "cases"], Float64[Array, "alt_vars"]]:
-        """Validate and package raw arrays into the core estimation struct.
+    @abstractmethod
+    def fit(self, *args: Any, **kwargs: Any) -> Any:
+        """Fit the model to the data. Must be implemented by subclasses."""
+        pass
 
-        Ensures that cases and panels are contiguous and sequential, masks first
-        observations for differencing logic, and extracts observation counts.
+    def _ingest_data(
+        self,
+        data: Any,
+        alts_col: str,
+        cases_col: str,
+        panels_col: str,
+        formula: str | None,
+        choice_col: str | None,
+        case_varnames: Sequence[str] | None,
+        dem_varnames: Sequence[str] | None,
+        dems_data: Any | None,
+    ) -> ParsedData:
+        """The core ingestion layer: Converts flexible user inputs into strict matrices.
+
+        This method centralizes the data wrangling process. It handles sorting,
+        merging separate demographic datasets, generating zero-indexed sequential IDs
+        (essential for JAX operations), and parsing R-style formulas.
 
         Parameters
         ----------
-        X : ArrayLike
-            ``(N, K)`` design matrix of alternative-specific characteristics in long format.
-        dems : ArrayLike | None
-            ``(Np, D)`` or ``(N, D)`` matrix of decision-maker demographic characteristics.
-        cases : ArrayLike
-            ``(N,)`` vector grouping rows into distinct choice situations.
-        alts : ArrayLike
-            ``(N,)`` vector of alternative identifiers.
-        y : ArrayLike | None
-            ``(N,)`` boolean vector indicating the chosen alternatives.
-        panels : ArrayLike | None
-            ``(N,)`` vector mapping observations to specific decision-makers.
-        weights : ArrayLike | None, optional
-            ``(Nc,)`` vector of choice situation importance weights.
-        init_beta : ArrayLike | None, optional
-            ``(K,)`` vector of initial taste parameters for the optimization routine.
+        data : Any
+            The main dataset (pandas/Polars DataFrame) containing choice situations.
+        alts_col : str
+            Name of the column containing alternative identifiers.
+        cases_col : str
+            Name of the column grouping observations into distinct choice situations.
+        panels_col : str
+            Name of the column mapping observations to specific decision-makers.
+        formula : str | None
+            R-style formula string (e.g., "choice ~ price + C(brand) | income").
+        choice_col : str | None
+            Name of the boolean/binary column indicating chosen alternatives.
+        case_varnames : Sequence[str] | None
+            List of alternative-specific variables.
+        dem_varnames : Sequence[str] | None
+            List of demographic variables.
+        dems_data : Any | None
+            A separate panel-level dataset containing demographics.
 
         Returns
         -------
-        data : :class:`~lcl._struct.Data`
-            Immutable container holding the validated design matrices and metadata.
-        weights : Float64[Array, "cases"]
-            Vector of importance weights per choice situation.
-        init_beta : Float64[Array, "alt_vars"]
-            Vector of starting values for the structural parameters.
+        :class:`~lcl._struct.ParsedData`
+            A container holding strictly aligned and sorted JAX arrays and their metadata.
         """
-        # Convert args to arrays (when provided)
+        # 1. Coerce to Polars DataFrame
+        df = pl.from_pandas(data) if hasattr(data, "columns") else pl.DataFrame(data)
 
-        X, dems, weights = tree.map(
-            partial(_as_array_or_none, dtype="float64"), (X, dems, weights)
-        )
-        assert isinstance(X, Array), "Unable to convert `X` to Jax array"
-        if X.ndim != 2:
-            raise ValueError("`X` must be an array of two dimensions in long format")
-        if dems is not None:
-            assert isinstance(dems, Array), "Unable to convert `dems` to Jax array"
+        # CRITICAL: Sort values contiguously. JAX's `jnp.roll` masking relies entirely on
+        # observations being grouped contiguously by panel and case.
+        df = df.sort([panels_col, cases_col, alts_col])
 
-        cases, alts, panels = tree.map(
-            partial(_as_array_or_none, dtype="uint32"), (cases, alts, panels)
-        )
-        y = _as_array_or_none(y, "bool")
-
-        # Ensure case cases and panels are sequential
-        cases = _ensure_sequential(cases)
-        if panels is not None:
-            panels = _ensure_sequential(panels)
-
-        # Mask first observation for each choice ID
-        mask_first_obs_by_id: Bool[Array, "alts_by_case"] = cases != jnp.roll(
-            cases, shift=1
+        # 2. Extract Sequential Zero-Indexed IDs safely
+        df = df.with_columns(
+            [
+                pl.col(panels_col).rank(method="dense").sub(1).alias("_seq_panels"),
+                pl.col(cases_col).rank(method="dense").sub(1).alias("_seq_cases"),
+                pl.col(alts_col).rank(method="dense").sub(1).alias("_seq_alts"),
+            ]
         )
 
-        # Get one panel per choice situation
-        if panels is not None:
-            # Old version: panels_of_cases = panels[y]
-            panels_of_cases = panels[mask_first_obs_by_id]
+        # 3. Parse Features (Formula vs Explicit Lists)
+        if formula:
+            f = Formula(formula)
+            y_df = f.lhs.get_model_matrix(df.to_pandas())
+            y_array = jnp.array(y_df.to_numpy().ravel(), dtype="bool")
+
+            # Handle multiple RHS components (e.g., choice ~ price | income)
+            if isinstance(f.rhs, tuple):
+                X_df = f.rhs[0].get_model_matrix(df.to_pandas())
+                case_vars = list(X_df.columns)
+                dems_df_raw = f.rhs[1].get_model_matrix(df.to_pandas())
+                dem_vars = list(dems_df_raw.columns)
+
+                df = df.with_columns(pl.from_pandas(X_df))
+                df = df.with_columns(pl.from_pandas(dems_df_raw))
+            else:
+                X_df = f.rhs.get_model_matrix(df.to_pandas())
+                case_vars = list(X_df.columns)
+                dem_vars = None
+
+                df = df.with_columns(pl.from_pandas(X_df))
+
         else:
-            panels_of_cases = None
+            if not choice_col or not case_varnames:
+                raise ValueError(
+                    "Must provide either a 'formula' OR 'choice_col' and 'case_varnames'."
+                )
+            if choice_col in df.columns:
+                y_array = jnp.array(df[choice_col].to_numpy(), dtype="bool")
+            else:
+                y_array = None
 
-        num_cases_per_panel, num_panels = self._count_choices_per_panel(panels, cases)
-        num_cases = jnp.unique(cases).shape[0]
+            case_vars = list(case_varnames)
+            dem_vars = list(dem_varnames) if dem_varnames else None
 
-        dems, num_dem_vars = self._squeeze_dems(
-            X=X,
-            dems=dems,
-            panels=panels,
+        # Single-outcome check
+        if y_array is not None:
+            import numpy as onp
+
+            cases_array = df["_seq_cases"].to_numpy()
+            y_onp = onp.asarray(y_array, dtype=onp.int32)
+
+            # Count the number of True values per case
+            choices_per_case = onp.bincount(cases_array, weights=y_onp)
+
+            if not onp.all(choices_per_case == 1):
+                raise ValueError(
+                    "Data inconsistency: Every choice situation must have exactly one "
+                    "chosen alternative (True/1). Check your data or formula."
+                )
+
+        X_array = jnp.array(df.select(case_vars).to_numpy(), dtype="float64")
+
+        # 4. Handle Demographics (Inline vs Separate Dataset)
+        dems_array = None
+        if dem_vars:
+            if dems_data is not None:
+                dems_df_ext = (
+                    pl.from_pandas(dems_data)
+                    if hasattr(dems_data, "columns")
+                    else pl.DataFrame(dems_data)
+                )
+                unique_panels = df.select([panels_col, "_seq_panels"]).unique(
+                    subset=[panels_col], maintain_order=True
+                )
+                aligned_dems = unique_panels.join(
+                    dems_df_ext, on=panels_col, how="left"
+                )
+                dems_array = jnp.array(
+                    aligned_dems.select(dem_vars).to_numpy(), dtype="float64"
+                )
+            else:
+                unique_dems = df.select(["_seq_panels"] + dem_vars).unique(
+                    subset=["_seq_panels"], maintain_order=True
+                )
+                dems_array = jnp.array(
+                    unique_dems.select(dem_vars).to_numpy(), dtype="float64"
+                )
+
+        return ParsedData(
+            X=X_array,
+            dems=dems_array,
+            y=y_array,
+            cases=jnp.array(df["_seq_cases"].to_numpy(), dtype="uint32"),
+            panels=jnp.array(df["_seq_panels"].to_numpy(), dtype="uint32"),
+            alts=jnp.array(df["_seq_alts"].to_numpy(), dtype="uint32"),
+            case_varnames=case_vars,
+            dem_varnames=dem_vars,
+        )
+
+    def _setup_data(
+        self,
+        parsed: ParsedData,
+        weights: Array | None = None,
+        init_beta: Array | None = None,
+    ) -> tuple[Data, Array, Array]:
+        """Construct the immutable Data struct for the JAX estimation engine.
+
+        Extracts panel counts and bounds, relying on the guarantee from `_ingest_data`
+        that panel and case IDs are strictly contiguous and zero-indexed.
+
+        Parameters
+        ----------
+        parsed : :class:`~lcl._struct.ParsedData`
+            The sanitized, aligned dataset generated by the ingestion layer.
+        weights : Array | None, optional
+            Case-level importance weights. If None, defaults to ones.
+        init_beta : Array | None, optional
+            Starting values for taste parameters. If None, defaults to zeros.
+
+        Returns
+        -------
+        tuple
+            A tuple containing `(data_struct, weights, init_beta)`.
+        """
+        # Mask first observation for differencing logic
+        mask_first_obs_by_id = parsed.cases != jnp.roll(parsed.cases, shift=1)
+        panels_of_cases = parsed.panels[mask_first_obs_by_id]
+
+        # Because `_ingest_data` guarantees zero-indexed, sequential panels,
+        # we can leverage lightning-fast native JAX `bincount` instead of Polars group-bys.
+        num_cases_per_panel = jnp.bincount(panels_of_cases)
+        num_panels = num_cases_per_panel.shape[0]
+        num_cases = jnp.unique(parsed.cases).shape[0]
+
+        num_dem_vars = parsed.dems.shape[1] if parsed.dems is not None else 0
+
+        weights = (
+            jnp.ones(shape=num_cases, dtype="float64") if weights is None else weights
+        )
+        init_beta = (
+            jnp.zeros(shape=len(parsed.case_varnames), dtype="float64")
+            if init_beta is None
+            else init_beta
+        )
+
+        data_struct = Data(
+            X=parsed.X,
+            y=parsed.y,
+            dems=parsed.dems,
+            alts=parsed.alts,
+            cases=parsed.cases,
+            panels=parsed.panels,
             panels_of_cases=panels_of_cases,
-            num_panels=num_panels,
             num_cases=num_cases,
+            num_alt_vars=len(parsed.case_varnames),
+            num_dem_vars=num_dem_vars,
+            num_cases_per_panel=num_cases_per_panel,
+            num_panels=num_panels,
         )
-
-        # Weights equal unity if not explicitly provided
-        if weights is None:
-            weights = jnp.ones(shape=num_cases, dtype="float64")
-        else:
-            weights = jnp.asarray(weights, dtype="float64")
-
-        # Get array representation of case-data explanatory variables
-        case_varnames = onp.array(self.case_varnames.copy())
-
-        # Initialize or inspect initial coefficients guess
-        num_alt_vars = len(self.case_varnames)
-        if init_beta is None:
-            init_beta = jnp.zeros(shape=num_alt_vars, dtype="float64")
-        else:
-            init_beta = jnp.asarray(init_beta, dtype="float64")
-            if jnp.size(init_beta) != num_alt_vars:
-                raise ValueError(f"The size of `initial_coeff` must be: {num_alt_vars}")
-
-        # Manually check individual args so that linter isn't confused
-
-        assert isinstance(dems, Array) or (dems is None)
-        if y is not None and y.ndim > 1:
-            raise ValueError("`y` must be an array of one dimension in long format")
-        assert isinstance(alts, Array), "Unable to convert `alts` to Jax array"
-        if case_varnames.size != X.shape[1]:
-            raise ValueError(
-                "The length of `case_varnames` must match the number of columns in `X`"
-            )
-
-        return (
-            Data(
-                X=X,
-                y=y,
-                dems=dems,
-                alts=alts,
-                cases=cases,
-                panels=panels,
-                panels_of_cases=panels_of_cases,
-                num_cases=num_cases,
-                num_alt_vars=num_alt_vars,
-                num_dem_vars=num_dem_vars,
-                num_cases_per_panel=num_cases_per_panel,
-                num_panels=num_panels,
-            ),
-            weights,
-            init_beta,
-        )
-
-    @staticmethod
-    def _squeeze_dems(
-        X: Float64[Array, "alts_by_case alt_vars"],
-        dems: Float64[Array, "panels dem_vars"]
-        | Float64[Array, "alts_by_case dem_vars"]
-        | None,
-        panels: UInt[Array, "alts_by_case"] | None,
-        panels_of_cases: UInt[Array, "cases"] | None,
-        num_panels: int | None,
-        num_cases: int,
-    ) -> tuple[Float64[Array, "panels dem_vars"] | None, int]:
-        """Reduce demographic design matrix to a strict panel-level dimensionality.
-
-        Essential for the fractional response regression step, which models latent class
-        membership at the decision-maker level rather than the choice-situation level.
-        """
-        if dems is None:
-            return None, 0
-
-        # If `dems` is passed, check that `panels` and related vars seem usable
-        if panels is None:
-            raise ValueError(
-                "The parameter `panels` needs to be array-valued if `dems` is not None"
-            )
-        assert panels_of_cases is not None and num_panels is not None, (
-            "Something is wrong with the `panels` argument"
-        )
-        num_dem_vars = dems.shape[1]
-        # Squeeze `dems` to have one observation per panel for the fractional logit model
-        if dems.shape[0] == num_panels:
-            dems = dems
-        elif dems.shape[0] == num_cases:
-            dems = dems[panels_of_cases != jnp.roll(panels_of_cases, shift=1)]
-        elif dems.shape[0] == X.shape[0]:
-            dems = dems[panels != jnp.roll(panels, shift=1)]
-        else:
-            raise Exception("Could not squeeze `dems` into a usable shape.")
-        return dems, num_dem_vars
-
-    @staticmethod
-    def _count_choices_per_panel(
-        panels: UInt[Array, "alts_by_case"] | None, cases: UInt[Array, "alts_by_case"]
-    ) -> tuple[UInt[Array, "panels"] | None, int | None]:
-        """Determine the sequence length (number of choice situations) per decision-maker."""
-        if panels is None:
-            return None, None
-
-        panels_cases_df = pl.DataFrame(
-            {"panels": onp.array(panels), "cases": onp.array(cases)}
-        ).unique()
-        num_cases_per_panel = (
-            panels_cases_df.group_by("panels")
-            .agg(num_choices=pl.len())
-            .sort("panels")["num_choices"]
-            .cast(pl.UInt32)
-            .to_jax()
-        )
-        return num_cases_per_panel, num_cases_per_panel.shape[0]
+        return data_struct, weights, init_beta
 
     def _pre_fit(
         self,
         case_varnames: Sequence[str],
-        dem_varnames: Sequence[str] | None = None,
-        numeraire: str | None = None,
+        dem_varnames: Sequence[str] | None,
+        numeraire: str | None,
     ) -> None:
+        """Initialize metadata tracking prior to estimation loop."""
         self._fit_start_time = time()
-        self.case_varnames = list(case_varnames)  # Easier to handle with lists
+        self.case_varnames = list(case_varnames)
         self.dem_varnames = list(dem_varnames) if dem_varnames is not None else None
         self.numeraire = numeraire
+        self.numeraire_idx = case_varnames.index(numeraire) if numeraire else None
 
 
 # EOF

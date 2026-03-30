@@ -2,9 +2,7 @@
 
 from dataclasses import replace
 from time import time
-from typing import Sequence
-
-from jax.typing import ArrayLike
+from typing import Any, Sequence
 
 from lcl._case_utils import _diff_unchosen_chosen
 from lcl._choice_model import ChoiceModel
@@ -15,88 +13,68 @@ from lcl._struct import EMAlgConfig, MleConfig
 
 
 class LatentClassConditionalLogit(ChoiceModel):
-    """Specification and estimation for latent-class conditional logit models.
-
-    This model accommodates unobserved heterogeneity by probabilistically assigning
-    decision-makers to one of ``C`` latent classes, each characterized by a distinct
-    vector of structural taste parameters.
-    """
+    """Specification and estimation for latent-class conditional logit models."""
 
     def __init__(
         self,
         num_classes: int = 5,
         numeraire: str | None = None,
-        numeraire_idx: int | None = None,
     ) -> None:
         super().__init__()
         self.num_classes = num_classes
         self.numeraire = numeraire
-        self.numeraire_idx = numeraire_idx
+        self.numeraire_idx: int | None = None
 
     def fit(
         self,
-        X: ArrayLike,
-        y: ArrayLike,
-        case_varnames: Sequence[str],
-        alts: ArrayLike,
-        cases: ArrayLike,
-        panels: ArrayLike,
-        dems: ArrayLike | None = None,
+        data: Any,
+        alts_col: str,
+        cases_col: str,
+        panels_col: str,
+        formula: str | None = None,
+        choice_col: str | None = None,
+        case_varnames: Sequence[str] | None = None,
         dem_varnames: Sequence[str] | None = None,
+        dems_data: Any | None = None,
         em_alg_config: EMAlgConfig = EMAlgConfig(),
         mle_config: MleConfig = MleConfig(),
     ) -> LCLResults:
-        """Fit the latent-class conditional logit model using the EM algorithm.
+        """Fit the latent-class conditional logit model using the EM algorithm."""
 
-        Parameters
-        ----------
-        X : ArrayLike
-            ``(N, K)`` design matrix of alternative-specific characteristics in long format.
-        y : ArrayLike
-            ``(N,)`` boolean array indicating chosen alternatives.
-        case_varnames : Sequence[str]
-            List of variable names corresponding to the columns of ``X``.
-        alts : ArrayLike
-            ``(N,)`` array of alternative identifiers.
-        cases : ArrayLike
-            ``(N,)`` array grouping observations into distinct choice situations.
-        panels : ArrayLike
-            ``(N,)`` array mapping observations to specific decision-makers. Required
-            to correctly model repeated choice sequences.
-        dems : ArrayLike, optional
-            ``(Np, D)`` matrix of decision-maker demographic variables. Used to model
-            latent class membership probabilities via fractional response regression.
-        dem_varnames : Sequence[str], optional
-            List of variable names corresponding to the columns of ``dems``.
-        em_alg_config : :class:`~lcl._struct.EMAlgConfig`, optional
-            Configuration for the Expectation-Maximization algorithm loop.
-        mle_config : :class:`~lcl._struct.MleConfig`, optional
-            Configuration for the inner L-BFGS optimization routines.
+        parsed_data = self._ingest_data(
+            data=data,
+            alts_col=alts_col,
+            cases_col=cases_col,
+            panels_col=panels_col,
+            formula=formula,
+            choice_col=choice_col,
+            case_varnames=case_varnames,
+            dem_varnames=dem_varnames,
+            dems_data=dems_data,
+        )
 
-        Returns
-        -------
-        :class:`~lcl._results.LCLResults`
-            Post-estimation results container housing parameters, standard errors,
-            information criteria, and out-of-sample prediction utilities.
-        """
-
-        self._pre_fit(case_varnames, dem_varnames, self.numeraire)
-        self.num_vars = len(case_varnames)
-        self.num_dem_vars = len(dem_varnames) if dem_varnames is not None else 0
+        self._pre_fit(
+            parsed_data.case_varnames, parsed_data.dem_varnames, self.numeraire
+        )
+        self.num_vars = len(self.case_varnames)
+        self.num_dem_vars = len(self.dem_varnames) if self.dem_varnames else 0
 
         if self.numeraire:
-            self.numeraire_idx = self.case_varnames.index(self.numeraire)
+            try:
+                self.numeraire_idx = self.case_varnames.index(self.numeraire)
+            except ValueError:
+                raise ValueError(
+                    f"Numeraire '{self.numeraire}' not found in expanded design matrix."
+                )
         else:
             self.numeraire_idx = None
 
-        data, *_ = self._setup_data(
-            X=X, dems=dems, y=y, cases=cases, panels=panels, alts=alts
-        )
-        diff_unchosen_chosen = _diff_unchosen_chosen(data)
+        data_struct, weights, init_beta = self._setup_data(parsed_data)
+        diff_unchosen_chosen = _diff_unchosen_chosen(data_struct)
 
         em_vars = _get_starting_vals(
             diff_unchosen_chosen,
-            data,
+            data_struct,
             self.num_classes,
             em_alg_config,
             mle_config,
@@ -110,7 +88,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             em_vars = _em_alg(
                 em_vars,
                 diff_unchosen_chosen,
-                data,
+                data_struct,
                 self.num_classes,
                 mle_config,
                 self.numeraire_idx,
@@ -126,12 +104,11 @@ class LatentClassConditionalLogit(ChoiceModel):
                 if rel_change <= em_alg_config.loglik_tol:
                     break
 
-        # Run one final EM recursion with ultra-strict tolerances
         strict_mle_config = replace(mle_config, ftol=1e-8, maxiter=500)
         em_vars = _em_alg(
             em_vars,
             diff_unchosen_chosen,
-            data,
+            data_struct,
             self.num_classes,
             strict_mle_config,
             self.numeraire_idx,
@@ -139,11 +116,10 @@ class LatentClassConditionalLogit(ChoiceModel):
 
         estim_time_sec = time() - self._fit_start_time
 
-        # Pass state to Results object
         return LCLResults(
             model_spec=self,
             em_vars=em_vars,
-            estimation_data=data,
+            estimation_data=data_struct,
             em_recursion=em_recursion,
             em_alg_config=em_alg_config,
             estim_time_sec=estim_time_sec,

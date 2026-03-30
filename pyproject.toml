@@ -18,6 +18,8 @@ dependencies = [
     "beartype>=0.17.0",
     "jaxopt>=0.8.5",
     "equinox>=0.13.6",
+    "formulaic>=1.2.1",
+    "pylatexenc>=2.10",
 ]
 
 [build-system]

@@ -88,7 +88,8 @@ def _to_structural_betas(
         Structural parameters suitable for utility calculation.
     """
     if numeraire_idx is not None:
-        transformed_col = softplus(latent_betas[numeraire_idx]) + 1e-5
+        # Force the parameter to be strictly negative
+        transformed_col = -(softplus(latent_betas[numeraire_idx]) + 1e-5)
         return latent_betas.at[numeraire_idx].set(transformed_col)
     return latent_betas
 

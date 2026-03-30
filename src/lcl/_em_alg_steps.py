@@ -230,7 +230,7 @@ def _update_betas(
 
         # Apply chain rule (sigmoid is derivative of softplus)
         if numeraire_idx is not None:
-            grad = grad.at[numeraire_idx].multiply(sigmoid(p[numeraire_idx]))
+            grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
 
         # Normalize to prevent softplus step explosions
         N_eff = jnp.clip(jnp.sum(w), a_min=1.0)

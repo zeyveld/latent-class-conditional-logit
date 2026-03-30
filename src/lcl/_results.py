@@ -19,7 +19,7 @@ from lcl._em_alg_steps import (
     _compute_probs_and_exp_utility,
 )
 from lcl._prediction import LCLPrediction
-from lcl._struct import Data, EMVars, PastChoicesData
+from lcl._struct import Data, EMVars, ParsedData, PastChoicesData
 
 
 class LCLResults:
@@ -341,148 +341,133 @@ class LCLResults:
             )
         )
 
-    def predict(
-        self,
-        X: ArrayLike,
-        alts: ArrayLike,
-        cases: ArrayLike,
-        panels: ArrayLike,
-        dems: ArrayLike | None = None,
-        past_choices: PastChoicesData | None = None,
-    ) -> LCLPrediction:
-        """Generate out-of-sample predictions and counterfactual inclusive values (consumer surplus).
 
-        If a decision-maker's historical choice sequence is provided via `past_choices`,
-        the model utilizes Bayesian updating to rigorously re-weight their conditional
-        class membership probabilities before generating predictions.
+def predict(
+    self,
+    X: ArrayLike,
+    alts: ArrayLike,
+    cases: ArrayLike,
+    panels: ArrayLike,
+    dems: ArrayLike | None = None,
+    past_choices: PastChoicesData | None = None,
+) -> LCLPrediction:
+    """Generate out-of-sample predictions and counterfactual inclusive values (consumer surplus)."""
+    parsed_predict = ParsedData(
+        X=X,
+        dems=dems,
+        y=None,
+        cases=cases,
+        panels=panels,
+        alts=alts,
+        case_varnames=self.model.case_varnames,
+        dem_varnames=self.model.dem_varnames,
+    )
+    data, *_ = self.model._setup_data(parsed_predict)
 
-        Parameters
-        ----------
-        X : ArrayLike
-            ``(N, K)`` counterfactual design matrix.
-        alts : ArrayLike
-            ``(N,)`` vector of alternative IDs.
-        cases : ArrayLike
-            ``(N,)`` vector of choice situation IDs.
-        panels : ArrayLike
-            ``(N,)`` vector mapping observations to specific decision-makers.
-        dems : ArrayLike | None, optional
-            ``(N, D)`` matrix of demographic variables.
-        past_choices : :class:`~lcl._struct.PastChoicesData` | None, optional
-            Container housing the decision-maker's observed choice history for Bayesian updating.
-
-        Returns
-        -------
-        :class:`~lcl._prediction.LCLPrediction`
-            Container housing probabilities, surplus, and WTP evaluators.
-        """
-        data, *_ = self.model._setup_data(
-            X=X,
-            dems=dems,
-            y=None,
-            cases=cases,
-            panels=panels,
-            alts=alts,
-            weights=None,
-            init_beta=None,
+    if past_choices is not None:
+        data_past, *_ = self.model._setup_data(
+            X=past_choices.X,
+            dems=past_choices.dems,
+            y=past_choices.y,
+            cases=past_choices.cases,
+            panels=past_choices.panels,
+            alts=past_choices.alts,
+        )
+        diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
+        class_probs_by_panel, _ = _compute_conditional_class_probs(
+            structural_betas=self.em_res.structural_betas,
+            thetas=self.em_res.thetas,
+            shares=self.em_res.shares,
+            diff_unchosen_chosen=diff_unchosen_chosen_past,
+            data=data_past,
+        )
+    else:
+        assert data.num_panels is not None
+        class_probs_by_panel = jnp.repeat(
+            self.em_res.shares[None, :], data.num_panels, axis=0
         )
 
-        if past_choices is not None:
-            data_past, *_ = self.model._setup_data(
-                X=past_choices.X,
-                dems=past_choices.dems,
-                y=past_choices.y,
-                cases=past_choices.cases,
-                panels=past_choices.panels,
-                alts=past_choices.alts,
-            )
-            diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
-            class_probs_by_panel, _ = _compute_conditional_class_probs(
-                structural_betas=self.em_res.structural_betas,
-                thetas=self.em_res.thetas,
-                shares=self.em_res.shares,
-                diff_unchosen_chosen=diff_unchosen_chosen_past,
-                data=data_past,
-            )
-        else:
-            assert data.num_panels is not None
-            class_probs_by_panel = jnp.repeat(
-                self.em_res.shares[None, :], data.num_panels, axis=0
-            )
+    choice_probs_by_class, exp_utility_by_class = lax.map(
+        lambda _beta: _compute_probs_and_exp_utility(_beta, data=data),
+        self.em_res.structural_betas.T,
+    )
 
-        choice_probs_by_class, exp_utility_by_class = lax.map(
-            lambda _beta: _compute_probs_and_exp_utility(_beta, data=data),
-            self.em_res.structural_betas.T,
+    sum_exp_utility = segment_sum(
+        exp_utility_by_class.T, cases, num_segments=data.num_cases
+    )
+    log_sum_exp_utility = jnp.log(jnp.clip(sum_exp_utility, a_min=1e-250))
+
+    if self.model.numeraire_idx is None:
+        marginal_utility_income = jnp.ones(self.model.num_classes)
+    else:
+        # We forced the structural cost parameter to be negative,
+        # so alpha (MU_income) is its negative.
+        marginal_utility_income = -self.em_res.structural_betas[
+            self.model.numeraire_idx, :
+        ]
+
+    surplus_by_class = (
+        log_sum_exp_utility / marginal_utility_income[None, :]
+    ).squeeze()
+
+    if self.model.numeraire_idx is not None:
+        betas_sans_numeraire = jnp.delete(
+            self.em_res.structural_betas, self.model.numeraire_idx, axis=0
         )
+        # WTP = beta / alpha
+        wtp_alt_vars_by_class = betas_sans_numeraire / marginal_utility_income
+        wtp_alt_vars_by_panel = class_probs_by_panel @ wtp_alt_vars_by_class.T
+        schema = [
+            var for var in self.model.case_varnames if var != self.model.numeraire
+        ]
+    else:
+        wtp_alt_vars_by_panel = jnp.empty((data.num_panels, 0))
+        schema = []
 
-        conditional_choice_probs = (
-            class_probs_by_panel[panels] * choice_probs_by_class.T
-        )
-        sum_exp_utility = segment_sum(
-            exp_utility_by_class.T, cases, num_segments=data.num_cases
-        )
-        log_sum_exp_utility = jnp.log(jnp.clip(sum_exp_utility, a_min=1e-250))
+    panels_unique = onp.array(panels[panels != jnp.roll(panels, shift=1)])
+    wtp_alt_vars_by_panel_df = pl.DataFrame(
+        onp.array(wtp_alt_vars_by_panel), schema=schema
+    ).with_columns(pl.Series("panels", panels_unique, dtype=pl.UInt32))
 
-        if self.model.numeraire is None:
-            numeraire_coeff_by_class = jnp.ones(self.model.num_classes)
-        else:
-            numeraire_coeff_by_class = self.em_res.structural_betas[
-                self.model.numeraire_idx, :
-            ]
+    assert data.num_cases_per_panel is not None
+    conditional_surplus = jnp.einsum(
+        "np,np->n",
+        jnp.repeat(class_probs_by_panel, data.num_cases_per_panel, axis=0),
+        surplus_by_class,
+    )
 
-        surplus_by_class = (
-            log_sum_exp_utility / numeraire_coeff_by_class[None, :]
-        ).squeeze()
+    unconditional_choice_probs = jnp.sum(
+        class_probs_by_panel[panels] * choice_probs_by_class.T, axis=1
+    )
 
-        # WTP calculation setup
-        if self.model.numeraire_idx is not None:
-            betas_sans_numeraire = jnp.delete(
-                self.em_res.structural_betas, self.model.numeraire_idx, axis=0
-            )
-            wtp_alt_vars_by_class = betas_sans_numeraire / numeraire_coeff_by_class
-            wtp_alt_vars_by_panel = class_probs_by_panel @ wtp_alt_vars_by_class.T
-            schema = [
-                var for var in self.model.case_varnames if var != self.model.numeraire
-            ]
-        else:
-            wtp_alt_vars_by_panel = jnp.empty((data.num_panels, 0))
-            schema = []
+    predicted_probs_df = pl.DataFrame(
+        {
+            "panels": onp.array(panels),
+            "cases": onp.array(cases),
+            "alts": onp.array(alts),
+            "choice_probs": onp.array(unconditional_choice_probs, dtype=onp.float64),
+        }
+    )
 
-        panels_unique = onp.array(panels[panels != jnp.roll(panels, shift=1)])
-        wtp_alt_vars_by_panel_df = pl.DataFrame(
-            onp.array(wtp_alt_vars_by_panel), schema=schema
-        ).with_columns(pl.Series("panels", panels_unique, dtype=pl.UInt32))
+    assert data.panels is not None and isinstance(cases, Array)
+    surplus_df = pl.DataFrame(
+        {
+            "panels": onp.array(
+                data.panels[data.cases != jnp.roll(data.cases, shift=1)]
+            ),
+            "cases": onp.array(cases[data.cases != jnp.roll(data.cases, shift=1)]),
+            "surplus": onp.array(conditional_surplus, dtype=onp.float64),
+        }
+    )
 
-        assert data.num_cases_per_panel is not None
-        conditional_surplus = jnp.einsum(
-            "np,np->n",
-            jnp.repeat(class_probs_by_panel, data.num_cases_per_panel, axis=0),
-            surplus_by_class,
-        )
-
-        predicted_probs_df = pl.DataFrame(
-            {
-                "panels": onp.array(panels),
-                "cases": onp.array(cases),
-                "alts": onp.array(alts),
-                "choice_probs": onp.array(conditional_choice_probs, dtype=onp.float64),
-            }
-        )
-
-        assert data.panels is not None and isinstance(cases, Array)
-        surplus_df = pl.DataFrame(
-            {
-                "panels": onp.array(
-                    data.panels[data.cases != jnp.roll(data.cases, shift=1)]
-                ),
-                "cases": onp.array(cases[data.cases != jnp.roll(data.cases, shift=1)]),
-                "surplus": onp.array(conditional_surplus, dtype=onp.float64),
-            }
-        )
-
-        return LCLPrediction(
-            predicted_probs_df, surplus_df, wtp_alt_vars_by_panel_df, data, self
-        )
+    return LCLPrediction(
+        predicted_probs_df=predicted_probs_df,
+        surplus_df=surplus_df,
+        wtp_alt_vars_by_panel_df=wtp_alt_vars_by_panel_df,
+        predict_data=data,
+        results=self,
+        class_probs_by_panel=class_probs_by_panel,
+    )
 
 
 # EOF
