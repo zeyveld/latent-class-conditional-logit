@@ -1,6 +1,6 @@
 site_name: LCL
-site_url: https://your-username.github.io/latent-class-conditional-logit/
-repo_url: https://github.com/your-username/latent-class-conditional-logit
+site_url: https://zeyveld.github.io/latent-class-conditional-logit/
+repo_url: https://github.com/zeyveld/latent-class-conditional-logit
 
 theme:
   name: material
