@@ -10,12 +10,12 @@ from lcl._struct import EMAlgConfig, MleConfig
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
 
-def cv_optimal_k(
+def cv_optimal_classes(
     data: Any,
     alts_col: str,
     cases_col: str,
     panels_col: str,
-    k_max: int,
+    num_classes_list: Sequence[int],
     formula: Optional[str] = None,
     choice_col: Optional[str] = None,
     case_varnames: Optional[Sequence[str]] = None,
@@ -42,8 +42,9 @@ def cv_optimal_k(
         Name of the column grouping observations into distinct choice situations.
     panels_col : str
         Name of the column mapping observations to specific decision-makers.
-    k_max : int
-        The maximum number of latent classes to test (evaluates K = 1 through K = k_max).
+    num_classes_list : Sequence[int]
+        A sequence of integers specifying the numbers of latent classes to evaluate
+        (e.g., [2, 3, 4, 5, 10, 15, 20]).
     formula : str | None, optional
         R-style formula string (e.g., "choice ~ price + C(brand) | income").
     choice_col : str | None, optional
@@ -55,7 +56,8 @@ def cv_optimal_k(
     dems_data : Any | None, optional
         A separate dataset containing panel-level demographics.
     numeraire : str | None, optional
-        The variable to be constrained as strictly positive (e.g., "price").
+        The variable to be constrained as strictly positive (e.g., "price")
+        to enforce a negative cost parameter via softplus.
     folds : int, default=5
         Number of cross-validation folds.
     seed : int, default=42
@@ -68,10 +70,10 @@ def cv_optimal_k(
     Returns
     -------
     pl.DataFrame
-        A DataFrame containing the Average Out-of-Sample Log-Likelihood for each K.
+        A DataFrame containing the Average Out-of-Sample Log-Likelihood for each
+        specified number of classes.
     """
-    # Unify input into Polars for easy fold splitting
-    # Unify input into Polars for easy fold splitting
+    # Unify input into Polars for easy fold splitting, avoiding pandas coercion bugs
     if isinstance(data, pl.DataFrame):
         df = data
     elif hasattr(data, "columns"):
@@ -87,9 +89,14 @@ def cv_optimal_k(
 
     results = []
 
-    # Start evaluating at K=2, since K=1 is just a standard conditional logit
-    for k in range(2, k_max + 1):
-        print(f"Evaluating K = {k}...")
+    for num_classes in num_classes_list:
+        if num_classes < 2:
+            print(
+                f"Warning: Skipping evaluation for {num_classes} classes. The model requires at least 2 latent classes."
+            )
+            continue
+
+        print(f"Evaluating model with {num_classes} latent classes...")
         fold_lls = []
 
         for f in range(folds):
@@ -100,7 +107,9 @@ def cv_optimal_k(
             train_df = df.filter(~pl.col(panels_col).is_in(test_panels))
 
             # 1. Instantiate and Fit Model on Training Fold
-            model = LatentClassConditionalLogit(num_classes=k, numeraire=numeraire)
+            model = LatentClassConditionalLogit(
+                num_classes=num_classes, numeraire=numeraire
+            )
 
             try:
                 res = model.fit(
@@ -139,11 +148,13 @@ def cv_optimal_k(
                 fold_lls.append(float(oos_ll))
 
             except Exception as e:
-                print(f"Warning: Model evaluation failed for K={k}, Fold={f + 1}: {e}")
+                print(
+                    f"Warning: Model evaluation failed for {num_classes} classes, Fold {f + 1}: {e}"
+                )
                 fold_lls.append(onp.nan)
 
         avg_oos_ll = onp.nanmean(fold_lls)
-        results.append({"K": k, "Avg_OOS_LL": avg_oos_ll})
+        results.append({"Num_Classes": num_classes, "Avg_OOS_LL": avg_oos_ll})
 
     return pl.DataFrame(results)
 
