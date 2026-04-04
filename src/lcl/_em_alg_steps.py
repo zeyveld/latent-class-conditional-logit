@@ -4,8 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 from equinox import combine, filter_jit, is_array, partition
-from jax import Array, device_count, devices, lax
-from jax.experimental.shard_map import shard_map
+from jax import Array, lax, shard_map
 from jax.nn import sigmoid
 from jax.ops import segment_sum
 from jax.sharding import Mesh
@@ -15,7 +14,7 @@ from jaxtyping import Float64
 
 from lcl._case_utils import _loglik_gradient, _to_structural_betas
 from lcl._demographics import _predict_class_membership_probs, _update_thetas
-from lcl._struct import Data, DiffUnchosenChosen, EMVars, MleConfig
+from lcl._struct import Data, DiffUnchosenChosen, EMAlgConfig, EMVars, MleConfig
 
 
 def _em_alg(
@@ -24,6 +23,7 @@ def _em_alg(
     data: Data,
     num_classes: int,
     mle_config: MleConfig,
+    em_alg_config: EMAlgConfig,
     numeraire_idx: int | None = None,
 ) -> EMVars:
     """Execute a single step of the Expectation-Maximization (EM) algorithm.
@@ -45,6 +45,8 @@ def _em_alg(
         Number of latent classes.
     mle_config : :class:`~lcl._struct.MleConfig`
         Optimization settings for the MLE solver (L-BFGS).
+    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
+        Configuration for the EM algorithm loop (includes hardware sharding settings).
     numeraire_idx : int | None, optional
         Column index of the numeraire variable.
 
@@ -72,6 +74,7 @@ def _em_alg(
         updated_class_probs_by_choice,
         diff_unchosen_chosen,
         mle_config,
+        em_alg_config,
         numeraire_idx,
     )
 
@@ -193,6 +196,7 @@ def _update_betas(
     class_probs_by_choice: Float64[Array, "cases classes"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     mle_config: MleConfig,
+    em_alg_config: EMAlgConfig,
     numeraire_idx: int | None,
 ) -> Float64[Array, "alt_vars classes"]:
     """Optimize the taste parameters for all latent classes simultaneously via `jax.lax.map`.
@@ -207,6 +211,8 @@ def _update_betas(
         Differenced design matrix.
     mle_config : :class:`~lcl._struct.MleConfig`
         MLE solver configurations.
+    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
+        EM algorithm configurations (supplies device count for hardware sharding).
     numeraire_idx : int | None
         Column index of the numeraire variable.
 
@@ -251,7 +257,7 @@ def _update_betas(
         params, _ = solver.run(beta_vec, dynamic_diff, weight_vec)
         return params
 
-    num_devices = device_count()
+    num_devices = em_alg_config.num_devices
     num_classes = betas.shape[1]
 
     # Transpose upfront so the batch dimension (classes) is leading

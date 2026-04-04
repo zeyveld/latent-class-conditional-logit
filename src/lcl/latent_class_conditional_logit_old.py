@@ -91,7 +91,6 @@ class LatentClassConditionalLogit(ChoiceModel):
                 data_struct,
                 self.num_classes,
                 mle_config,
-                em_alg_config,
                 self.numeraire_idx,
             )
 
@@ -112,7 +111,6 @@ class LatentClassConditionalLogit(ChoiceModel):
             data_struct,
             self.num_classes,
             strict_mle_config,
-            em_alg_config,
             self.numeraire_idx,
         )
 

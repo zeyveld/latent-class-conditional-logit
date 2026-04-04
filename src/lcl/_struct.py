@@ -1,10 +1,10 @@
 """Containers for data."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import NamedTuple, Optional, Union
 
-from jax import Array
+from jax import Array, device_count
 from jax.typing import ArrayLike
 from jaxtyping import Bool, Float64, UInt
 
@@ -127,16 +127,17 @@ class MleConfig:
     ftol: float = 1e-5
 
 
-@dataclass  # (frozen=True)
+@dataclass
 class EMAlgConfig:
     """Container for Expectation-Maximization (EM) algorithm options."""
 
     jax_prng_seed: int = 0
     loglik_tol: float = 1e-6
     maxiter: int = 2000
+    num_devices: int = field(default_factory=device_count)
 
 
-@dataclass  # (frozen=True)
+@dataclass
 class ErrorConfig:
     """Container for standard error and covariance matrix options."""
 
