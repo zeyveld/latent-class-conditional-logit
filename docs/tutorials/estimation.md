@@ -47,7 +47,7 @@ We will estimate a model with 3 latent consumer classes. By specifying `numerair
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 from lcl._struct import EMAlgConfig
 
-model = LatentClassConditionalLogit(num_classes=3, numeraire="cost")
+model = LatentClassConditionalLogit(num_classes=4, numeraire="cost")
 
 results = model.fit(
     data=df_long,

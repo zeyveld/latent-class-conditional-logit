@@ -15,7 +15,7 @@ Using the formatted long dataset from the [Estimation Tutorial](estimation.md), 
 from lcl._wip_cross_validation import cv_optimal_classes
 from lcl._struct import EMAlgConfig
 
-# Evaluate K from 2 through 6
+# Evaluate K for multiples of 4
 cv_results = cv_optimal_classes(
     data=df_long,
     alts_col="alt",
@@ -25,7 +25,7 @@ cv_results = cv_optimal_classes(
     case_varnames=["cost", "time"],
     dem_varnames=["income", "female"],
     numeraire="cost",
-    num_classes_list=[2, 3, 4, 5, 6],
+    num_classes_list=[4, 8, 12],
     folds=5,
     seed=42,
     em_alg_config=EMAlgConfig(maxiter=100) # Lower maxiter can speed up CV sweeps
