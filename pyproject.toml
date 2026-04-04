@@ -1,6 +1,6 @@
 [project]
 name = "lcl-choice"
-version = "0.1.6"
+version = "0.1.7"
 description = "A high-performance Python package for estimating latent-class conditional logit models."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -20,6 +20,7 @@ dependencies = [
     "equinox>=0.13.6",
     "formulaic>=1.2.1",
     "pylatexenc>=2.10",
+    "tabulate>=0.10",
 ]
 
 [build-system]
