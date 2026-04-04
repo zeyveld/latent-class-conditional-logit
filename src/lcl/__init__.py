@@ -30,7 +30,7 @@ with install_import_hook("lcl", "beartype.beartype"):
     from lcl._prediction import LCLPrediction
     from lcl._results import LCLResults
     from lcl._struct import PartitionType, PastChoicesData, WTPRequest
-    from lcl._wip_cross_validation import cv_optimal_k
+    from lcl._wip_cross_validation import cv_optimal_classes
     from lcl.conditional_logit import CLResults, ConditionalLogit
     from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
@@ -44,7 +44,7 @@ __all__ = [
     "WTPRequest",
     "PartitionType",
     "PastChoicesData",
-    "cv_optimal_k",
+    "cv_optimal_classes",
 ]
 
 # EOF
