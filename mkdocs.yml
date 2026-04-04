@@ -46,6 +46,9 @@ markdown_extensions:
 
 nav:
   - Home: index.md
+  - Tutorials:
+    - Estimation & Counterfactuals: tutorials/estimation.md
+    - Cross-Validation & Model Selection: tutorials/cross_validation.md
   - API Reference:
     - Latent-Class Logit: api/latent_class.md
     - Standard Conditional Logit: api/conditional_logit.md
