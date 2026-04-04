@@ -81,6 +81,19 @@ class LatentClassConditionalLogit(ChoiceModel):
             self.numeraire_idx,
         )
 
+        num_devices = em_alg_config.num_devices
+        if num_devices > 1:
+            if self.num_classes % num_devices == 0:
+                print(
+                    f"Hardware Status: Distributing {self.num_classes} classes evenly across {num_devices} GPUs via shard_map."
+                )
+            else:
+                print(
+                    f"Hardware Status: Found {num_devices} GPUs, but {self.num_classes} classes cannot be distributed evenly. Falling back to single-device execution."
+                )
+        else:
+            print("Hardware Status: Running on a single device.")
+
         logliks_list, em_recursion = [], 0
         while em_recursion < em_alg_config.maxiter:
             print(f"EM recursion: {em_recursion}")
