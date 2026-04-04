@@ -1,6 +1,6 @@
 [project]
 name = "lcl-choice"
-version = "0.1.11"
+version = "0.1.12"
 description = "A high-performance Python package for estimating latent-class conditional logit models."
 readme = "README.md"
 requires-python = ">=3.10"

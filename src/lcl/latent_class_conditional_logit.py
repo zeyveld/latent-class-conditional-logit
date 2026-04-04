@@ -131,6 +131,8 @@ class LatentClassConditionalLogit(ChoiceModel):
 
         estim_time_sec = time() - self._fit_start_time
 
+        print(f"Estimation time: {estim_time_sec}")
+
         return LCLResults(
             model_spec=self,
             em_vars=em_vars,
