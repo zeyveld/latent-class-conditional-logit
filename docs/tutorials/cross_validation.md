@@ -1,8 +1,8 @@
 # Cross-Validation & Model Selection
 
-Selecting the optimal number of latent classes is a common challenge in finite mixture modeling. Although information criteria (like BIC and CAIC) are useful in-sample metrics, out-of-sample predictive performance is often the most rigorous benchmark.
+Selecting the optimal number of latent classes is a common challenge in finite mixture modeling. While information criteria (BIC, CAIC) are useful in-sample metrics, out-of-sample predictive performance is often the most rigorous benchmark.
 
-LCL includes an experimental utility, `cv_optimal_classes`, that performs blocked K-Fold Cross Validation. 
+LCL includes an experimental utility, `cv_optimal_classes`, which performs blocked K-Fold Cross Validation. 
 
 !!! note "Panel-Safe Splitting"
     LCL automatically splits the cross-validation folds at the **panel level** (decision-maker). This ensures that an individual's choices do not accidentally leak across both the training and testing sets, preserving the integrity of the out-of-sample log-likelihood.

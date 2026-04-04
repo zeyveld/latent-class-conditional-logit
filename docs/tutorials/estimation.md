@@ -4,7 +4,7 @@ This tutorial demonstrates an end-to-end workflow using LCL, from data formattin
 
 ## 1. Data Preparation
 
-Choice models require data in a "long" format. The Apollo dataset is provided in a "wide" format (one row per choice situation). We use **Polars** to rapidly melt the dataset and filter out unavailable alternatives so it is ready for JAX.
+Choice models require data in a strictly sorted, "long" format. The Apollo dataset is provided in a "wide" format (one row per choice situation). We use **Polars** to rapidly melt the dataset, filter out unavailable alternatives, and sort the panel data so it is ready for JAX.
 
 ```python
 import urllib.request
@@ -37,7 +37,7 @@ for num, name in alts_map.items():
 
 df_long = pl.concat(dfs)
 
-# CRITICAL: Filter out alternatives that were not in the choice set
+# CRITICAL: Filter out alternatives that were not in the choice set, and sort
 df_long = df_long.filter(pl.col("av") == 1).sort(["ID", "qID", "alt"])
 ```
 
@@ -62,7 +62,7 @@ results = model.fit(
     em_alg_config=EMAlgConfig(maxiter=500)
 )
 
-# Output population-level moments with clustered standard errors
+# Output population-level moments with robust standard errors
 results.summarize_betas()
 ```
 
@@ -104,7 +104,7 @@ predictions = results.predict(
 print(predictions.predicted_probs.head())
 ```
 
-An experimental utility computes the full N x J x J x K matrix of own- and cross-elasticities directly from the prediction container:
+We can also extract the full N x N x K matrix of own- and cross-elasticities directly from the prediction container:
 
 ```python
 elasticities_df = predictions.elasticities(vars=["cost", "time"])
