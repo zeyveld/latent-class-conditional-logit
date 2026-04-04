@@ -1,15 +1,10 @@
 """Expectation-maximization algorithm."""
 
-import jax
 import jax.numpy as jnp
-import numpy as onp
 from equinox import combine, filter_jit, is_array, partition
-from jax import Array, device_count, devices, lax
-from jax.experimental.shard_map import shard_map
+from jax import Array, lax
 from jax.nn import sigmoid
 from jax.ops import segment_sum
-from jax.sharding import Mesh
-from jax.sharding import PartitionSpec as P
 from jaxopt import BFGS
 from jaxtyping import Float64
 
@@ -215,6 +210,7 @@ def _update_betas(
     Float64[Array, "alt_vars classes"]
         Updated taste parameters optimized for the current EM step.
     """
+
     # Separate the PyTree into dynamic arrays and static metadata
     dynamic_diff, static_diff = partition(diff_unchosen_chosen, is_array)
 
@@ -225,12 +221,18 @@ def _update_betas(
     ]:
         """Impose nonnegativity on numeraire (if provided)"""
         p_struct = _to_structural_betas(p, numeraire_idx)
+
+        # Combine the partitioned diff struct
         full_diff = combine(dyn_diff, static_diff)
+
+        # Pass combined struct and weights to the gradient function
         (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
 
+        # Apply chain rule (sigmoid is derivative of softplus)
         if numeraire_idx is not None:
-            grad = grad.at[numeraire_idx].multiply(sigmoid(p[numeraire_idx]))
+            grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
 
+        # Normalize to prevent softplus step explosions
         N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
         return (val / N_eff, aux), grad / N_eff
 
@@ -248,43 +250,12 @@ def _update_betas(
 
     def optimize_single_class(mapped_inputs) -> Float64[Array, "..."]:
         beta_vec, weight_vec = mapped_inputs
+        # dynamic_diff feeds into `dyn_diff`, weight_vec feeds into `w`
         params, _ = solver.run(beta_vec, dynamic_diff, weight_vec)
         return params
 
-    num_devices = device_count()
-    num_classes = betas.shape[1]
-
-    # Transpose upfront so the batch dimension (classes) is leading
-    betas_T = betas.T
-    weights_T = class_probs_by_choice.T
-
-    # Check if we have multiple GPUs AND the classes distribute evenly
-    if num_devices > 1 and num_classes % num_devices == 0:
-        # 1. Define the hardware mesh
-        devices = onp.array(jax.devices())
-        mesh = Mesh(devices, ("gpus",))
-
-        # 2. Define the local function that runs on each device's chunk of data
-        def optimize_device_chunk(betas_chunk, weights_chunk):
-            # lax.map sequentially processes the classes assigned to this specific GPU
-            return lax.map(optimize_single_class, (betas_chunk, weights_chunk))
-
-        # 3. Map the chunk function across the mesh
-        # P('gpus', None) means: Shard the 0th axis (classes) across 'gpus',
-        # and leave the 1st axis (parameters/cases) replicated on device memory.
-        sharded_opt = shard_map(
-            optimize_device_chunk,
-            mesh=mesh,
-            in_specs=(P("gpus", None), P("gpus", None)),
-            out_specs=P("gpus", None),
-        )
-
-        # 4. JIT compile the entire globally sharded operation
-        updated_betas_T = jax.jit(sharded_opt)(betas_T, weights_T)
-
-    else:
-        # Fallback to standard JIT-compiled loop on a single device
-        updated_betas_T = lax.map(optimize_single_class, (betas_T, weights_T))
+    mapped_inputs = (betas.T, class_probs_by_choice.T)
+    updated_betas_T = lax.map(optimize_single_class, mapped_inputs)
 
     return updated_betas_T.T
 

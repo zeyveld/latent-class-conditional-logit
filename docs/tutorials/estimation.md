@@ -7,13 +7,11 @@ This tutorial demonstrates an end-to-end workflow using LCL, from data formattin
 Choice models require data in a strictly sorted, "long" format. The Apollo dataset is provided in a "wide" format (one row per choice situation). We use **Polars** to rapidly melt the dataset, filter out unavailable alternatives, and sort the panel data so it is ready for JAX.
 
 ```python
-import urllib.request
 import polars as pl
 import lcl
 
 # Fetch the dataset directly from the Apollo servers
-url = "[https://www.apollochoicemodelling.com/files/examples/data/apollo_modeChoiceData.csv](https://www.apollochoicemodelling.com/files/examples/data/apollo_modeChoiceData.csv)"
-df_wide = pl.read_csv(urllib.request.urlopen(url))
+df_wide = pl.read_csv("https://www.apollochoicemodelling.com/files/examples/data/apollo_modeChoiceData.csv")
 
 # Create a unique choice situation ID
 df_wide = df_wide.with_row_index("qID")
