@@ -7,11 +7,10 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 from equinox import combine, filter_jit, is_array, partition
-from jax import Array
+from jax import Array, lax
 from jax.nn import sigmoid
 from jax.ops import segment_sum
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
+from jax.tree_util import tree_map
 from jaxopt import BFGS
 from jaxtyping import Float64
 
@@ -49,7 +48,7 @@ def _em_alg(
     mle_config : :class:`~lcl._struct.MleConfig`
         Optimization settings for the MLE solver (L-BFGS).
     em_alg_config : :class:`~lcl._struct.EMAlgConfig`
-        Configuration for the EM algorithm loop (includes hardware sharding settings).
+        Configuration for the EM algorithm loop (includes hardware settings).
     numeraire_idx : int | None, optional
         Column index of the numeraire variable.
 
@@ -202,47 +201,41 @@ def _loglik_fn_closure(
     """The objective function for the BFGS solver (operates on a single class)."""
     p_struct = _to_structural_betas(p, numeraire_idx)
 
-    # Recombine the PyTree inside the JIT closure
+    # Recombine the partitioned diff struct
     full_diff = combine(dyn_diff, static_diff)
 
+    # Pass combined struct and weights to the gradient function
     (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
 
+    # Apply chain rule (sigmoid is derivative of softplus)
     if numeraire_idx is not None:
-        grad = grad.at[numeraire_idx].multiply(sigmoid(p[numeraire_idx]))
+        grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
 
+    # Normalize to prevent softplus step explosions
     N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
     return (val / N_eff, aux), grad / N_eff
 
 
-@partial(
-    jax.jit,
-    static_argnames=(
-        "mle_maxiter",
-        "mle_ftol",
-        "numeraire_idx",
-        "num_devices",
-        "num_classes",
-    ),
-)
-def _execute_sharded_optimization(
-    betas_T: Float64[Array, "classes alt_vars"],
-    dynamic_diff: Any,
-    static_diff: Any,
-    weights_T: Float64[Array, "classes cases"],
+# Compile this EXACTLY ONCE.
+@partial(jax.jit, static_argnames=("mle_maxiter", "mle_ftol", "numeraire_idx"))
+def _optimize_single_class(
+    beta_vec: Float64[Array, "alt_vars"],
+    dyn_diff_inner: Any,
+    static_diff_inner: Any,
+    weight_vec: Float64[Array, "cases"],
     mle_maxiter: int,
     mle_ftol: float,
     numeraire_idx: int | None,
-    num_devices: int,
-    num_classes: int,
-) -> Float64[Array, "classes alt_vars"]:
-    """JIT-compiled sharded optimization step. Compiles natively and caches automatically."""
+) -> Float64[Array, "alt_vars"]:
+    """Standalone, non-sharded JIT optimizer for a single class.
 
-    # THE PROOF: This will only print during the XLA Tracing/Compilation phase
-    print(
-        "\n>>> JAX IS COMPILING THE OPTIMIZER GRAPH (This should only appear ONCE) <<<\n"
-    )
+    This avoids SPMD Lockstep deadlocks by compiling a solver for a single
+    class, allowing Python to dispatch it to GPUs asynchronously.
+    """
 
-    # Instantiate the jaxopt solver internally
+    # THE PROOF: This print statement only executes during the XLA compilation phase.
+    print("  [JIT Compile] Compiling BFGS optimizer for a single class...")
+
     solver = BFGS(
         fun=partial(_loglik_fn_closure, numeraire_idx=numeraire_idx),
         value_and_grad=True,
@@ -255,65 +248,79 @@ def _execute_sharded_optimization(
         verbose=False,
     )
 
-    def optimize_single_class(
-        beta_vec: Float64[Array, "alt_vars"],
-        dyn_diff_inner: Any,
-        static_diff_inner: Any,
-        weight_vec: Float64[Array, "cases"],
-    ) -> Float64[Array, "alt_vars"]:
-        params, _ = solver.run(beta_vec, dyn_diff_inner, static_diff_inner, weight_vec)
-        return params
-
-    # Vectorize the solver across the classes dimension
-    vmapped_opt = jax.vmap(optimize_single_class, in_axes=(0, None, None, 0))
-
-    if num_devices > 1 and num_classes % num_devices == 0:
-        devices = onp.array(jax.devices())
-        mesh = Mesh(devices, ("gpus",))
-        sharding = NamedSharding(mesh, P("gpus", None))
-
-        # Explicitly declare the hardware mapping for the inputs
-        out = jax.lax.with_sharding_constraint(betas_T, sharding)
-        weights_sharded = jax.lax.with_sharding_constraint(weights_T, sharding)
-
-        return vmapped_opt(out, dynamic_diff, static_diff, weights_sharded)
-    else:
-        # Fallback for CPU or uneven hardware distribution
-        return vmapped_opt(betas_T, dynamic_diff, static_diff, weights_T)
+    params, _ = solver.run(beta_vec, dyn_diff_inner, static_diff_inner, weight_vec)
+    return params
 
 
 def _update_betas(
     betas: Float64[Array, "alt_vars classes"],
     class_probs_by_choice: Float64[Array, "cases classes"],
-    diff_unchosen_chosen: Any,
-    mle_config: Any,
-    em_alg_config: Any,
+    diff_unchosen_chosen: DiffUnchosenChosen,
+    mle_config: MleConfig,
+    em_alg_config: EMAlgConfig,
     numeraire_idx: int | None,
 ) -> Float64[Array, "alt_vars classes"]:
-    """Optimize the taste parameters for all latent classes simultaneously."""
+    """Optimize the taste parameters by explicitly dispatching async jobs to GPUs.
 
-    # Partition the PyTree to separate dynamic arrays from static metadata (required for vmap)
+    Parameters
+    ----------
+    betas : Float64[Array, "alt_vars classes"]
+        Current unconstrained taste parameters.
+    class_probs_by_choice : Float64[Array, "cases classes"]
+        Posterior class membership probabilities to act as case weights.
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix.
+    mle_config : :class:`~lcl._struct.MleConfig`
+        MLE solver configurations.
+    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
+        Configuration for the EM algorithm loop (includes hardware settings).
+    numeraire_idx : int | None
+        Column index of the numeraire variable.
+
+    Returns
+    -------
+    Float64[Array, "alt_vars classes"]
+        Updated taste parameters optimized for the current EM step.
+    """
+
+    # Separate the PyTree into dynamic arrays and static metadata
     dynamic_diff, static_diff = partition(diff_unchosen_chosen, is_array)
 
-    # Transpose so the batch dimension (classes) is leading
-    betas_T = betas.T
-    weights_T = class_probs_by_choice.T
+    num_classes = betas.shape[1]
+    devices = jax.devices()
+    num_devices = len(devices)
 
-    # Call the statically jitted function
-    updated_betas_T = _execute_sharded_optimization(
-        betas_T,
-        dynamic_diff,
-        static_diff,
-        weights_T,
-        mle_config.maxiter,
-        mle_config.ftol,
-        numeraire_idx,
-        em_alg_config.num_devices,
-        betas.shape[1],
-    )
+    results = []
 
-    # Transpose back to original shape
-    return updated_betas_T.T
+    # Iterate through each class and assign it to a specific device
+    for c in range(num_classes):
+        target_device = devices[c % num_devices]
+
+        # 1. Physically push this class's starting params and weights to the target GPU
+        beta_c = jax.device_put(betas[:, c], target_device)
+        weight_c = jax.device_put(class_probs_by_choice[:, c], target_device)
+
+        # 2. Push a reference of the massive dataset to the target GPU to prevent PCIe bottlenecks.
+        # If the array is already cached on that GPU, JAX treats this as a zero-cost no-op.
+        dyn_diff_c = tree_map(lambda x: jax.device_put(x, target_device), dynamic_diff)
+
+        # 3. Fire and forget! JAX returns an async Future and the Python loop continues instantly.
+        res_c = _optimize_single_class(
+            beta_c,
+            dyn_diff_c,
+            static_diff,
+            weight_c,
+            mle_config.maxiter,
+            mle_config.ftol,
+            numeraire_idx,
+        )
+        results.append(res_c)
+
+    # 4. jnp.stack acts as a host-side barrier. Python will wait here until all GPUs
+    # successfully resolve their Futures, bypassing XLA lockstep timeout networks entirely.
+    updated_betas = jnp.stack(results, axis=1)
+
+    return updated_betas
 
 
 @filter_jit
