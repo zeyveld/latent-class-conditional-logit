@@ -224,39 +224,50 @@ def _update_betas(
     @filter_pmap(in_axes=(0, 0, None))
     def _distributed_update(device_betas, device_weights, diff):
 
-        # --- THE FIX ---
-        # Isolate static integers (like num_cases) to prevent jaxopt from coercing
-        # them into dynamic tracers.
         dyn_diff, static_diff = partition(diff, is_array)
-
-        def _loglik_fn_closure(p, d_diff, w):
-            # Recombine the static metadata safely inside the objective
-            full_diff = combine(d_diff, static_diff)
-
-            p_struct = _to_structural_betas(p, numeraire_idx)
-            (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
-
-            if numeraire_idx is not None:
-                grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
-
-            N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
-            return (val / N_eff, aux), grad / N_eff
-
-        solver = BFGS(
-            fun=_loglik_fn_closure,
-            value_and_grad=True,
-            has_aux=True,
-            linesearch="zoom",
-            max_stepsize=1.0,
-            maxiter=mle_config.maxiter,
-            tol=mle_config.ftol,
-            implicit_diff=False,
-            verbose=False,
-        )
 
         def optimize_single_class(mapped_inputs):
             b, w = mapped_inputs
-            # Pass ONLY the dynamic arrays to jaxopt
+
+            # --- MATHEMATICAL PARITY WITH _optimize.py ---
+            # Replicate the exact NORMALIZATION FIX from the single-GPU version
+            # rather than using N_eff, ensuring identical BFGS line-search behavior.
+            full_diff_init = combine(dyn_diff, static_diff)
+            p_struct_init = _to_structural_betas(b, numeraire_idx)
+            (init_val, _), _ = _loglik_gradient(p_struct_init, full_diff_init, w)
+            scale_factor = jnp.clip(jnp.abs(init_val), a_min=1.0)
+            # ---------------------------------------------
+
+            def _loglik_fn_closure(p, d_diff, w_inner):
+                full_diff = combine(d_diff, static_diff)
+
+                # The numeraire restriction is applied here
+                p_struct = _to_structural_betas(p, numeraire_idx)
+                (val, aux), grad = _loglik_gradient(p_struct, full_diff, w_inner)
+
+                # The gradient chain-rule is applied here
+                if numeraire_idx is not None:
+                    derivative = -sigmoid(p[numeraire_idx])
+                    grad = grad.at[numeraire_idx].multiply(derivative)
+                    aux = aux.at[:, numeraire_idx].multiply(
+                        derivative
+                    )  # <-- FIXED AUX CHAIN RULE
+
+                return (val / scale_factor, aux), grad / scale_factor
+
+            # solver is reinstantiated per class to ensure scale_factor is properly scoped
+            solver = BFGS(
+                fun=_loglik_fn_closure,
+                value_and_grad=True,
+                has_aux=True,
+                linesearch="zoom",
+                max_stepsize=1.0,
+                maxiter=mle_config.maxiter,
+                tol=mle_config.ftol,
+                implicit_diff=False,
+                verbose=False,
+            )
+
             params, _ = solver.run(b, dyn_diff, w)
             return params
 
