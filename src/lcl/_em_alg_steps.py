@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 from equinox import combine, filter_jit, is_array, partition
-from jax import Array, lax, shard_map
+from jax import Array
 from jax.nn import sigmoid
 from jax.ops import segment_sum
 from jax.sharding import Mesh
@@ -250,10 +250,13 @@ def _update_betas(
         verbose=False,
     )
 
-    def optimize_single_class(mapped_inputs) -> Float64[Array, "..."]:
-        beta_vec, weight_vec = mapped_inputs
+    # Note the signature change: taking explicit arguments rather than a single tuple
+    def optimize_single_class(beta_vec, weight_vec) -> Float64[Array, "..."]:
         params, _ = solver.run(beta_vec, dynamic_diff, weight_vec)
         return params
+
+    # 1. Vectorize the optimizer over the batch dimension (classes)
+    vmapped_opt = jax.vmap(optimize_single_class, in_axes=(0, 0))
 
     num_devices = em_alg_config.num_devices
     num_classes = betas.shape[1]
@@ -264,31 +267,26 @@ def _update_betas(
 
     # Check if we have multiple GPUs AND the classes distribute evenly
     if num_devices > 1 and num_classes % num_devices == 0:
-        # 1. Define the hardware mesh
+        from jax.sharding import NamedSharding
+
+        # 2. Define the hardware mesh
         devices = onp.array(jax.devices())
         mesh = Mesh(devices, ("gpus",))
 
-        # 2. Define the local function that runs on each device's chunk of data
-        def optimize_device_chunk(betas_chunk, weights_chunk):
-            # lax.map sequentially processes the classes assigned to this specific GPU
-            return lax.map(optimize_single_class, (betas_chunk, weights_chunk))
+        # 3. Define the sharding spec: Shard axis 0 (classes), replicate the rest
+        sharding = NamedSharding(mesh, P("gpus", None))
 
-        # 3. Map the chunk function across the mesh
-        # P('gpus', None) means: Shard the 0th axis (classes) across 'gpus',
-        # and leave the 1st axis (parameters/cases) replicated on device memory.
-        sharded_opt = shard_map(
-            optimize_device_chunk,
-            mesh=mesh,
-            in_specs=(P("gpus", None), P("gpus", None)),
-            out_specs=P("gpus", None),
+        # 4. JIT compile the vmapped function, forcing XLA to distribute it across the mesh
+        sharded_jit_opt = jax.jit(
+            vmapped_opt,
+            in_shardings=(sharding, sharding),
+            out_shardings=sharding,
         )
-
-        # 4. JIT compile the entire globally sharded operation
-        updated_betas_T = jax.jit(sharded_opt)(betas_T, weights_T)
+        updated_betas_T = sharded_jit_opt(betas_T, weights_T)
 
     else:
-        # Fallback to standard JIT-compiled loop on a single device
-        updated_betas_T = lax.map(optimize_single_class, (betas_T, weights_T))
+        # Fallback to standard JIT-compiled vmap on a single device
+        updated_betas_T = jax.jit(vmapped_opt)(betas_T, weights_T)
 
     return updated_betas_T.T
 
