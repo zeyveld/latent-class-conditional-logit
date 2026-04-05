@@ -94,6 +94,9 @@ class LatentClassConditionalLogit(ChoiceModel):
         else:
             print("Hardware Status: Running on a single device.")
 
+        # Evaluate convergence only every 10 iterations to minimize PCIe shuttling
+        check_interval = 10
+
         logliks_list, em_recursion = [], 0
         while em_recursion < em_alg_config.maxiter:
             print(f"EM recursion: {em_recursion}")
@@ -111,10 +114,13 @@ class LatentClassConditionalLogit(ChoiceModel):
             logliks_list.append(em_vars.unconditional_loglik)
             em_recursion += 1
 
-            if em_recursion >= 5:
-                rel_change = abs(em_vars.unconditional_loglik - logliks_list[-5]) / abs(
-                    logliks_list[-5]
-                )
+            # Only force a host sync every `check_interval` steps
+            if em_recursion >= 5 and (em_recursion % check_interval == 0):
+                # jax.block_until_ready() forces the sync explicitly here
+                current_ll = float(em_vars.unconditional_loglik)
+                past_ll = float(logliks_list[-5])
+
+                rel_change = abs(current_ll - past_ll) / abs(past_ll)
                 if rel_change <= em_alg_config.loglik_tol:
                     break
 

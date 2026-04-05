@@ -47,6 +47,8 @@ df_long.write_parquet(Path(__file__).parent / "df_long.parquet")
 We will estimate a model with 3 latent consumer classes. By specifying `numeraire="cost"`, LCL applies a softplus constraint to the cost parameter, ensuring marginal utility of income is strictly negative across all classes.
 
 ```python
+import os
+os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.70"
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 from lcl._struct import EMAlgConfig
 
@@ -64,7 +66,7 @@ results = model.fit(
     choice_col="choice",
     case_varnames=["cost", "time"],
     dem_varnames=["income", "female"],
-    em_alg_config=EMAlgConfig(maxiter=3)
+    em_alg_config=EMAlgConfig(maxiter=500)
 )
 
 # Output population-level moments with robust standard errors
