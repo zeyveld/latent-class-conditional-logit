@@ -8,11 +8,11 @@ from jax import Array, lax
 from jax.nn import sigmoid
 from jax.ops import segment_sum
 from jaxopt import BFGS
-from jaxtyping import Array, Float64
+from jaxtyping import Float64
 
 from lcl._case_utils import _loglik_gradient, _to_structural_betas
 from lcl._demographics import _predict_class_membership_probs, _update_thetas
-from lcl._struct import Data, DiffUnchosenChosen, EMVars, MleConfig
+from lcl._struct import Data, DiffUnchosenChosen, EMAlgConfig, EMVars, MleConfig
 
 
 def _em_alg(
@@ -21,6 +21,7 @@ def _em_alg(
     data: Data,
     num_classes: int,
     mle_config: MleConfig,
+    em_alg_config: EMAlgConfig,
     numeraire_idx: int | None = None,
 ) -> EMVars:
     """Execute a single step of the Expectation-Maximization (EM) algorithm.
@@ -69,6 +70,7 @@ def _em_alg(
         updated_class_probs_by_choice,
         diff_unchosen_chosen,
         mle_config,
+        em_alg_config,  # <-- Passed cleanly
         numeraire_idx,
     )
 
@@ -185,41 +187,19 @@ def _compute_conditional_class_probs(
     )
 
 
-Gemini said
-You caught me dead to rights. Yes, putting an import statement inside an inner closure—especially one destined for JAX tracing—is the textbook definition of a Python anti-pattern.
-
-It was a sloppy artifact on my end from trying to make the code block "self-contained," but it has no business being there. While JAX's tracer only executes that Python code once during graph compilation (so it wouldn't actually import it thousands of times on the GPU), it's still terrible practice. You already have from jax.nn import sigmoid at the top of your draft file, and that is exactly where it should stay. Good eye.
-
-I've done a rigorous audit of the rest of the logic to ensure there are no other glaring mistakes. The tensor math for the padding, the reshape dimensions, and the XLA compilation boundaries are mathematically and structurally sound.
-
-Here is the clean, corrected implementation.
-
-Python
-import math
-import jax.numpy as jnp
-from jax import lax
-from equinox import filter_pmap
-from jaxopt import BFGS
-from jaxtyping import Array, Float64
-
-# Assuming sigmoid is imported at the top of your file
-from jax.nn import sigmoid 
-
-from lcl._case_utils import _loglik_gradient, _to_structural_betas
-from lcl._struct import DiffUnchosenChosen, MleConfig
-
 def _update_betas(
     betas: Float64[Array, "alt_vars classes"],
     class_probs_by_choice: Float64[Array, "cases classes"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     mle_config: MleConfig,
+    em_alg_config: EMAlgConfig,  # <-- Accepts the struct
     numeraire_idx: int | None,
-    num_devices: int, 
 ) -> Float64[Array, "alt_vars classes"]:
     """Optimize taste parameters using strict SPMD multi-GPU parallelism."""
 
     num_classes = betas.shape[1]
-    
+    num_devices = em_alg_config.num_devices  # <-- Extracted cleanly
+
     # 1. Padding to ensure perfectly balanced workload across GPUs
     classes_per_device = math.ceil(num_classes / num_devices)
     padded_num_classes = classes_per_device * num_devices
@@ -243,7 +223,7 @@ def _update_betas(
     # 3. Define the per-device execution block
     @filter_pmap(in_axes=(0, 0, None))
     def _distributed_update(device_betas, device_weights, diff):
-        
+
         def _loglik_fn_closure(p, d_diff, w):
             p_struct = _to_structural_betas(p, numeraire_idx)
             (val, aux), grad = _loglik_gradient(p_struct, d_diff, w)
@@ -274,11 +254,14 @@ def _update_betas(
         return lax.map(optimize_single_class, (device_betas, device_weights))
 
     # 4. Fire the pmap execution
-    out_betas = _distributed_update(betas_reshaped, weights_reshaped, diff_unchosen_chosen)
+    out_betas = _distributed_update(
+        betas_reshaped, weights_reshaped, diff_unchosen_chosen
+    )
 
     # 5. Flatten the result back to standard shape and slice off the dummy padding
     out_betas = out_betas.reshape(padded_num_classes, -1).T
     return out_betas[:, :num_classes]
+
 
 # def _update_betas(
 #     betas: Float64[Array, "alt_vars classes"],
