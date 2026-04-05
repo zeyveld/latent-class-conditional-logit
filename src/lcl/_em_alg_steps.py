@@ -193,35 +193,28 @@ def _compute_conditional_class_probs(
 
 def _loglik_fn_closure(
     p: Float64[Array, "alt_vars"],
-    dyn_diff: Any,
-    static_diff: Any,
+    diff_struct: Any,
     w: Float64[Array, "cases"],
     numeraire_idx: int | None,
 ) -> tuple[tuple[Float64[Array, ""], Any], Float64[Array, "alt_vars"]]:
     """The objective function for the BFGS solver (operates on a single class)."""
     p_struct = _to_structural_betas(p, numeraire_idx)
 
-    # Recombine the partitioned diff struct
-    full_diff = combine(dyn_diff, static_diff)
+    # No need to combine anything! diff_struct is passed directly.
+    (val, aux), grad = _loglik_gradient(p_struct, diff_struct, w)
 
-    # Pass combined struct and weights to the gradient function
-    (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
-
-    # Apply chain rule (sigmoid is derivative of softplus)
     if numeraire_idx is not None:
         grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
 
-    # Normalize to prevent softplus step explosions
     N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
     return (val / N_eff, aux), grad / N_eff
 
 
-# Compile this EXACTLY ONCE.
-@partial(jax.jit, static_argnames=("mle_maxiter", "mle_ftol", "numeraire_idx"))
+# Use Equinox's filter_jit to automatically keep non-arrays (like num_cases) concrete
+@filter_jit
 def _optimize_single_class(
     beta_vec: Float64[Array, "alt_vars"],
-    dyn_diff_inner: Any,
-    static_diff_inner: Any,
+    diff_inner: Any,
     weight_vec: Float64[Array, "cases"],
     mle_maxiter: int,
     mle_ftol: float,
@@ -248,7 +241,7 @@ def _optimize_single_class(
         verbose=False,
     )
 
-    params, _ = solver.run(beta_vec, dyn_diff_inner, static_diff_inner, weight_vec)
+    params, _ = solver.run(beta_vec, diff_inner, weight_vec)
     return params
 
 
@@ -260,31 +253,7 @@ def _update_betas(
     em_alg_config: EMAlgConfig,
     numeraire_idx: int | None,
 ) -> Float64[Array, "alt_vars classes"]:
-    """Optimize the taste parameters by explicitly dispatching async jobs to GPUs.
-
-    Parameters
-    ----------
-    betas : Float64[Array, "alt_vars classes"]
-        Current unconstrained taste parameters.
-    class_probs_by_choice : Float64[Array, "cases classes"]
-        Posterior class membership probabilities to act as case weights.
-    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
-        Differenced design matrix.
-    mle_config : :class:`~lcl._struct.MleConfig`
-        MLE solver configurations.
-    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
-        Configuration for the EM algorithm loop (includes hardware settings).
-    numeraire_idx : int | None
-        Column index of the numeraire variable.
-
-    Returns
-    -------
-    Float64[Array, "alt_vars classes"]
-        Updated taste parameters optimized for the current EM step.
-    """
-
-    # Separate the PyTree into dynamic arrays and static metadata
-    dynamic_diff, static_diff = partition(diff_unchosen_chosen, is_array)
+    """Optimize the taste parameters by explicitly dispatching async jobs to GPUs."""
 
     num_classes = betas.shape[1]
     devices = jax.devices()
@@ -296,19 +265,25 @@ def _update_betas(
     for c in range(num_classes):
         target_device = devices[c % num_devices]
 
+        if c == 0:
+            print("  -> Dispatching async batch:")
+        print(f"     [Class {c}] assigned to [Device {target_device.id}]")
+
         # 1. Physically push this class's starting params and weights to the target GPU
         beta_c = jax.device_put(betas[:, c], target_device)
         weight_c = jax.device_put(class_probs_by_choice[:, c], target_device)
 
-        # 2. Push a reference of the massive dataset to the target GPU to prevent PCIe bottlenecks.
-        # If the array is already cached on that GPU, JAX treats this as a zero-cost no-op.
-        dyn_diff_c = tree_map(lambda x: jax.device_put(x, target_device), dynamic_diff)
+        # 2. Push only the dynamic arrays of the dataset to the target GPU.
+        # is_array ensures we leave static integers exactly where they are.
+        diff_c = tree_map(
+            lambda x: jax.device_put(x, target_device) if is_array(x) else x,
+            diff_unchosen_chosen,
+        )
 
         # 3. Fire and forget! JAX returns an async Future and the Python loop continues instantly.
         res_c = _optimize_single_class(
             beta_c,
-            dyn_diff_c,
-            static_diff,
+            diff_c,
             weight_c,
             mle_config.maxiter,
             mle_config.ftol,
