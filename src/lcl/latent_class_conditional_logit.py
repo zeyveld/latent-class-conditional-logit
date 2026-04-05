@@ -85,7 +85,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         if num_devices > 1:
             if self.num_classes % num_devices == 0:
                 print(
-                    f"Hardware Status: Distributing {self.num_classes} classes evenly across {num_devices} GPUs via shard_map."
+                    f"Hardware Status: Distributing {self.num_classes} classes across {num_devices} GPUs."
                 )
             else:
                 print(

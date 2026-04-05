@@ -250,12 +250,11 @@ def _update_betas(
         verbose=False,
     )
 
-    # Note the signature change: taking explicit arguments rather than a single tuple
     def optimize_single_class(beta_vec, weight_vec) -> Float64[Array, "..."]:
         params, _ = solver.run(beta_vec, dynamic_diff, weight_vec)
         return params
 
-    # 1. Vectorize the optimizer over the batch dimension (classes)
+    # Vectorize the optimizer over the batch dimension (classes)
     vmapped_opt = jax.vmap(optimize_single_class, in_axes=(0, 0))
 
     num_devices = em_alg_config.num_devices
@@ -269,14 +268,14 @@ def _update_betas(
     if num_devices > 1 and num_classes % num_devices == 0:
         from jax.sharding import NamedSharding
 
-        # 2. Define the hardware mesh
+        # Define the hardware mesh
         devices = onp.array(jax.devices())
         mesh = Mesh(devices, ("gpus",))
 
-        # 3. Define the sharding spec: Shard axis 0 (classes), replicate the rest
+        # Define the sharding spec: Shard axis 0 (classes), replicate the rest
         sharding = NamedSharding(mesh, P("gpus", None))
 
-        # 4. JIT compile the vmapped function, forcing XLA to distribute it across the mesh
+        # JIT compile the vmapped function, forcing XLA to distribute it across the mesh
         sharded_jit_opt = jax.jit(
             vmapped_opt,
             in_shardings=(sharding, sharding),
@@ -285,7 +284,7 @@ def _update_betas(
         updated_betas_T = sharded_jit_opt(betas_T, weights_T)
 
     else:
-        # Fallback to standard JIT-compiled vmap on a single device
+        # Fall back to standard JIT-compiled vmap on a single device
         updated_betas_T = jax.jit(vmapped_opt)(betas_T, weights_T)
 
     return updated_betas_T.T

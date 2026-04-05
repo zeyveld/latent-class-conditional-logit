@@ -73,7 +73,13 @@ class LCLResults:
         H = hessian(self._full_loglik_fn)(
             self.flat_params, diff_unchosen_chosen, self.data
         )
-        H_inv = jnp.linalg.pinv(-H)
+
+        # --- THE CPU ESCAPE HATCH ---
+        # Transfer the KxK matrix to the CPU, invert it using NumPy's highly stable
+        # SVD, and transfer it back. GPUs are terrible at small matrix inversions anyway!
+        H_cpu = onp.array(-H)
+        H_inv = jnp.array(onp.linalg.pinv(H_cpu))
+        # ----------------------------
 
         # Take outer product of panel-level gradients
         J = jacrev(self._panel_loglik_fn)(
