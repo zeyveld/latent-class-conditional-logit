@@ -3,7 +3,7 @@
 import math
 
 import jax.numpy as jnp
-from equinox import filter_jit, filter_pmap
+from equinox import combine, filter_jit, filter_pmap, is_array, partition
 from jax import Array, lax
 from jax.nn import sigmoid
 from jax.ops import segment_sum
@@ -192,13 +192,13 @@ def _update_betas(
     class_probs_by_choice: Float64[Array, "cases classes"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     mle_config: MleConfig,
-    em_alg_config: EMAlgConfig,  # <-- Accepts the struct
+    em_alg_config: EMAlgConfig,
     numeraire_idx: int | None,
 ) -> Float64[Array, "alt_vars classes"]:
     """Optimize taste parameters using strict SPMD multi-GPU parallelism."""
 
     num_classes = betas.shape[1]
-    num_devices = em_alg_config.num_devices  # <-- Extracted cleanly
+    num_devices = em_alg_config.num_devices
 
     # 1. Padding to ensure perfectly balanced workload across GPUs
     classes_per_device = math.ceil(num_classes / num_devices)
@@ -224,9 +224,17 @@ def _update_betas(
     @filter_pmap(in_axes=(0, 0, None))
     def _distributed_update(device_betas, device_weights, diff):
 
+        # --- THE FIX ---
+        # Isolate static integers (like num_cases) to prevent jaxopt from coercing
+        # them into dynamic tracers.
+        dyn_diff, static_diff = partition(diff, is_array)
+
         def _loglik_fn_closure(p, d_diff, w):
+            # Recombine the static metadata safely inside the objective
+            full_diff = combine(d_diff, static_diff)
+
             p_struct = _to_structural_betas(p, numeraire_idx)
-            (val, aux), grad = _loglik_gradient(p_struct, d_diff, w)
+            (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
 
             if numeraire_idx is not None:
                 grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
@@ -248,7 +256,8 @@ def _update_betas(
 
         def optimize_single_class(mapped_inputs):
             b, w = mapped_inputs
-            params, _ = solver.run(b, diff, w)
+            # Pass ONLY the dynamic arrays to jaxopt
+            params, _ = solver.run(b, dyn_diff, w)
             return params
 
         return lax.map(optimize_single_class, (device_betas, device_weights))
