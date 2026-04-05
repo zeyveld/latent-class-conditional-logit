@@ -103,9 +103,7 @@ def _em_alg(
         updated_thetas, unconditional_class_probs_by_panel = _update_thetas(
             em_vars.thetas, updated_class_probs_by_panel, data, num_classes
         )
-        print(f"updated_thetas : {updated_thetas}")
         updated_shares = unconditional_class_probs_by_panel.mean(axis=0)
-        print(f"updated_shares : {updated_shares}")
 
     # 4. Compute unconditional log likelihood given taste coefficients and class membership
     # coefficients
