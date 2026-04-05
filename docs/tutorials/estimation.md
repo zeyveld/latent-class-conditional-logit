@@ -37,6 +37,9 @@ df_long = pl.concat(dfs)
 
 # CRITICAL: Filter out alternatives that were not in the choice set, and sort
 df_long = df_long.filter(pl.col("av") == 1).sort(["ID", "qID", "alt"])
+
+from pathlib import Path
+df_long.write_parquet(Path(__file__).parent / "df_long.parquet")
 ```
 
 ## 2. Model Estimation
@@ -46,6 +49,10 @@ We will estimate a model with 3 latent consumer classes. By specifying `numerair
 ```python
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 from lcl._struct import EMAlgConfig
+
+import polars as pl 
+
+df_long = pl.read_parquet("df_long.parquet")
 
 model = LatentClassConditionalLogit(num_classes=4, numeraire="cost")
 
@@ -57,11 +64,12 @@ results = model.fit(
     choice_col="choice",
     case_varnames=["cost", "time"],
     dem_varnames=["income", "female"],
-    em_alg_config=EMAlgConfig(maxiter=500)
+    em_alg_config=EMAlgConfig(maxiter=3)
 )
 
 # Output population-level moments with robust standard errors
 results.summarize_betas()
+print(results)
 ```
 
 ## 3. Counterfactual Inference & Elasticities

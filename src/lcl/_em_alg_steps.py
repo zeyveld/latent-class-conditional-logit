@@ -1,5 +1,8 @@
 """Expectation-maximization algorithm."""
 
+from functools import partial
+from typing import Any
+
 import jax
 import jax.numpy as jnp
 import numpy as onp
@@ -7,7 +10,7 @@ from equinox import combine, filter_jit, is_array, partition
 from jax import Array
 from jax.nn import sigmoid
 from jax.ops import segment_sum
-from jax.sharding import Mesh
+from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 from jaxopt import BFGS
 from jaxtyping import Float64
@@ -189,104 +192,127 @@ def _compute_conditional_class_probs(
     )
 
 
-def _update_betas(
-    betas: Float64[Array, "alt_vars classes"],
-    class_probs_by_choice: Float64[Array, "cases classes"],
-    diff_unchosen_chosen: DiffUnchosenChosen,
-    mle_config: MleConfig,
-    em_alg_config: EMAlgConfig,
+def _loglik_fn_closure(
+    p: Float64[Array, "alt_vars"],
+    dyn_diff: Any,
+    static_diff: Any,
+    w: Float64[Array, "cases"],
     numeraire_idx: int | None,
-) -> Float64[Array, "alt_vars classes"]:
-    """Optimize the taste parameters for all latent classes simultaneously via `jax.lax.map`.
+) -> tuple[tuple[Float64[Array, ""], Any], Float64[Array, "alt_vars"]]:
+    """The objective function for the BFGS solver (operates on a single class)."""
+    p_struct = _to_structural_betas(p, numeraire_idx)
 
-    Parameters
-    ----------
-    betas : Float64[Array, "alt_vars classes"]
-        Current unconstrained taste parameters.
-    class_probs_by_choice : Float64[Array, "cases classes"]
-        Posterior class membership probabilities to act as case weights.
-    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
-        Differenced design matrix.
-    mle_config : :class:`~lcl._struct.MleConfig`
-        MLE solver configurations.
-    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
-        EM algorithm configurations (supplies device count for hardware sharding).
-    numeraire_idx : int | None
-        Column index of the numeraire variable.
+    # Recombine the PyTree inside the JIT closure
+    full_diff = combine(dyn_diff, static_diff)
 
-    Returns
-    -------
-    Float64[Array, "alt_vars classes"]
-        Updated taste parameters optimized for the current EM step.
-    """
-    # Separate the PyTree into dynamic arrays and static metadata
-    dynamic_diff, static_diff = partition(diff_unchosen_chosen, is_array)
+    (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
 
-    def _loglik_fn_closure(
-        p, dyn_diff, w
-    ) -> tuple[
-        tuple[Float64[Array, "..."], Float64[Array, "..."]], Float64[Array, "..."]
-    ]:
-        """Impose nonnegativity on numeraire (if provided)"""
-        p_struct = _to_structural_betas(p, numeraire_idx)
-        full_diff = combine(dyn_diff, static_diff)
-        (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
+    if numeraire_idx is not None:
+        grad = grad.at[numeraire_idx].multiply(sigmoid(p[numeraire_idx]))
 
-        if numeraire_idx is not None:
-            grad = grad.at[numeraire_idx].multiply(sigmoid(p[numeraire_idx]))
+    N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
+    return (val / N_eff, aux), grad / N_eff
 
-        N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
-        return (val / N_eff, aux), grad / N_eff
 
+@partial(
+    jax.jit,
+    static_argnames=(
+        "mle_maxiter",
+        "mle_ftol",
+        "numeraire_idx",
+        "num_devices",
+        "num_classes",
+    ),
+)
+def _execute_sharded_optimization(
+    betas_T: Float64[Array, "classes alt_vars"],
+    dynamic_diff: Any,
+    static_diff: Any,
+    weights_T: Float64[Array, "classes cases"],
+    mle_maxiter: int,
+    mle_ftol: float,
+    numeraire_idx: int | None,
+    num_devices: int,
+    num_classes: int,
+) -> Float64[Array, "classes alt_vars"]:
+    """JIT-compiled sharded optimization step. Compiles natively and caches automatically."""
+
+    # THE PROOF: This will only print during the XLA Tracing/Compilation phase
+    print(
+        "\n>>> JAX IS COMPILING THE OPTIMIZER GRAPH (This should only appear ONCE) <<<\n"
+    )
+
+    # Instantiate the jaxopt solver internally
     solver = BFGS(
-        fun=_loglik_fn_closure,
+        fun=partial(_loglik_fn_closure, numeraire_idx=numeraire_idx),
         value_and_grad=True,
         has_aux=True,
         linesearch="zoom",
         max_stepsize=1.0,
-        maxiter=mle_config.maxiter,
-        tol=mle_config.ftol,
+        maxiter=mle_maxiter,
+        tol=mle_ftol,
         implicit_diff=False,
         verbose=False,
     )
 
-    def optimize_single_class(beta_vec, weight_vec) -> Float64[Array, "..."]:
-        params, _ = solver.run(beta_vec, dynamic_diff, weight_vec)
+    def optimize_single_class(
+        beta_vec: Float64[Array, "alt_vars"],
+        dyn_diff_inner: Any,
+        static_diff_inner: Any,
+        weight_vec: Float64[Array, "cases"],
+    ) -> Float64[Array, "alt_vars"]:
+        params, _ = solver.run(beta_vec, dyn_diff_inner, static_diff_inner, weight_vec)
         return params
 
-    # Vectorize the optimizer over the batch dimension (classes)
-    vmapped_opt = jax.vmap(optimize_single_class, in_axes=(0, 0))
+    # Vectorize the solver across the classes dimension
+    vmapped_opt = jax.vmap(optimize_single_class, in_axes=(0, None, None, 0))
 
-    num_devices = em_alg_config.num_devices
-    num_classes = betas.shape[1]
+    if num_devices > 1 and num_classes % num_devices == 0:
+        devices = onp.array(jax.devices())
+        mesh = Mesh(devices, ("gpus",))
+        sharding = NamedSharding(mesh, P("gpus", None))
 
-    # Transpose upfront so the batch dimension (classes) is leading
+        # Explicitly declare the hardware mapping for the inputs
+        out = jax.lax.with_sharding_constraint(betas_T, sharding)
+        weights_sharded = jax.lax.with_sharding_constraint(weights_T, sharding)
+
+        return vmapped_opt(out, dynamic_diff, static_diff, weights_sharded)
+    else:
+        # Fallback for CPU or uneven hardware distribution
+        return vmapped_opt(betas_T, dynamic_diff, static_diff, weights_T)
+
+
+def _update_betas(
+    betas: Float64[Array, "alt_vars classes"],
+    class_probs_by_choice: Float64[Array, "cases classes"],
+    diff_unchosen_chosen: Any,
+    mle_config: Any,
+    em_alg_config: Any,
+    numeraire_idx: int | None,
+) -> Float64[Array, "alt_vars classes"]:
+    """Optimize the taste parameters for all latent classes simultaneously."""
+
+    # Partition the PyTree to separate dynamic arrays from static metadata (required for vmap)
+    dynamic_diff, static_diff = partition(diff_unchosen_chosen, is_array)
+
+    # Transpose so the batch dimension (classes) is leading
     betas_T = betas.T
     weights_T = class_probs_by_choice.T
 
-    # Check if we have multiple GPUs AND the classes distribute evenly
-    if num_devices > 1 and num_classes % num_devices == 0:
-        from jax.sharding import NamedSharding
+    # Call the statically jitted function
+    updated_betas_T = _execute_sharded_optimization(
+        betas_T,
+        dynamic_diff,
+        static_diff,
+        weights_T,
+        mle_config.maxiter,
+        mle_config.ftol,
+        numeraire_idx,
+        em_alg_config.num_devices,
+        betas.shape[1],
+    )
 
-        # Define the hardware mesh
-        devices = onp.array(jax.devices())
-        mesh = Mesh(devices, ("gpus",))
-
-        # Define the sharding spec: Shard axis 0 (classes), replicate the rest
-        sharding = NamedSharding(mesh, P("gpus", None))
-
-        # JIT compile the vmapped function, forcing XLA to distribute it across the mesh
-        sharded_jit_opt = jax.jit(
-            vmapped_opt,
-            in_shardings=(sharding, sharding),
-            out_shardings=sharding,
-        )
-        updated_betas_T = sharded_jit_opt(betas_T, weights_T)
-
-    else:
-        # Fall back to standard JIT-compiled vmap on a single device
-        updated_betas_T = jax.jit(vmapped_opt)(betas_T, weights_T)
-
+    # Transpose back to original shape
     return updated_betas_T.T
 
 
