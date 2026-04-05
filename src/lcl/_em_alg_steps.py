@@ -43,6 +43,8 @@ def _em_alg(
         Number of latent classes.
     mle_config : :class:`~lcl._struct.MleConfig`
         Optimization settings for the MLE solver (L-BFGS).
+    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
+        Configuration containing the JAX PRNG seed for reproducible partitioning.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable.
 
@@ -195,7 +197,28 @@ def _update_betas(
     em_alg_config: EMAlgConfig,
     numeraire_idx: int | None,
 ) -> Float64[Array, "alt_vars classes"]:
-    """Optimize taste parameters using strict SPMD multi-GPU parallelism."""
+    """Optimize taste parameters using strict SPMD multi-GPU parallelism.
+
+    Parameters
+    ----------
+    betas : Float64[Array, "alt_vars classes"]
+        Current unconstrained taste parameters.
+    class_probs_by_choice : Float64[Array, "cases classes"]
+        Posterior class membership probabilities to act as case weights.
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix.
+    mle_config : :class:`~lcl._struct.MleConfig`
+        MLE solver configurations.
+    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
+        Configuration containing the JAX PRNG seed for reproducible partitioning.
+    numeraire_idx : int | None
+        Column index of the numeraire variable.
+
+    Returns
+    -------
+    Float64[Array, "alt_vars classes"]
+        Updated taste parameters optimized for the current EM step.
+    """
 
     num_classes = betas.shape[1]
     num_devices = em_alg_config.num_devices
