@@ -191,26 +191,7 @@ def _compute_conditional_class_probs(
     )
 
 
-def _loglik_fn_closure(
-    p: Float64[Array, "alt_vars"],
-    diff_struct: Any,
-    w: Float64[Array, "cases"],
-    numeraire_idx: int | None,
-) -> tuple[tuple[Float64[Array, ""], Any], Float64[Array, "alt_vars"]]:
-    """The objective function for the BFGS solver (operates on a single class)."""
-    p_struct = _to_structural_betas(p, numeraire_idx)
-
-    # No need to combine anything! diff_struct is passed directly.
-    (val, aux), grad = _loglik_gradient(p_struct, diff_struct, w)
-
-    if numeraire_idx is not None:
-        grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
-
-    N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
-    return (val / N_eff, aux), grad / N_eff
-
-
-# Use Equinox's filter_jit to automatically keep non-arrays (like num_cases) concrete
+# Use Equinox's filter_jit to automatically keep non-arrays (like num_cases) concrete at the boundary
 @filter_jit
 def _optimize_single_class(
     beta_vec: Float64[Array, "alt_vars"],
@@ -220,17 +201,32 @@ def _optimize_single_class(
     mle_ftol: float,
     numeraire_idx: int | None,
 ) -> Float64[Array, "alt_vars"]:
-    """Standalone, non-sharded JIT optimizer for a single class.
-
-    This avoids SPMD Lockstep deadlocks by compiling a solver for a single
-    class, allowing Python to dispatch it to GPUs asynchronously.
-    """
+    """Standalone, non-sharded JIT optimizer for a single class."""
 
     # THE PROOF: This print statement only executes during the XLA compilation phase.
     print("  [JIT Compile] Compiling BFGS optimizer for a single class...")
 
+    # 1. Isolate the static integers so jaxopt never sees them!
+    dyn_diff, static_diff = partition(diff_inner, is_array)
+
+    # 2. Define the objective function inside the scope so it can safely capture the static data
+    def objective(p, dyn_d, w):
+        p_struct = _to_structural_betas(p, numeraire_idx)
+
+        # Safely recombine the static integers (like num_cases) with the traced arrays
+        full_diff = combine(dyn_d, static_diff)
+
+        (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
+
+        if numeraire_idx is not None:
+            grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
+
+        N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
+        return (val / N_eff, aux), grad / N_eff
+
+    # 3. Initialize the solver using our protected objective function
     solver = BFGS(
-        fun=partial(_loglik_fn_closure, numeraire_idx=numeraire_idx),
+        fun=objective,
         value_and_grad=True,
         has_aux=True,
         linesearch="zoom",
@@ -241,7 +237,8 @@ def _optimize_single_class(
         verbose=False,
     )
 
-    params, _ = solver.run(beta_vec, diff_inner, weight_vec)
+    # 4. Pass ONLY the dynamic arrays to jaxopt. It will trace them without touching the static ints.
+    params, _ = solver.run(beta_vec, dyn_diff, weight_vec)
     return params
 
 
@@ -292,7 +289,7 @@ def _update_betas(
         results.append(res_c)
 
     # 4. jnp.stack acts as a host-side barrier. Python will wait here until all GPUs
-    # successfully resolve their Futures, bypassing XLA lockstep timeout networks entirely.
+    # successfully resolve their Futures.
     updated_betas = jnp.stack(results, axis=1)
 
     return updated_betas
