@@ -13,7 +13,39 @@ from lcl._struct import EMAlgConfig, MleConfig
 
 
 class LatentClassConditionalLogit(ChoiceModel):
-    """Specification and estimation for latent-class conditional logit models."""
+    """Specification and estimation for latent-class conditional logit models.
+
+    This class provides the interface for defining and fitting a latent-class
+    conditional logit model using an Expectation-Maximization (EM) algorithm. It
+    inherits from the abstract base class `ChoiceModel` and manages the data
+    ingestion, initialization, and iterative optimization of latent taste
+    parameters and class membership probabilities.
+
+    Parameters
+    ----------
+    num_classes : int, default=5
+        The number of discrete latent classes to estimate.
+    numeraire : str | None, default=None
+        The name of the variable to be used as the numeraire (e.g., price or cost).
+        If specified, its taste parameter is mathematically constrained to be
+        strictly negative across all latent classes via a softplus transformation
+        to ensure theoretically consistent willingness-to-pay calculations.
+
+    Attributes
+    ----------
+    num_classes : int
+        The number of discrete latent classes.
+    numeraire : str | None
+        The name of the numeraire variable.
+    numeraire_idx : int | None
+        The column index of the numeraire variable in the expanded design matrix,
+        resolved during the `fit` method.
+    num_vars : int
+        The total number of alternative-specific variables (taste parameters),
+        resolved during the `fit` method.
+    num_dem_vars : int
+        The total number of demographic variables, resolved during the `fit` method.
+    """
 
     def __init__(
         self,
@@ -39,7 +71,60 @@ class LatentClassConditionalLogit(ChoiceModel):
         em_alg_config: EMAlgConfig = EMAlgConfig(),
         mle_config: MleConfig = MleConfig(),
     ) -> LCLResults:
-        """Fit the latent-class conditional logit model using the EM algorithm."""
+        """Fit the latent-class conditional logit model using an EM algorithm.
+
+        This method ingests raw data, translates it into strictly contiguous,
+        zero-indexed JAX arrays (PyTrees), and executes the hardware-accelerated
+        EM optimization routine.
+
+        Parameters
+        ----------
+        data : Any
+            The main dataset containing choice situations. Accepts a Polars DataFrame,
+            Pandas DataFrame, or dictionary of arrays.
+        alts_col : str
+            The name of the column identifying specific alternatives within a choice
+            situation.
+        cases_col : str
+            The name of the column grouping observations into distinct choice
+            situations.
+        panels_col : str
+            The name of the column mapping choice situations to specific
+            decision-makers (panels).
+        formula : str | None, default=None
+            An R-style formula string (e.g., "choice ~ price + time | income").
+            If provided, overrides `choice_col`, `case_varnames`, and `dem_varnames`.
+        choice_col : str | None, default=None
+            The name of the boolean or binary column indicating chosen alternatives.
+            Required if `formula` is not provided.
+        case_varnames : Sequence[str] | None, default=None
+            A list of alternative-specific variables to include in the utility
+            specification. Required if `formula` is not provided.
+        dem_varnames : Sequence[str] | None, default=None
+            A list of demographic variables used to predict latent class membership.
+        dems_data : Any | None, default=None
+            An optional, separate panel-level dataset containing demographics. If
+            provided, it will be merged with the main `data` on `panels_col`.
+        em_alg_config : :class:`~lcl._struct.EMAlgConfig`, default=EMAlgConfig()
+            A dataclass (PyTree) containing configuration options for the overall EM
+            algorithm (e.g., maximum iterations, tolerance, hardware distribution).
+        mle_config : :class:`~lcl._struct.MleConfig`, default=MleConfig()
+            A dataclass (PyTree) containing optimization settings for the M-step's
+            internal L-BFGS solver.
+
+        Returns
+        -------
+        :class:`~lcl._results.LCLResults`
+            A container holding the estimated parameters, optimization metadata,
+            information criteria, and methods for inference (standard errors,
+            predictions).
+
+        Raises
+        ------
+        ValueError
+            If a `numeraire` was specified during class instantiation but cannot be
+            found in the expanded design matrix columns.
+        """
 
         parsed_data = self._ingest_data(
             data=data,
@@ -94,9 +179,6 @@ class LatentClassConditionalLogit(ChoiceModel):
         else:
             print("Hardware Status: Running on a single device.")
 
-        # Evaluate convergence only every 10 iterations to minimize PCIe shuttling
-        check_interval = 10
-
         logliks_list, em_recursion = [], 0
         while em_recursion < em_alg_config.maxiter:
             print(f"EM recursion: {em_recursion}")
@@ -115,7 +197,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             em_recursion += 1
 
             # Only force a host sync every `check_interval` steps
-            if em_recursion >= 5 and (em_recursion % check_interval == 0):
+            if em_recursion >= 5 and (em_recursion % em_alg_config.check_interval == 0):
                 # jax.block_until_ready() forces the sync explicitly here
                 current_ll = float(em_vars.unconditional_loglik)
                 past_ll = float(logliks_list[-5])

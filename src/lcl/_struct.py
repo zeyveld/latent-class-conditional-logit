@@ -135,6 +135,7 @@ class EMAlgConfig:
     loglik_tol: float = 1e-6
     maxiter: int = 2000
     num_devices: int = field(default_factory=device_count)
+    check_interval: int = 10
 
 
 @dataclass
