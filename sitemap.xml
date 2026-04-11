@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+    <url>
+         <loc>https://zeyveld.github.io/latent-class-conditional-logit/</loc>
+         <lastmod>2026-04-11</lastmod>
+    </url>
+    <url>
+         <loc>https://zeyveld.github.io/latent-class-conditional-logit/api/conditional_logit/</loc>
+         <lastmod>2026-04-11</lastmod>
+    </url>
+    <url>
+         <loc>https://zeyveld.github.io/latent-class-conditional-logit/api/cross_validation/</loc>
+         <lastmod>2026-04-11</lastmod>
+    </url>
+    <url>
+         <loc>https://zeyveld.github.io/latent-class-conditional-logit/api/latent_class/</loc>
+         <lastmod>2026-04-11</lastmod>
+    </url>
+    <url>
+         <loc>https://zeyveld.github.io/latent-class-conditional-logit/tutorials/cross_validation/</loc>
+         <lastmod>2026-04-11</lastmod>
+    </url>
+    <url>
+         <loc>https://zeyveld.github.io/latent-class-conditional-logit/tutorials/estimation/</loc>
+         <lastmod>2026-04-11</lastmod>
+    </url>
+</urlset>
