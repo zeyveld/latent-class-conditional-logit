@@ -1,0 +1,96 @@
+>>> import os
+>>> from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
+>>> from lcl._struct import EMAlgConfig
+>>> import polars as pl
+>>>
+>>> # Fetch the dataset directly from the Apollo servers
+>>> df_wide = pl.read_csv("https://www.apollochoicemodelling.com/files/examples/data/apollo_modeChoiceData.csv")
+>>>
+>>> # Create a unique choice situation ID
+>>> df_wide = df_wide.with_row_index("qID")
+>>>
+>>> alts_map = {1: "car", 2: "bus", 3: "air", 4: "rail"}
+>>> dfs = []
+>>>
+>>> # Melt to long format
+>>> for num, name in alts_map.items():
+...     alt_df = df_wide.select([
+...         pl.col("ID"),
+...         pl.col("qID"),
+...         pl.col("income"),
+...         pl.col("female"),
+...         pl.col(f"time_{name}").alias("time"),
+...         pl.col(f"cost_{name}").alias("cost"),
+...         pl.col(f"av_{name}").alias("av"), # Availability flag
+...         (pl.col("choice") == num).alias("choice")
+...     ]).with_columns(pl.lit(name).alias("alt"))
+...     dfs.append(alt_df)
+...
+>>> df_long = pl.concat(dfs)
+>>>
+>>> # CRITICAL: Filter out alternatives that were not in the choice set, and sort
+>>> df_long = df_long.filter(pl.col("av") == 1).sort(["ID", "qID", "alt"])
+>>> df_long = pl.read_parquet("df_long.parquet")
+>>>
+>>> model = LatentClassConditionalLogit(num_classes=4, numeraire="cost")
+>>>
+>>> results = model.fit(
+...     data=df_long,
+...     alts_col="alt",
+...     cases_col="qID",
+...     panels_col="ID",
+...     choice_col="choice",
+...     case_varnames=["cost", "time"],
+...     dem_varnames=["income", "female"],
+...     em_alg_config=EMAlgConfig(maxiter=500)
+... )
+E0411 08:07:20.477870 2562595 ptx_compiler_helpers.cc:157] *** WARNING *** Invoking ptxas with version 12.4.99, which corresponds to a CUDA version <=12.6.2. CUDA versions 12.x.y up to and including 12.6.2 miscompile certain edge cases around clamping.
+Please upgrade to CUDA 12.6.3 or newer.
+Hardware Status: Distributing 4 classes across 4 GPUs.
+EM recursion: 0
+EM recursion: 1
+EM recursion: 2
+
+...
+
+EM recursion: 48
+EM recursion: 49
+Estimation time: 350.06757950782776
+
+Computing clustered covariance matrix per steps in Stata's reference manual...
+(StataCorp. 2025. Stata 19 Base Reference Manual. College Station, TX: Stata Press.)
+
+
+Information criteria:
+  Consistent Aikake information criterion (CAIC; see Bozdogan [1987]): 15346.4
+  Bayesian information criterion (BIC; see Schwartz [1978]): 15329.4
+  Adjusted BIC (see Sclove [1987]): 15228.7
+>>>
+>>> # Output population-level moments with robust standard errors
+>>> results.summarize_betas()
+
+--- LaTeX Output ---
+
+\toprule
+Variable & Means (\beta's) & Standard deviations (\sigma's) \\
+\midrule
+%
+cost & -0.047 & 0.012 \\
+ & (0.001) & (0.002) \\
+time & -0.011 & 0.003 \\
+ & (0.000) & (0.000) \\
+%
+\bottomrule
+
+--- Table preview ---
+
+┌────────────┬───────────────┬─────────────────────────────┐
+│ Variable   │ Means (β's)   │ Standard deviations (σ's)   │
+├────────────┼───────────────┼─────────────────────────────┤
+│ cost       │ -0.047        │ 0.012                       │
+│            │ (0.001)       │ (0.002)                     │
+│ time       │ -0.011        │ 0.003                       │
+│            │ (0.000)       │ (0.000)                     │
+└────────────┴───────────────┴─────────────────────────────┘
+>>> print(results)
+<LCLResults: 4 Classes | Converged | Log likelihood: -7611.9> | CAIC: 15346.4 | BIC: 15329.4 | Adj. BIC: 15228.7>
