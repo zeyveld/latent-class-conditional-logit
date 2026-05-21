@@ -63,7 +63,7 @@ nav:
       - Estimation & counterfactuals: tutorials/estimation.md
       - Cross-validation & model selection: tutorials/cross_validation.md
   - API Reference:
-      - Latent-class logit: api/latent_class.md
+      - Latent-class conditional logit: api/latent_class.md
       - Conditional logit: api/conditional_logit.md
       - Cross-validation: api/cross_validation.md
 
