@@ -1,22 +1,26 @@
-# LCL: Latent-Class Conditional Logit Estimation in Python
+# LCL
 
 [![PyPI version](https://badge.fury.io/py/lcl-choice.svg)](https://badge.fury.io/py/lcl-choice)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**LCL** is a Python package for fitting latent-class conditional logit models. It runs the expectation-maximization algorithm on JAX, sharding the per-class M-steps across whatever accelerators it finds, and returns a results object with clustered robust standard errors, counterfactual predictions, and Delta-method willingness-to-pay distributions.
+LCL is a Python package for estimating latent-class conditional logit models. It runs an expectation-maximization (EM) algorithm on JAX, sharding the per-class M-steps across available accelerators, and returns a results object with clustered standard errors, counterfactual predictions, and Delta-method willingness-to-pay distributions.
 
-It is written for econometricians who routinely outgrow `mlogit`, `gmnl`, or `Apollo` on large panel datasets. Eighty thousand households with twenty choice occasions apiece is a comfortable working size on a single H200.
+Although I'm an economist by training, this package is intended for all social scientists who study household-level panel data: marketers, transportation researchers, operations researchers, political scientists, public policy and administration researchers, and others.
 
-## What is in the package
+## Key features
 
-* **`LatentClassConditionalLogit`** — finite-mixture conditional logit with a fractional-response multinomial regression for class membership on demographics.
-* **`ConditionalLogit`** — a standard conditional logit, useful as both a baseline and the inner kernel of the M-step.
-* **`cv_optimal_classes`** — blocked K-fold cross-validation for choosing the number of latent classes; folds are split at the decision-maker level.
-* **Counterfactual prediction** — out-of-sample choice probabilities, expected consumer surplus, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
-* **Inference** — clustered sandwich covariance at the panel level and the Delta method for non-linear parameter combinations.
+- **`LatentClassConditionalLogit`** — finite-mixture conditional logit with a fractional-response multinomial logit regression of class membership on demographics.
+- **`ConditionalLogit`** — standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
+- **`cv_optimal_classes`** — blocked K-fold cross-validation for choosing the number of latent classes. Folds are split at the decision-maker level, so no individual's choices appear in both training and held-out data.
+- **Counterfactual prediction** — out-of-sample choice probabilities, expected consumer surplus, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
+- **Inference** — clustered sandwich covariance at the panel level and the Delta method for non-linear parameter combinations such as the value of time.
 
-Type contracts are enforced at runtime through `jaxtyping` and `beartype`: a wrongly shaped design matrix raises a readable error at the call site rather than a trace through XLA.
+Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped design matrix raises a readable error at the call site rather than a cryptic XLA trace.
+
+## Documentation
+
+Full documentation — worked tutorials, an API reference, and a model-selection guide — is hosted at [zeyveld.github.io/latent-class-conditional-logit](https://zeyveld.github.io/latent-class-conditional-logit/).
 
 ## Installation
 
@@ -26,11 +30,11 @@ The wheel is published on PyPI as `lcl-choice` (it imports as `lcl`):
 pip install lcl-choice
 ```
 
-If you intend to run on a GPU, install the CUDA-matched JAX build first; see the [JAX installation notes](https://github.com/jax-ml/jax#installation).
+If you plan to use a GPU, install the CUDA-matched JAX build first; see the [JAX installation notes](https://github.com/jax-ml/jax#installation).
 
 ## Quickstart
 
-A two-class model on a small synthetic panel — one class price-sensitive, the other quality-loving.
+A two-class model on a small synthetic panel. The [estimation tutorial](https://zeyveld.github.io/latent-class-conditional-logit/tutorials/estimation/) provides a full example, including counterfactual fares and value-of-time partitions.
 
 ```python
 import numpy as onp
@@ -40,6 +44,7 @@ from lcl._struct import EMAlgConfig, MleConfig
 
 rng = onp.random.default_rng(7)
 
+# Two latent classes: one is price-sensitive, the other prefers quality.
 n_panels, n_choices, n_alts = 200, 4, 3
 true_class = rng.choice(2, size=n_panels, p=[0.55, 0.45])
 beta_price   = onp.array([-1.8, -0.3])
@@ -106,21 +111,20 @@ Information criteria: CAIC=1233.4, BIC=1227.4, adjusted BIC=1197.4
  CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1197.4>
 ```
 
-A complete walkthrough using the Apollo `modeChoice` data — counterfactual fares, value of time by income quintile, own- and cross-elasticities — is in the [estimation tutorial on the docs site](https://zeyveld.github.io/latent-class-conditional-logit/tutorials/estimation/).
+The parentheses enclose Delta-method standard errors on the population moments. The class-specific β's themselves are available in `results.em_res.structural_betas`.
 
 ## Roadmap
 
-LCL is under active development. The estimator is stable and the results object covers the cases we encounter in our own work. Active work is on:
+The estimator is fairly stable and the results object covers the cases I encounter in my own work. I'm hoping to make two extensions:
 
-* **Model selection.** Blocked K-fold cross-validation is included but still labelled experimental; expect refinements on highly unbalanced panels.
-* **Documentation.** A mathematical appendix and worked examples beyond Apollo's mode-choice data.
-* **Companion paper.** A working paper covering the econometric framework, hardware benchmarks, and Monte Carlo coverage tests.
+- **Model selection.** Blocked K-fold cross-validation is included but still marked experimental — expect refinements as I deploy this utility in my research.
+- **Documentation.** A mathematical appendix and additional worked examples beyond Apollo's mode-choice data.
 
-Feature requests are welcome on the [issue tracker](https://github.com/zeyveld/latent-class-conditional-logit/issues).
+If there is a constraint, optimization routine, or post-estimation tool you'd like to see, [open an issue](https://github.com/zeyveld/latent-class-conditional-logit/issues).
 
-## Development
+## Contributing
 
-The project uses `uv` for dependency management.
+The project uses `uv` for dependency management:
 
 ```bash
 git clone https://github.com/zeyveld/latent-class-conditional-logit.git
@@ -139,7 +143,7 @@ The documentation site is set in [Luciole](https://luciole-vision.com/), a typef
 
 ```bibtex
 @software{lcl_2026,
-  author = {Jeffries, Anna and Zeyveld, Andrew},
+  author = {Zeyveld, Andrew},
   title  = {LCL: Latent-Class Conditional Logit Estimation in Python},
   year   = {2026},
   url    = {https://github.com/zeyveld/latent-class-conditional-logit}
