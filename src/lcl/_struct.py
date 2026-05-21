@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from typing import NamedTuple, Optional, Union
+from typing import Any, NamedTuple, Optional, Union
 
 from jax import Array, device_count
 from jax.typing import ArrayLike
@@ -41,6 +41,9 @@ class ParsedData:
     panels: Array
     case_varnames: list[str]
     dem_varnames: Optional[list[str]]
+    original_alts: Any | None = None
+    original_cases: Any | None = None
+    original_panels: Any | None = None
 
 
 class Data(NamedTuple):

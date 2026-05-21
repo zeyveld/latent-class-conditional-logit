@@ -6,6 +6,7 @@ from jax.nn import softplus
 from jax.ops import segment_sum
 from jaxtyping import Array, Float64
 
+from lcl._kernels import _diff_logit_components
 from lcl._struct import Data, DiffUnchosenChosen
 
 
@@ -17,6 +18,7 @@ def _loglik_gradient(
 ) -> tuple[
     tuple[Float64[Array, ""], Float64[Array, "cases alt_vars"]],
     Float64[Array, "alt_vars"],
+    Float64[Array, "alt_vars alt_vars"],
 ]:
     """Compute the log-likelihood and analytic gradient for a conditional logit specification.
 
@@ -40,31 +42,55 @@ def _loglik_gradient(
     grad : Float64[Array, "alt_vars"]
         The analytic gradient of the negative log-likelihood with respect to ``structural_betas``.
     """
-    # Compute representative utility and choice probabilities
-    Vd: Float64[Array, "unchosen_alts_by_case"] = jnp.clip(
-        diff_unchosen_chosen.X.dot(structural_betas), a_max=700.0
+    log_probs, p_unchosen = _diff_logit_components(
+        diff_unchosen_chosen.X,
+        structural_betas,
+        diff_unchosen_chosen.cases,
+        diff_unchosen_chosen.num_cases,
     )
+
+    # Log likelihood
+    loglik_by_case = log_probs * weights
+    neg_loglik = -jnp.sum(loglik_by_case)
+
+    x_bar_d = segment_sum(
+        diff_unchosen_chosen.X * p_unchosen[:, None],
+        diff_unchosen_chosen.cases,
+        num_segments=diff_unchosen_chosen.num_cases,
+    )  # (cases, alt_vars)
+
+    grad_n = -x_bar_d * weights[:, None]
+    grad = jnp.sum(grad_n, axis=0)
+
+    row_weights = p_unchosen * weights[diff_unchosen_chosen.cases]
+
+    second_moment_total = diff_unchosen_chosen.X.T @ (
+        diff_unchosen_chosen.X * row_weights[:, None]
+    )
+
+    first_moment_total = x_bar_d.T @ (x_bar_d * weights[:, None])
+
+    hessian = second_moment_total - first_moment_total
+
+    return (neg_loglik, grad_n), -grad, hessian
+
+
+@filter_jit
+def _loglik_value(
+    structural_betas: Float64[Array, "alt_vars"],
+    diff_unchosen_chosen: DiffUnchosenChosen,
+    weights: Float64[Array, "cases"],
+) -> Float64[Array, ""]:
+    """Lightweight forward pass for line-search evaluations."""
+    Vd = jnp.minimum(diff_unchosen_chosen.X.dot(structural_betas), 700.0)
     eVd = jnp.exp(Vd)
-    probs: Float64[Array, "cases"] = 1 / (
+    probs = 1 / (
         1
         + segment_sum(
             eVd, diff_unchosen_chosen.cases, num_segments=diff_unchosen_chosen.num_cases
         )
     )
-
-    # Log likelihood
-    loglik_by_case = jnp.log(probs) * weights
-    neg_loglik = -jnp.sum(loglik_by_case)
-
-    # Calculate cases' contribution to the gradient
-    grad_n: Float64[Array, "cases alt_vars"] = -segment_sum(
-        diff_unchosen_chosen.X * eVd[:, None],
-        diff_unchosen_chosen.cases,
-        num_segments=diff_unchosen_chosen.num_cases,
-    )
-    grad_n = grad_n * probs[:, None] * weights[:, None]
-    grad = jnp.sum(grad_n, axis=0)
-    return (neg_loglik, grad_n), -grad
+    return -jnp.sum(jnp.log(probs) * weights)
 
 
 def _to_structural_betas(
@@ -73,7 +99,7 @@ def _to_structural_betas(
     """Transform unconstrained optimization parameters into structural parameters.
 
     If a numeraire is specified (e.g., price or cost), its parameter is restricted
-    to be strictly positive via a softplus transformation.
+    to be strictly negative via a softplus transformation.
 
     Parameters
     ----------
@@ -110,7 +136,12 @@ def _diff_unchosen_chosen(case_data: Data) -> DiffUnchosenChosen:
     :class:`~lcl._struct.DiffUnchosenChosen`
         Container holding the differenced design matrix and reduced dimensionality IDs.
     """
-    assert isinstance(case_data.y, Array)
+    if case_data.y is None:
+        raise ValueError(
+            "Choice indicators are required to difference chosen alternatives."
+        )
+    if not isinstance(case_data.y, Array):
+        raise TypeError("case_data.y must be a JAX array.")
     _, num_unchosen_per_id = jnp.unique(
         case_data.cases[~case_data.y], return_counts=True
     )

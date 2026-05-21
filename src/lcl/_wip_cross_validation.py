@@ -1,6 +1,8 @@
 """Out-of-sample cross validation for model selection."""
 
-from typing import Any, Optional, Sequence
+import logging
+from collections.abc import Sequence
+from typing import Any, Optional
 
 import numpy as onp
 import polars as pl
@@ -8,6 +10,9 @@ import polars as pl
 from lcl._case_utils import _diff_unchosen_chosen
 from lcl._struct import EMAlgConfig, MleConfig
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
+
+
+logger = logging.getLogger(__name__)
 
 
 def cv_optimal_classes(
@@ -24,8 +29,8 @@ def cv_optimal_classes(
     numeraire: Optional[str] = None,
     folds: int = 5,
     seed: int = 42,
-    em_alg_config: EMAlgConfig = EMAlgConfig(),
-    mle_config: MleConfig = MleConfig(),
+    em_alg_config: EMAlgConfig | None = None,
+    mle_config: MleConfig | None = None,
 ) -> pl.DataFrame:
     """Perform blocked K-Fold Cross Validation to determine the optimal number of latent classes.
 
@@ -56,8 +61,8 @@ def cv_optimal_classes(
     dems_data : Any | None, optional
         A separate dataset containing panel-level demographics.
     numeraire : str | None, optional
-        The variable to be constrained as strictly positive (e.g., "price")
-        to enforce a negative cost parameter via softplus.
+        The variable to be constrained as strictly negative (e.g., "price")
+        via softplus.
     folds : int, default=5
         Number of cross-validation folds.
     seed : int, default=42
@@ -73,6 +78,10 @@ def cv_optimal_classes(
         A DataFrame containing the Average Out-of-Sample Log-Likelihood for each
         specified number of classes.
     """
+    if em_alg_config is None:
+        em_alg_config = EMAlgConfig()
+    if mle_config is None:
+        mle_config = MleConfig()
     # Unify input into Polars for easy fold splitting, avoiding pandas coercion bugs
     if isinstance(data, pl.DataFrame):
         df = data
@@ -83,20 +92,21 @@ def cv_optimal_classes(
 
     unique_panels = df[panels_col].unique().to_numpy()
 
-    onp.random.seed(seed)
-    shuffled_panels = onp.random.permutation(unique_panels)
+    rng = onp.random.default_rng(seed)
+    shuffled_panels = rng.permutation(unique_panels)
     fold_panel_lists = onp.array_split(shuffled_panels, folds)
 
     results = []
 
     for num_classes in num_classes_list:
         if num_classes < 2:
-            print(
-                f"Warning: Skipping evaluation for {num_classes} classes. The model requires at least 2 latent classes."
+            logger.warning(
+                "Skipping evaluation for %s classes. The model requires at least 2 latent classes.",
+                num_classes,
             )
             continue
 
-        print(f"Evaluating model with {num_classes} latent classes...")
+        logger.info("Evaluating model with %s latent classes.", num_classes)
         fold_lls = []
 
         for f in range(folds):
@@ -148,8 +158,11 @@ def cv_optimal_classes(
                 fold_lls.append(float(oos_ll))
 
             except Exception as e:
-                print(
-                    f"Warning: Model evaluation failed for {num_classes} classes, Fold {f + 1}: {e}"
+                logger.warning(
+                    "Model evaluation failed for %s classes, fold %s: %s",
+                    num_classes,
+                    f + 1,
+                    e,
                 )
                 fold_lls.append(onp.nan)
 

@@ -1,16 +1,21 @@
 """Out-of-sample prediction, elasticities, and willingness-to-pay (WTP) analysis."""
 
-from typing import Any, Generator, Iterable
+import logging
+from collections.abc import Generator, Iterable
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jax import Array
-from jax.ops import segment_sum
 from jaxtyping import Float64
 
 from lcl._case_utils import _to_structural_betas
+from lcl._kernels import _choice_probabilities_and_logsum
 from lcl._struct import Data, PartitionType, WTPRequest
+
+
+logger = logging.getLogger(__name__)
 
 
 class LCLPrediction:
@@ -98,7 +103,8 @@ class LCLPrediction:
                 raise ValueError(
                     "class_probs_by_panel must be available to compute LC elasticities."
                 )
-            assert data.panels is not None
+            if data.panels is None:
+                raise ValueError("Panel identifiers are required for LC elasticities.")
             S_ic = self.class_probs_by_panel[data.panels]  # (N, C)
         else:
             betas = self.results.coeff_[:, None]  # (K, 1)
@@ -106,15 +112,15 @@ class LCLPrediction:
 
         num_classes = betas.shape[1]
 
-        eV = jnp.exp(jnp.clip(data.X @ betas, a_max=700.0))  # (N, C)
-        sum_eV = segment_sum(eV, data.cases, num_segments=data.num_cases)
-        P_ij_c = eV / sum_eV[data.cases]  # (N, C)
+        P_ij_c, _ = _choice_probabilities_and_logsum(
+            data.X, betas, data.cases, data.num_cases
+        )
         P_ij = jnp.sum(S_ic * P_ij_c, axis=1)  # (N,)
 
         base_dict_j = {
             "cases": onp.array(data.cases),
             "alts": onp.array(data.alts),
-            "P_j": onp.array(jnp.clip(P_ij, a_min=1e-250)),
+            "P_j": onp.array(jnp.maximum(P_ij, 1e-250)),
         }
         base_dict_k = {
             "cases": onp.array(data.cases),
@@ -292,9 +298,8 @@ class LCLPrediction:
 
             res_df = pl.DataFrame(summary_rows)
             title = f"Marginal WTP for {req.alt_var} by {req.demographic_var} ({req.partition_type.value})"
-            print(f"\n{'=' * len(title)}\n{title}\n{'=' * len(title)}")
             with pl.Config(tbl_rows=20, tbl_formatting="MARKDOWN", float_precision=4):
-                print(res_df)
+                logger.info("%s\n%s", title, res_df)
 
     def _compute_subset_mean_wtp(
         self,

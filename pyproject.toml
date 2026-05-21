@@ -41,3 +41,9 @@ docs = [
     "mkdocs-material>=9.7.6",
     "mkdocstrings[python]>=1.0.3",
 ]
+
+[tool.ruff.lint]
+extend-ignore = [
+    "F722",  # Ruff does not parse jaxtyping's shape-string annotations.
+    "F821",  # Ruff treats jaxtyping dimension names as undefined variables.
+]

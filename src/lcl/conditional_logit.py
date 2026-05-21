@@ -1,7 +1,9 @@
 """Estimation and prediction for conditional logit."""
 
+import logging
+from collections.abc import Sequence
 from time import time
-from typing import Any, Sequence
+from typing import Any
 
 import jax.numpy as jnp
 import numpy as onp
@@ -22,9 +24,13 @@ with install_import_hook("lcl", "beartype.beartype"):
         _to_structural_betas,
     )
     from lcl._choice_model import ChoiceModel
+    from lcl._kernels import _choice_probabilities_and_logsum
+    from lcl._logging import log_or_print
     from lcl._optimize import _minimize
     from lcl._struct import Data, ErrorConfig, MleConfig, OptimizeResult
-    from lcl.utils import _robust_covariance
+from lcl.utils import _robust_covariance
+
+logger = logging.getLogger(__name__)
 
 
 class ConditionalLogit(ChoiceModel):
@@ -37,7 +43,7 @@ class ConditionalLogit(ChoiceModel):
     ----------
     numeraire : str | None, default=None
         The name of the variable (e.g., 'price') to use as the numeraire. If provided,
-        its coefficient is bounded to be strictly positive to ensure logically
+        its coefficient is bounded to be strictly negative to ensure logically
         consistent utility scaling and willingness-to-pay calculations.
 
     Attributes
@@ -62,8 +68,8 @@ class ConditionalLogit(ChoiceModel):
         case_varnames: Sequence[str] | None = None,
         weights: ArrayLike | None = None,
         init_beta: ArrayLike | None = None,
-        mle_config: MleConfig = MleConfig(),
-        error_config: ErrorConfig = ErrorConfig(),
+        mle_config: MleConfig | None = None,
+        error_config: ErrorConfig | None = None,
     ) -> "CLResults":
         """Fit the conditional logit model via Maximum Likelihood Estimation.
 
@@ -102,6 +108,11 @@ class ConditionalLogit(ChoiceModel):
         :class:`~lcl.conditional_logit.CLResults`
             Results container housing coefficients, robust standard errors, and fit statistics.
         """
+        if mle_config is None:
+            mle_config = MleConfig()
+        if error_config is None:
+            error_config = ErrorConfig()
+
         # If no panels are provided, we substitute cases for panels purely to satisfy
         # the contiguity checks in the ingestion engine.
         _internal_panels_col = panels_col if panels_col is not None else cases_col
@@ -151,6 +162,7 @@ class ConditionalLogit(ChoiceModel):
 
         # Build Results
         estim_time_sec = time() - self._fit_start_time
+        log_or_print(logger, "Estimation time: %.3f seconds", estim_time_sec)
 
         return CLResults(
             model_spec=self,
@@ -250,13 +262,10 @@ class CLResults:
         )
 
         if not self.convergence:
-            print(
-                "\n".join(
-                    [
-                        f"**** The optimization did not converge after {self.total_iter} iterations. ****",
-                        f"Message: {optim_res.message}",
-                    ]
-                )
+            logger.warning(
+                "The optimization did not converge after %s iterations. Message: %s",
+                self.total_iter,
+                optim_res.message,
             )
 
     def summarize_betas(
@@ -287,17 +296,22 @@ class CLResults:
             + body_rows
             + ["%", r"\bottomrule "]
         )
-        print("\n--- LaTeX Output ---\n")
-        print(latex_string)
-        print("\n--- Table preview ---\n")
-        print(
-            tabulate(
-                data_clean,
-                headers=header_clean,
-                tablefmt="simple_outline",
-                floatfmt=f".{num_decimals}f",
-            )
+        table_preview = tabulate(
+            data_clean,
+            headers=header_clean,
+            tablefmt="simple_outline",
+            floatfmt=f".{num_decimals}f",
         )
+        log_or_print(
+            logger,
+            "\n--- LaTeX Output ---\n\n%s\n\n--- Table preview ---\n\n%s",
+            latex_string,
+            table_preview,
+        )
+
+    def summarize(self, num_decimals: int = 3) -> None:
+        """Alias for :meth:`summarize_betas`."""
+        self.summarize_betas(num_decimals=num_decimals)
 
     def predict(
         self,
@@ -325,47 +339,22 @@ class CLResults:
         pl.DataFrame
             DataFrame containing the computed out-of-sample choice probabilities.
         """
-        # Ensure sequential, zero-indexed inputs
-        df = pl.from_pandas(data) if hasattr(data, "columns") else pl.DataFrame(data)
-        _internal_panels_col = panels_col if panels_col is not None else cases_col
-
-        df = df.sort([_internal_panels_col, cases_col, alts_col])
-        df = df.with_columns(
-            [
-                pl.col(cases_col).rank(method="dense").sub(1).alias("_seq_cases"),
-                pl.col(alts_col).rank(method="dense").sub(1).alias("_seq_alts"),
-            ]
+        parsed = self.model._transform_data(data)
+        probs, _ = _choice_probabilities_and_logsum(
+            parsed.X,
+            self.coeff_[:, None],
+            parsed.cases,
+            int(jnp.max(parsed.cases)) + 1,
         )
-
-        # Missing columns check
-        missing_cols = [
-            col for col in self.model.case_varnames if col not in df.columns
-        ]
-        if missing_cols:
-            raise ValueError(
-                f"Counterfactual data is missing required variables: {missing_cols}"
-            )
-
-        X_array = jnp.array(
-            df.select(self.model.case_varnames).to_numpy(), dtype="float64"
-        )
-        cases_array = jnp.array(df["_seq_cases"].to_numpy(), dtype="uint32")
-
-        num_cases = jnp.unique(cases_array).shape[0]
-
-        # Calculate Probabilities
-        eV = jnp.exp(jnp.clip(X_array.dot(self.coeff_), a_max=700.0))
-        sum_eV = segment_sum(eV, cases_array, num_segments=num_cases)
-        probs = eV / sum_eV[cases_array]
 
         result_dict = {
-            "cases": df[cases_col].to_numpy(),
-            "alts": df[alts_col].to_numpy(),
-            "choice_probs": onp.array(probs, dtype=onp.float64),
+            "cases": parsed.original_cases,
+            "alts": parsed.original_alts,
+            "choice_probs": onp.array(probs[:, 0], dtype=onp.float64),
         }
 
         if panels_col is not None:
-            result_dict["panels"] = df[panels_col].to_numpy()
+            result_dict["panels"] = parsed.original_panels
 
         return pl.DataFrame(result_dict)
 

@@ -2,16 +2,20 @@
 
 import math
 
+import jax
 import jax.numpy as jnp
-from equinox import combine, filter_jit, filter_pmap, is_array, partition
+import numpy as onp
+from equinox import combine, filter_jit, is_array, partition
 from jax import Array, lax
-from jax.nn import sigmoid
-from jax.ops import segment_sum
-from jaxopt import BFGS
+from jax.nn import sigmoid, softmax
+from jax.sharding import Mesh, NamedSharding
+from jax.sharding import PartitionSpec as P
 from jaxtyping import Float64
 
-from lcl._case_utils import _loglik_gradient, _to_structural_betas
+from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._demographics import _predict_class_membership_probs, _update_thetas
+from lcl._kernels import _diff_log_kernels
+from lcl._optimize import exact_newton_minimize
 from lcl._struct import Data, DiffUnchosenChosen, EMAlgConfig, EMVars, MleConfig
 
 
@@ -72,7 +76,7 @@ def _em_alg(
         updated_class_probs_by_choice,
         diff_unchosen_chosen,
         mle_config,
-        em_alg_config,  # <-- Passed cleanly
+        em_alg_config,
         numeraire_idx,
     )
 
@@ -84,7 +88,8 @@ def _em_alg(
             updated_class_probs_by_panel.sum(axis=0)
             / updated_class_probs_by_panel.sum()
         )  # (C,)
-        assert data.num_panels is not None
+        if data.num_panels is None:
+            raise ValueError("Panel identifiers are required for latent-class models.")
         unconditional_class_probs_by_panel = jnp.repeat(
             updated_shares[None, :], repeats=data.num_panels, axis=0
         )  # (Np, C)
@@ -97,11 +102,12 @@ def _em_alg(
             em_vars = em_vars._replace(
                 thetas=jnp.zeros(((data.num_dem_vars + 1), (num_classes - 1)))
             )
-        assert em_vars.thetas is not None
+        if em_vars.thetas is None:
+            raise ValueError("Class-membership parameters could not be initialized.")
 
         # Update coefficients and recover unconditional class membership probabilities
         updated_thetas, unconditional_class_probs_by_panel = _update_thetas(
-            em_vars.thetas, updated_class_probs_by_panel, data, num_classes
+            em_vars.thetas, updated_class_probs_by_panel, data, num_classes, mle_config
         )
         updated_shares = unconditional_class_probs_by_panel.mean(axis=0)
 
@@ -158,26 +164,18 @@ def _compute_conditional_class_probs(
     updated_class_probs_by_choice : Float64[Array, "cases classes"]
         Matrix of posterior class probabilities expanded to each choice situation.
     """
-    kernels = _compute_kernels(structural_betas, diff_unchosen_chosen, data)
     if thetas is None:
-        weighted_kernels = kernels * shares[None, :]
+        log_class_probs = jnp.log(jnp.maximum(shares, 1e-300))[None, :]
 
     else:
         class_probs_given_dems, *_ = _predict_class_membership_probs(thetas, data)
-        weighted_kernels = kernels * class_probs_given_dems  # (Np, C)
+        log_class_probs = jnp.log(jnp.maximum(class_probs_given_dems, 1e-300))
 
-    # Remove zero kernels from floating point errors
-    assert isinstance(weighted_kernels, Array)
-    weighted_kernels_plus_delta = weighted_kernels + 1e-100
-    weighted_kernels = (
-        weighted_kernels_plus_delta / weighted_kernels_plus_delta.sum(axis=1)[:, None]
-    )  # (Np, C)
+    log_kernels = _compute_log_kernels(structural_betas, diff_unchosen_chosen, data)
+    conditional_class_probs = softmax(log_class_probs + log_kernels, axis=1)
 
-    conditional_class_probs = (
-        weighted_kernels / jnp.sum(weighted_kernels, axis=1)[:, None]
-    )  # (Np, C)
-
-    assert data.num_cases_per_panel is not None  # Panels required for this model
+    if data.num_cases_per_panel is None:
+        raise ValueError("Panel identifiers are required for latent-class models.")
 
     return conditional_class_probs, jnp.repeat(
         conditional_class_probs,
@@ -237,148 +235,94 @@ def _update_betas(
         betas_padded = betas
         weights_padded = class_probs_by_choice
 
-    # 2. Reshape for pmap: (devices, classes_per_device, features/cases)
+    # 2. Reshape for sharded execution: (devices, classes_per_device, features/cases)
     betas_reshaped = betas_padded.T.reshape(num_devices, classes_per_device, -1)
     weights_reshaped = weights_padded.T.reshape(num_devices, classes_per_device, -1)
 
-    # 3. Define the per-device execution block
-    @filter_pmap(in_axes=(0, 0, None))
-    def _distributed_update(device_betas, device_weights, diff):
+    devices = onp.asarray(jax.devices()[:num_devices])
+    mesh = Mesh(devices, ("class_device",))
+    sharding = NamedSharding(mesh, P("class_device", None, None))
+    betas_sharded = jax.device_put(betas_reshaped, sharding)
+    weights_sharded = jax.device_put(weights_reshaped, sharding)
+    dyn_diff, static_diff = partition(diff_unchosen_chosen, is_array)
+    diff_specs = jax.tree_util.tree_map(lambda _: P(), dyn_diff)
 
-        dyn_diff, static_diff = partition(diff, is_array)
+    with mesh:
+        mapped_update = jax.shard_map(
+            lambda device_betas, device_weights, dynamic_diff: _distributed_update(
+                device_betas,
+                device_weights,
+                combine(dynamic_diff, static_diff),
+                numeraire_idx,
+                mle_config,
+            ),
+            mesh=mesh,
+            in_specs=(
+                P("class_device", None, None),
+                P("class_device", None, None),
+                diff_specs,
+            ),
+            out_specs=P("class_device", None, None),
+            check_vma=False,
+        )
+        out_betas = mapped_update(betas_sharded, weights_sharded, dyn_diff)
 
-        def optimize_single_class(mapped_inputs):
-            b, w = mapped_inputs
-
-            # --- MATHEMATICAL PARITY WITH _optimize.py ---
-            # Replicate the exact NORMALIZATION FIX from the single-GPU version
-            # rather than using N_eff, ensuring identical BFGS line-search behavior.
-            full_diff_init = combine(dyn_diff, static_diff)
-            p_struct_init = _to_structural_betas(b, numeraire_idx)
-            (init_val, _), _ = _loglik_gradient(p_struct_init, full_diff_init, w)
-            scale_factor = jnp.clip(jnp.abs(init_val), a_min=1.0)
-            # ---------------------------------------------
-
-            def _loglik_fn_closure(p, d_diff, w_inner):
-                full_diff = combine(d_diff, static_diff)
-
-                # The numeraire restriction is applied here
-                p_struct = _to_structural_betas(p, numeraire_idx)
-                (val, aux), grad = _loglik_gradient(p_struct, full_diff, w_inner)
-
-                # The gradient chain-rule is applied here
-                if numeraire_idx is not None:
-                    derivative = -sigmoid(p[numeraire_idx])
-                    grad = grad.at[numeraire_idx].multiply(derivative)
-                    aux = aux.at[:, numeraire_idx].multiply(
-                        derivative
-                    )  # <-- FIXED AUX CHAIN RULE
-
-                return (val / scale_factor, aux), grad / scale_factor
-
-            # solver is reinstantiated per class to ensure scale_factor is properly scoped
-            solver = BFGS(
-                fun=_loglik_fn_closure,
-                value_and_grad=True,
-                has_aux=True,
-                linesearch="zoom",
-                max_stepsize=1.0,
-                maxiter=mle_config.maxiter,
-                tol=mle_config.ftol,
-                implicit_diff=False,
-                verbose=False,
-            )
-
-            params, _ = solver.run(b, dyn_diff, w)
-            return params
-
-        return lax.map(optimize_single_class, (device_betas, device_weights))
-
-    # 4. Fire the pmap execution
-    out_betas = _distributed_update(
-        betas_reshaped, weights_reshaped, diff_unchosen_chosen
-    )
-
-    # 5. Flatten the result back to standard shape and slice off the dummy padding
+    # Flatten the result back to standard shape and slice off the dummy padding.
     out_betas = out_betas.reshape(padded_num_classes, -1).T
     return out_betas[:, :num_classes]
 
 
-# def _update_betas(
-#     betas: Float64[Array, "alt_vars classes"],
-#     class_probs_by_choice: Float64[Array, "cases classes"],
-#     diff_unchosen_chosen: DiffUnchosenChosen,
-#     mle_config: MleConfig,
-#     numeraire_idx: int | None,
-# ) -> Float64[Array, "alt_vars classes"]:
-#     """Optimize the taste parameters for all latent classes simultaneously via `jax.lax.map`.
+def _distributed_update(device_betas, device_weights, diff, numeraire_idx, mle_config):
+    has_shard_axis = device_betas.ndim == 3
+    if has_shard_axis:
+        device_betas = device_betas[0]
+        device_weights = device_weights[0]
 
-#     Parameters
-#     ----------
-#     betas : Float64[Array, "alt_vars classes"]
-#         Current unconstrained taste parameters.
-#     class_probs_by_choice : Float64[Array, "cases classes"]
-#         Posterior class membership probabilities to act as case weights.
-#     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
-#         Differenced design matrix.
-#     mle_config : :class:`~lcl._struct.MleConfig`
-#         MLE solver configurations.
-#     numeraire_idx : int | None
-#         Column index of the numeraire variable.
+    dyn_diff, static_diff = partition(diff, is_array)
 
-#     Returns
-#     -------
-#     Float64[Array, "alt_vars classes"]
-#         Updated taste parameters optimized for the current EM step.
-#     """
+    def optimize_single_class(mapped_inputs):
+        b, w = mapped_inputs
 
-#     # Separate the PyTree into dynamic arrays and static metadata
-#     dynamic_diff, static_diff = partition(diff_unchosen_chosen, is_array)
+        def _value_fn_closure(p, d_diff, w_inner) -> Array:
+            full_diff = combine(d_diff, static_diff)
+            p_struct = _to_structural_betas(p, numeraire_idx)
+            return _loglik_value(p_struct, full_diff, w_inner)
 
-#     def _loglik_fn_closure(
-#         p, dyn_diff, w
-#     ) -> tuple[
-#         tuple[Float64[Array, "..."], Float64[Array, "..."]], Float64[Array, "..."]
-#     ]:
-#         """Impose nonnegativity on numeraire (if provided)"""
-#         p_struct = _to_structural_betas(p, numeraire_idx)
+        def _loglik_fn_closure(p, d_diff, w_inner) -> tuple[Array, Array, Array]:
+            full_diff = combine(d_diff, static_diff)
+            p_struct = _to_structural_betas(p, numeraire_idx)
 
-#         # Combine the partitioned diff struct
-#         full_diff = combine(dyn_diff, static_diff)
+            (val, aux), grad, hessian = _loglik_gradient(p_struct, full_diff, w_inner)
 
-#         # Pass combined struct and weights to the gradient function
-#         (val, aux), grad = _loglik_gradient(p_struct, full_diff, w)
+            if numeraire_idx is not None:
+                derivative = -sigmoid(p[numeraire_idx])
+                grad_struct = grad[numeraire_idx]
 
-#         # Apply chain rule (sigmoid is derivative of softplus)
-#         if numeraire_idx is not None:
-#             grad = grad.at[numeraire_idx].multiply(-sigmoid(p[numeraire_idx]))
+                grad = grad.at[numeraire_idx].multiply(derivative)
+                aux = aux.at[:, numeraire_idx].multiply(derivative)
 
-#         # Normalize to prevent softplus step explosions
-#         N_eff = jnp.clip(jnp.sum(w), a_min=1.0)
-#         return (val / N_eff, aux), grad / N_eff
+                hessian = hessian.at[numeraire_idx, :].multiply(derivative)
+                hessian = hessian.at[:, numeraire_idx].multiply(derivative)
+                second_deriv = derivative * (1.0 + derivative)
+                hessian = hessian.at[numeraire_idx, numeraire_idx].add(
+                    grad_struct * second_deriv
+                )
 
-#     solver = BFGS(
-#         fun=_loglik_fn_closure,
-#         value_and_grad=True,
-#         has_aux=True,
-#         linesearch="zoom",
-#         max_stepsize=1.0,
-#         maxiter=mle_config.maxiter,
-#         tol=mle_config.ftol,
-#         implicit_diff=False,
-#         verbose=False,
-#     )
+            return val, grad, hessian
 
-#     def optimize_single_class(mapped_inputs) -> Float64[Array, "..."]:
-#         beta_vec, weight_vec = mapped_inputs
-#         # dynamic_diff feeds into `dyn_diff`, weight_vec feeds into `w`
-#         params, _ = solver.run(beta_vec, dynamic_diff, weight_vec)
-#         return params
+        optim_res = exact_newton_minimize(
+            _value_fn_closure,
+            _loglik_fn_closure,
+            b,
+            dyn_diff,
+            w,
+            maxiter=mle_config.maxiter,
+            tol=mle_config.ftol,
+        )
+        return optim_res.params
 
-#     mapped_inputs = (betas.T, class_probs_by_choice.T)
-#     updated_betas_T = lax.map(optimize_single_class, mapped_inputs)
-
-#     return updated_betas_T.T
+    updated = lax.map(optimize_single_class, (device_betas, device_weights))
+    return updated[None, ...] if has_shard_axis else updated
 
 
 @filter_jit
@@ -406,11 +350,15 @@ def _compute_panel_logliks(
     Float64[Array, "panels"]
         Vector of log-likelihood contributions per decision-maker.
     """
-    kernels = _compute_kernels(betas, diff_unchosen_chosen, data)
-    weighted_kernels = jnp.einsum(
-        "nc,nc->n", unconditional_class_probs_by_panel, kernels
+    log_kernels = _compute_log_kernels(betas, diff_unchosen_chosen, data)
+    weighted_log_kernels = (
+        jnp.log(jnp.maximum(unconditional_class_probs_by_panel, 1e-300))
+        + log_kernels
     )
-    return jnp.log(jnp.clip(weighted_kernels, a_min=1e-250))
+    row_max = jnp.max(weighted_log_kernels, axis=1, keepdims=True)
+    return row_max[:, 0] + jnp.log(
+        jnp.sum(jnp.exp(weighted_log_kernels - row_max), axis=1)
+    )
 
 
 @filter_jit
@@ -452,27 +400,27 @@ def _compute_kernels(
         Matrix mapping the joint probability of each decision-maker's sequence
         conditional on membership in each latent class.
     """
-    Vd_by_class = jnp.einsum("nk,kc->nc", diff_unchosen_chosen.X, betas)
-    eVd_by_class, Vd_by_class = jnp.exp(jnp.clip(Vd_by_class, a_max=700.0)), None
+    return jnp.exp(_compute_log_kernels(betas, diff_unchosen_chosen, data))
 
-    # Compute chosen alts' conditional choice probabalities by latent class
-    probs_by_class = 1 / (
-        1
-        + segment_sum(
-            eVd_by_class,
-            diff_unchosen_chosen.cases,
-            num_segments=diff_unchosen_chosen.num_cases,
-        )
-    )  # (N, C)
 
-    assert data.panels_of_cases is not None  # Panels required for this model
+@filter_jit
+def _compute_log_kernels(
+    betas: Float64[Array, "alt_vars classes"],
+    diff_unchosen_chosen: DiffUnchosenChosen,
+    data: Data,
+) -> Float64[Array, "panels classes"]:
+    """Compute panel-level log likelihood kernels by latent class."""
+    if data.panels_of_cases is None or data.num_panels is None:
+        raise ValueError("Panel identifiers are required for latent-class models.")
 
-    # Use exp(segment_sum(log(probs))) to bypass JAX autodiff limitations
-    log_probs_by_class = jnp.log(jnp.clip(probs_by_class, a_min=1e-250))
-    sum_log_probs = segment_sum(
-        log_probs_by_class, data.panels_of_cases, num_segments=data.num_panels
+    return _diff_log_kernels(
+        diff_unchosen_chosen.X,
+        betas,
+        diff_unchosen_chosen.cases,
+        diff_unchosen_chosen.num_cases,
+        data.panels_of_cases,
+        data.num_panels,
     )
-    return jnp.exp(sum_log_probs)
 
 
 def _compute_probs_and_exp_utility(
@@ -494,8 +442,13 @@ def _compute_probs_and_exp_utility(
     eV : Float64[Array, "alts_by_case"]
         Exponentiated representative utility across all alternatives.
     """
-    eV = jnp.exp(jnp.clip((data.X.dot(latent_betas.T)), a_max=700.0))
-    probs = eV / segment_sum(eV, data.cases, num_segments=data.num_cases)[data.cases]
+    from lcl._kernels import _choice_probabilities_and_logsum
+
+    probs, logsum = _choice_probabilities_and_logsum(
+        data.X, latent_betas[:, None], data.cases, data.num_cases
+    )
+    eV = jnp.exp(data.X.dot(latent_betas.T) - logsum[data.cases, 0])
+    probs = probs[:, 0]
     return probs, eV
 
 

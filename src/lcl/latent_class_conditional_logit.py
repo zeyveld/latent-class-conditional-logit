@@ -1,15 +1,21 @@
 """Estimation for latent-class conditional logit."""
 
+import logging
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from time import time
-from typing import Any, Sequence
+from typing import Any
 
 from lcl._case_utils import _diff_unchosen_chosen
 from lcl._choice_model import ChoiceModel
 from lcl._em_alg_startup import _get_starting_vals
 from lcl._em_alg_steps import _em_alg
+from lcl._logging import log_or_print
 from lcl._results import LCLResults
-from lcl._struct import EMAlgConfig, MleConfig
+from lcl._struct import EMAlgConfig, ErrorConfig, MleConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 class LatentClassConditionalLogit(ChoiceModel):
@@ -68,8 +74,10 @@ class LatentClassConditionalLogit(ChoiceModel):
         case_varnames: Sequence[str] | None = None,
         dem_varnames: Sequence[str] | None = None,
         dems_data: Any | None = None,
-        em_alg_config: EMAlgConfig = EMAlgConfig(),
-        mle_config: MleConfig = MleConfig(),
+        em_alg_config: EMAlgConfig | None = None,
+        mle_config: MleConfig | None = None,
+        error_config: ErrorConfig | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> LCLResults:
         """Fit the latent-class conditional logit model using an EM algorithm.
 
@@ -125,6 +133,14 @@ class LatentClassConditionalLogit(ChoiceModel):
             If a `numeraire` was specified during class instantiation but cannot be
             found in the expanded design matrix columns.
         """
+        if self.num_classes < 2:
+            raise ValueError("num_classes must be at least 2.")
+        if em_alg_config is None:
+            em_alg_config = EMAlgConfig()
+        if mle_config is None:
+            mle_config = MleConfig()
+        if error_config is None:
+            error_config = ErrorConfig()
 
         parsed_data = self._ingest_data(
             data=data,
@@ -155,6 +171,10 @@ class LatentClassConditionalLogit(ChoiceModel):
             self.numeraire_idx = None
 
         data_struct, weights, init_beta = self._setup_data(parsed_data)
+        if data_struct.num_panels is None:
+            raise ValueError("panels_col is required for latent-class models.")
+        if self.num_classes > data_struct.num_panels:
+            raise ValueError("num_classes cannot exceed the number of panels.")
         diff_unchosen_chosen = _diff_unchosen_chosen(data_struct)
 
         em_vars = _get_starting_vals(
@@ -169,19 +189,20 @@ class LatentClassConditionalLogit(ChoiceModel):
         num_devices = em_alg_config.num_devices
         if num_devices > 1:
             if self.num_classes % num_devices == 0:
-                print(
-                    f"Hardware Status: Distributing {self.num_classes} classes across {num_devices} GPUs."
-                )
+                message = f"Distributing {self.num_classes} classes across {num_devices} devices."
             else:
-                print(
-                    f"Hardware Status: Found {num_devices} GPUs, but {self.num_classes} classes cannot be distributed evenly. Falling back to single-device execution."
-                )
+                message = f"Found {num_devices} devices; padding classes for balanced sharding."
         else:
-            print("Hardware Status: Running on a single device.")
+            message = "Running beta updates on a single device."
+        logger.info(message)
+        if progress_callback is not None:
+            progress_callback({"event": "hardware", "message": message})
 
         logliks_list, em_recursion = [], 0
         while em_recursion < em_alg_config.maxiter:
-            print(f"EM recursion: {em_recursion}")
+            logger.info("EM recursion: %s", em_recursion)
+            if progress_callback is not None:
+                progress_callback({"event": "em_step", "iteration": em_recursion})
 
             em_vars = _em_alg(
                 em_vars,
@@ -219,7 +240,11 @@ class LatentClassConditionalLogit(ChoiceModel):
 
         estim_time_sec = time() - self._fit_start_time
 
-        print(f"Estimation time: {estim_time_sec}")
+        log_or_print(logger, "Estimation time: %.3f seconds", estim_time_sec)
+        if progress_callback is not None:
+            progress_callback(
+                {"event": "complete", "estimation_time_seconds": estim_time_sec}
+            )
 
         return LCLResults(
             model_spec=self,
@@ -227,6 +252,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             estimation_data=data_struct,
             em_recursion=em_recursion,
             em_alg_config=em_alg_config,
+            error_config=error_config,
             estim_time_sec=estim_time_sec,
         )
 

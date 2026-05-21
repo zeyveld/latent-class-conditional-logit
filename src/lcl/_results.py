@@ -1,11 +1,11 @@
 """In-sample estimation results and inference."""
 
+import logging
+
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import Array, hessian, jacrev, lax
-from jax.nn import softmax
-from jax.ops import segment_sum
+from jax import Array, hessian, jacrev
 from jax.tree_util import Partial
 from jax.typing import ArrayLike
 from jaxtyping import Float64
@@ -16,10 +16,14 @@ from lcl._case_utils import _diff_unchosen_chosen, _to_structural_betas
 from lcl._em_alg_steps import (
     _compute_conditional_class_probs,
     _compute_panel_logliks,
-    _compute_probs_and_exp_utility,
 )
+from lcl._kernels import _choice_probabilities_and_logsum, _class_membership_probs
+from lcl._logging import log_or_print
 from lcl._prediction import LCLPrediction
-from lcl._struct import Data, EMVars, ParsedData, PastChoicesData
+from lcl._struct import Data, EMVars, ErrorConfig, ParsedData, PastChoicesData
+
+
+logger = logging.getLogger(__name__)
 
 
 class LCLResults:
@@ -48,6 +52,7 @@ class LCLResults:
         estimation_data: Data,
         em_recursion: int,
         em_alg_config,
+        error_config: ErrorConfig | None,
         estim_time_sec: float,
     ) -> None:
         self.model = model_spec
@@ -56,44 +61,9 @@ class LCLResults:
         self.total_recursions = em_recursion
         self.converged = em_recursion < (em_alg_config.maxiter - 1)
         self.estim_time_sec = estim_time_sec
-
-        print(
-            "\n".join(
-                [
-                    "\nComputing clustered covariance matrix per steps in Stata's reference manual...",
-                    "(StataCorp. 2025. Stata 19 Base Reference Manual. College Station, TX: Stata Press.)\n",
-                ]
-            )
-        )
+        self.error_config = error_config if error_config is not None else ErrorConfig()
 
         self.flat_params = self._pack_params()
-        diff_unchosen_chosen = _diff_unchosen_chosen(self.data)
-
-        # Obtain inverse Hessian
-        H = hessian(self._full_loglik_fn)(
-            self.flat_params, diff_unchosen_chosen, self.data
-        )
-
-        # --- THE CPU ESCAPE HATCH ---
-        # Transfer the KxK matrix to the CPU, invert it using NumPy's highly stable
-        # SVD, and transfer it back. GPUs are terrible at small matrix inversions anyway!
-        H_cpu = onp.array(-H)
-        H_inv = jnp.array(onp.linalg.pinv(H_cpu))
-        # ----------------------------
-
-        # Take outer product of panel-level gradients
-        J = jacrev(self._panel_loglik_fn)(
-            self.flat_params, diff_unchosen_chosen, self.data
-        )
-        B = J.T @ J
-
-        # The Sandwich!
-        robust_cov = H_inv @ B @ H_inv
-
-        # Finite-sample cluster correction (G / (G - 1))
-        assert self.data.num_panels is not None
-        G = self.data.num_panels
-        self.cov_matrix = robust_cov * (G / (G - 1))
 
         # Calculate degrees of freedom
         num_beta_params = self.em_res.latent_betas.size
@@ -103,6 +73,7 @@ class LCLResults:
             num_theta_params = self.model.num_classes - 1
 
         self.num_params = num_beta_params + num_theta_params
+        self.cov_matrix = self._compute_covariance()
 
         # Compute information criteria
         self.caic = (
@@ -117,20 +88,17 @@ class LCLResults:
             jnp.log(self.data.num_panels) * n_star
             - 2 * self.em_res.unconditional_loglik
         )
-        print(
-            "\n".join(
-                [
-                    "\nInformation criteria:",
-                    f"  Consistent Aikake information criterion (CAIC; see Bozdogan [1987]): {self.caic:.1f}",
-                    f"  Bayesian information criterion (BIC; see Schwartz [1978]): {self.bic:.1f}",
-                    f"  Adjusted BIC (see Sclove [1987]): {self.adjusted_bic:.1f}",
-                ]
-            )
+        logger.info(
+            "Information criteria: CAIC=%.1f, BIC=%.1f, adjusted BIC=%.1f",
+            self.caic,
+            self.bic,
+            self.adjusted_bic,
         )
 
         if not self.converged:
-            print(
-                f"**** Optimization did not converge after {self.total_recursions} iterations. ****"
+            logger.warning(
+                "Optimization did not converge after %s iterations.",
+                self.total_recursions,
             )
 
     def __repr__(self) -> str:
@@ -153,7 +121,8 @@ class LCLResults:
             theta_flat = self.em_res.thetas.ravel()
         else:
             shares = jnp.clip(self.em_res.shares, 1e-10)
-            theta_flat = jnp.log(shares[:-1] / shares[-1]).ravel()
+            shares = shares / shares.sum()
+            theta_flat = jnp.log(shares[1:] / shares[0]).ravel()
         return jnp.concatenate([latent_betas_flat, theta_flat])
 
     def _unpack_params(
@@ -185,14 +154,31 @@ class LCLResults:
         num_panels: int,
     ) -> Float64[Array, "panels classes"]:
         """Extract unconditional class probabilities (via fractional response)."""
-        if dems is not None:
-            V = thetas[None, 0] + dems @ thetas[1:]
-        else:
-            V = jnp.repeat(thetas, num_panels, axis=0)
+        return _class_membership_probs(thetas, dems, num_panels)
 
-        V_ref = jnp.zeros((num_panels, 1))
-        V_full = jnp.concatenate([V_ref, V], axis=1)
-        return softmax(V_full, axis=1)
+    def _compute_covariance(self) -> Float64[Array, "all_params all_params"]:
+        if self.error_config.skip_std_errs:
+            return jnp.full((self.num_params, self.num_params), jnp.nan)
+
+        logger.info("Computing LCL covariance matrix.")
+        diff_unchosen_chosen = _diff_unchosen_chosen(self.data)
+        H = hessian(self._full_loglik_fn)(
+            self.flat_params, diff_unchosen_chosen, self.data
+        )
+        H_inv = jnp.array(onp.linalg.pinv(onp.array(-H)))
+
+        if not self.error_config.robust:
+            return H_inv
+
+        J = jacrev(self._panel_loglik_fn)(
+            self.flat_params, diff_unchosen_chosen, self.data
+        )
+        B = J.T @ J
+
+        if self.data.num_panels is None:
+            raise ValueError("Panel identifiers are required for clustered covariance.")
+        G = self.data.num_panels
+        return (H_inv @ B @ H_inv) * (G / (G - 1))
 
     def _panel_loglik_fn(
         self, flat_params, diff_unchosen_chosen, data
@@ -226,7 +212,7 @@ class LCLResults:
         else:
             variance = jnp.einsum("kp,pq,kq->k", jac, self.cov_matrix, jac)
 
-        return val, jnp.sqrt(variance)
+        return val, jnp.sqrt(jnp.maximum(variance, 0.0))
 
     def _calc_population_mean_betas(
         self,
@@ -265,7 +251,7 @@ class LCLResults:
         diff_sq = (structural_betas - mean_betas[:, None]) ** 2
         var_betas = diff_sq @ avg_shares
 
-        return jnp.sqrt(jnp.clip(var_betas, a_min=1e-250))
+        return jnp.sqrt(jnp.maximum(var_betas, 1e-250))
 
     def summarize_betas(
         self,
@@ -277,7 +263,8 @@ class LCLResults:
         num_decimals: int = 3,
     ) -> None:
         """Output population-level moments with Delta Method standard errors to the console and LaTeX."""
-        assert self.data.num_panels is not None
+        if self.data.num_panels is None:
+            raise ValueError("Panel identifiers are required to summarize LCL results.")
 
         means, se_means = self._apply_delta_method(
             self._calc_population_mean_betas,
@@ -324,49 +311,62 @@ class LCLResults:
             + body_rows
             + ["%", r"\bottomrule "]
         )
-        print("\n--- LaTeX Output ---\n")
-        print(latex_string)
-        print("\n--- Table preview ---\n")
-        print(
-            tabulate(
-                data_clean,
-                headers=header_clean,
-                tablefmt="simple_outline",
-                floatfmt=f".{num_decimals}f",
-            )
+        table_preview = tabulate(
+            data_clean,
+            headers=header_clean,
+            tablefmt="simple_outline",
+            floatfmt=f".{num_decimals}f",
         )
+        log_or_print(
+            logger,
+            "\n--- LaTeX Output ---\n\n%s\n\n--- Table preview ---\n\n%s",
+            latex_string,
+            table_preview,
+        )
+
+    def summarize(self, num_decimals: int = 3) -> None:
+        """Alias for :meth:`summarize_betas`."""
+        self.summarize_betas(num_decimals=num_decimals)
 
     def predict(
         self,
-        X: ArrayLike,
-        alts: ArrayLike,
-        cases: ArrayLike,
-        panels: ArrayLike,
+        X: ArrayLike | None = None,
+        alts: ArrayLike | None = None,
+        cases: ArrayLike | None = None,
+        panels: ArrayLike | None = None,
         dems: ArrayLike | None = None,
         past_choices: PastChoicesData | None = None,
+        data: object | None = None,
+        dems_data: object | None = None,
     ) -> LCLPrediction:
         """Generate out-of-sample predictions and counterfactual inclusive values (consumer surplus)."""
 
-        parsed_predict = ParsedData(
-            X=X,
-            dems=dems,
-            y=None,
-            cases=cases,
-            panels=panels,
-            alts=alts,
-            case_varnames=self.model.case_varnames,
-            dem_varnames=self.model.dem_varnames,
-        )
+        if data is not None:
+            parsed_predict = self.model._transform_data(data, dems_data=dems_data)
+        else:
+            if X is None or alts is None or cases is None or panels is None:
+                raise ValueError(
+                    "Provide either data=... or X, alts, cases, and panels."
+                )
+            parsed_predict = _parsed_prediction_arrays(
+                X=X,
+                dems=dems,
+                alts=alts,
+                cases=cases,
+                panels=panels,
+                case_varnames=self.model.case_varnames,
+                dem_varnames=self.model.dem_varnames,
+            )
         data, *_ = self.model._setup_data(parsed_predict)
 
         if past_choices is not None:
-            parsed_past = ParsedData(
+            parsed_past = _parsed_prediction_arrays(
                 X=past_choices.X,
                 dems=past_choices.dems,
-                y=past_choices.y,
+                alts=past_choices.alts,
                 cases=past_choices.cases,
                 panels=past_choices.panels,
-                alts=past_choices.alts,
+                y=past_choices.y,
                 case_varnames=self.model.case_varnames,
                 dem_varnames=self.model.dem_varnames,
             )
@@ -379,24 +379,21 @@ class LCLResults:
                 diff_unchosen_chosen=diff_unchosen_chosen_past,
                 data=data_past,
             )
+        elif self.em_res.thetas is not None and data.dems is not None:
+            class_probs_by_panel = self._get_class_probs(
+                self.em_res.thetas, data.dems, data.num_panels
+            )
         else:
-            assert data.num_panels is not None
             class_probs_by_panel = jnp.repeat(
                 self.em_res.shares[None, :], data.num_panels, axis=0
             )
 
-        choice_probs_by_class, exp_utility_by_class = lax.map(
-            lambda _beta: _compute_probs_and_exp_utility(_beta, data=data),
-            self.em_res.structural_betas.T,
+        choice_probs_by_class, log_sum_exp_utility = _choice_probabilities_and_logsum(
+            data.X,
+            self.em_res.structural_betas,
+            data.cases,
+            data.num_cases,
         )
-
-        conditional_choice_probs = (
-            class_probs_by_panel[panels] * choice_probs_by_class.T
-        )
-        sum_exp_utility = segment_sum(
-            exp_utility_by_class.T, cases, num_segments=data.num_cases
-        )
-        log_sum_exp_utility = jnp.log(jnp.clip(sum_exp_utility, a_min=1e-250))
 
         # Ensure alpha (marginal utility of income) is correctly signed
         numeraire_idx = getattr(self.model, "numeraire_idx", None)
@@ -422,40 +419,47 @@ class LCLResults:
             wtp_alt_vars_by_panel = jnp.empty((data.num_panels, 0))
             schema = []
 
-        panels_unique = onp.array(panels[panels != jnp.roll(panels, shift=1)])
+        panel_first_rows = data.panels != jnp.roll(data.panels, shift=1)
+        panel_first_rows = panel_first_rows.at[0].set(True)
+        panels_unique = onp.array(parsed_predict.original_panels[panel_first_rows])
         wtp_alt_vars_by_panel_df = pl.DataFrame(
             onp.array(wtp_alt_vars_by_panel), schema=schema
-        ).with_columns(pl.Series("panels", panels_unique, dtype=pl.UInt32))
+        ).with_columns(pl.Series("panels", panels_unique))
 
-        assert data.num_cases_per_panel is not None
+        if data.num_cases_per_panel is None or data.panels_of_cases is None:
+            raise ValueError(
+                "Panel identifiers are required for latent-class prediction."
+            )
         conditional_surplus = jnp.einsum(
             "np,np->n",
-            jnp.repeat(class_probs_by_panel, data.num_cases_per_panel, axis=0),
+            class_probs_by_panel[data.panels_of_cases],
             surplus_by_class,
         )
 
         unconditional_choice_probs = jnp.sum(
-            class_probs_by_panel[panels] * choice_probs_by_class.T, axis=1
+            class_probs_by_panel[data.panels] * choice_probs_by_class, axis=1
         )
 
         predicted_probs_df = pl.DataFrame(
             {
-                "panels": onp.array(panels),
-                "cases": onp.array(cases),
-                "alts": onp.array(alts),
+                "panels": parsed_predict.original_panels,
+                "cases": parsed_predict.original_cases,
+                "alts": parsed_predict.original_alts,
                 "choice_probs": onp.array(
                     unconditional_choice_probs, dtype=onp.float64
                 ),
             }
         )
 
-        assert data.panels is not None and isinstance(cases, Array)
+        if data.panels is None:
+            raise ValueError(
+                "Panel identifiers are required for latent-class prediction."
+            )
+        first_case_rows = data.cases != jnp.roll(data.cases, shift=1)
         surplus_df = pl.DataFrame(
             {
-                "panels": onp.array(
-                    data.panels[data.cases != jnp.roll(data.cases, shift=1)]
-                ),
-                "cases": onp.array(cases[data.cases != jnp.roll(data.cases, shift=1)]),
+                "panels": onp.array(parsed_predict.original_panels[first_case_rows]),
+                "cases": onp.array(parsed_predict.original_cases[first_case_rows]),
                 "surplus": onp.array(conditional_surplus, dtype=onp.float64),
             }
         )
@@ -468,6 +472,61 @@ class LCLResults:
             results=self,
             class_probs_by_panel=class_probs_by_panel,
         )
+
+
+def _parsed_prediction_arrays(
+    X: ArrayLike,
+    dems: ArrayLike | None,
+    alts: ArrayLike,
+    cases: ArrayLike,
+    panels: ArrayLike,
+    case_varnames: list[str],
+    dem_varnames: list[str] | None,
+    y: ArrayLike | None = None,
+) -> ParsedData:
+    X_np = onp.asarray(X)
+    alts_np = onp.asarray(alts)
+    cases_np = onp.asarray(cases)
+    panels_np = onp.asarray(panels)
+    order = onp.lexsort((alts_np, cases_np, panels_np))
+
+    X_sorted = X_np[order]
+    alts_sorted = alts_np[order]
+    cases_sorted = cases_np[order]
+    panels_sorted = panels_np[order]
+    y_sorted = None if y is None else onp.asarray(y)[order]
+
+    panel_ids, panel_seq = onp.unique(panels_sorted, return_inverse=True)
+    alt_ids, alt_seq = onp.unique(alts_sorted, return_inverse=True)
+    _ = alt_ids
+
+    case_seq = onp.empty_like(cases_sorted, dtype=onp.uint32)
+    case_lookup: dict[tuple[object, object], int] = {}
+    for idx, key in enumerate(zip(panels_sorted.tolist(), cases_sorted.tolist())):
+        if key not in case_lookup:
+            case_lookup[key] = len(case_lookup)
+        case_seq[idx] = case_lookup[key]
+
+    dems_array = None
+    if dems is not None:
+        dems_np = onp.asarray(dems)
+        if dems_np.shape[0] != panel_ids.shape[0]:
+            raise ValueError("dems must have one row per unique panel.")
+        dems_array = jnp.array(dems_np, dtype="float64")
+
+    return ParsedData(
+        X=jnp.array(X_sorted, dtype="float64"),
+        dems=dems_array,
+        y=None if y_sorted is None else jnp.array(y_sorted, dtype="bool"),
+        cases=jnp.array(case_seq, dtype="uint32"),
+        panels=jnp.array(panel_seq, dtype="uint32"),
+        alts=jnp.array(alt_seq, dtype="uint32"),
+        case_varnames=case_varnames,
+        dem_varnames=dem_varnames,
+        original_alts=alts_sorted,
+        original_cases=cases_sorted,
+        original_panels=panels_sorted,
+    )
 
 
 # EOF

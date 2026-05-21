@@ -13,7 +13,6 @@ covariance estimators, fractional-response demographic regressions, and delta-me
 willingness-to-pay (WTP) distributions.
 """
 
-import jax.numpy as jnp
 from jax import config
 from jaxtyping import install_import_hook
 
@@ -21,9 +20,6 @@ from jaxtyping import install_import_hook
 # Discrete choice models are highly sensitive to vanishing gradients
 # in the denominator of the logit probability.
 config.update("jax_enable_x64", True)
-
-import numpy as onp
-import polars as pl
 
 # Ensure array args have mutually compatible shapes throughout the package
 with install_import_hook("lcl", "beartype.beartype"):

@@ -1,9 +1,15 @@
+import logging
+
 import jax.numpy as jnp
 from equinox import filter_jit
+from jax.nn import softmax
 from jaxtyping import Array, Float64
 
-from lcl._optimize import _minimize
-from lcl._struct import Data
+from lcl._optimize import exact_newton_minimize
+from lcl._struct import Data, MleConfig
+
+
+logger = logging.getLogger(__name__)
 
 
 def _update_thetas(
@@ -11,6 +17,7 @@ def _update_thetas(
     class_probs_by_panel: Float64[Array, "panels classes"],
     data: Data,
     num_classes: int,
+    mle_config: MleConfig | None = None,
 ) -> tuple[
     Float64[Array, "dem_vars_plus_one classes_minus_one"],
     Float64[Array, "panels classes"],
@@ -44,10 +51,10 @@ def _update_thetas(
 
     """
     updated_thetas, convergence = _perform_frac_response_reg(
-        starting_thetas, class_probs_by_panel, data, num_classes
+        starting_thetas, class_probs_by_panel, data, num_classes, mle_config
     )
     if not convergence:
-        print("Oops! Demographic regression failed to converge.")
+        logger.warning("Demographic regression failed to converge.")
 
     predicted_class_probs, *_ = _predict_class_membership_probs(updated_thetas, data)
 
@@ -59,6 +66,7 @@ def _perform_frac_response_reg(
     class_probs_by_panel: Float64[Array, "panels classes"],
     data: Data,
     num_classes: int,
+    mle_config: MleConfig | None = None,
 ) -> tuple[Float64[Array, "dem_vars_plus_one classes_minus_one"], bool]:
     """Perform fractional response regression of class membership probabilities.
 
@@ -82,12 +90,122 @@ def _perform_frac_response_reg(
         (C,) vector of class shares.
 
     """
-    fargs = (class_probs_by_panel, data, num_classes)
-    optim_res = _minimize(
-        _compute_grouped_data_loglik_and_grad, thetas.ravel(), args=fargs
+    if mle_config is None:
+        mle_config = MleConfig()
+    optim_res = exact_newton_minimize(
+        _compute_grouped_data_loglik_value_scaled,
+        _compute_grouped_data_loglik_grad_hess_scaled,
+        thetas.ravel(),
+        class_probs_by_panel,
+        data,
+        num_classes,
+        tol=mle_config.ftol,
+        maxiter=mle_config.maxiter,
+        damping=1e-8,
     )
     thetas = optim_res.params.reshape(data.num_dem_vars + 1, num_classes - 1)
-    return thetas, optim_res.success
+    return thetas, float(optim_res.error) <= mle_config.ftol
+
+
+@filter_jit
+def _compute_grouped_data_loglik_value(
+    thetas: Float64[Array, "theta_len"],
+    class_probs_by_panel: Float64[Array, "panels classes"],
+    data: Data,
+    num_classes: int,
+) -> Float64[Array, ""]:
+    """Compute the fractional-response negative log likelihood."""
+    thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)
+    predicted_class_probs, *_ = _predict_class_membership_probs(thetas, data)
+
+    return -jnp.sum(
+        class_probs_by_panel
+        * jnp.log(jnp.maximum(predicted_class_probs, 1e-250))
+    )
+
+
+@filter_jit
+def _compute_grouped_data_loglik_grad_hess(
+    thetas: Float64[Array, "theta_len"],
+    class_probs_by_panel: Float64[Array, "panels classes"],
+    data: Data,
+    num_classes: int,
+) -> tuple[
+    Float64[Array, ""],
+    Float64[Array, "theta_len"],
+    Float64[Array, "theta_len theta_len"],
+]:
+    """Compute the fractional-response log likelihood, gradient, and Hessian.
+
+    The class-membership model is a baseline-category multinomial logit. Given
+    fractional targets ``w`` and predicted non-baseline probabilities ``p``, the
+    negative-loglik gradient contribution for panel ``n`` is
+    ``z_n * (sum(w_n) * p_n - w_n)``. The corresponding Hessian block for classes
+    ``k`` and ``l`` is ``sum(w_n) * p_nk * (1[k=l] - p_nl) * z_n z_n'``.
+    """
+    thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)
+    predicted_class_probs, *_ = _predict_class_membership_probs(thetas, data)
+    predicted_nonbaseline = predicted_class_probs[:, 1:]
+
+    neg_loglik = -jnp.sum(
+        class_probs_by_panel
+        * jnp.log(jnp.maximum(predicted_class_probs, 1e-250))
+    )
+
+    dem_design = _demographic_design_matrix(data)
+    row_weights = class_probs_by_panel.sum(axis=1)
+    grad_n = dem_design[:, :, None] * (
+        row_weights[:, None, None] * predicted_nonbaseline[:, None, :]
+        - class_probs_by_panel[:, None, 1:]
+    )
+    grad = grad_n.sum(axis=0).ravel()
+
+    class_cov = predicted_nonbaseline[:, :, None] * (
+        jnp.eye(num_classes - 1, dtype=thetas.dtype)[None, :, :]
+        - predicted_nonbaseline[:, None, :]
+    )
+    class_cov = row_weights[:, None, None] * class_cov
+    hess = jnp.einsum("ni,nj,nkl->ikjl", dem_design, dem_design, class_cov).reshape(
+        thetas.size, thetas.size
+    )
+
+    return neg_loglik, grad, hess
+
+
+@filter_jit
+def _compute_grouped_data_loglik_value_scaled(
+    thetas: Float64[Array, "theta_len"],
+    class_probs_by_panel: Float64[Array, "panels classes"],
+    data: Data,
+    num_classes: int,
+) -> Float64[Array, ""]:
+    """Compute mean fractional-response negative log likelihood."""
+    scale = jnp.maximum(class_probs_by_panel.sum(), 1.0)
+    return (
+        _compute_grouped_data_loglik_value(
+            thetas, class_probs_by_panel, data, num_classes
+        )
+        / scale
+    )
+
+
+@filter_jit
+def _compute_grouped_data_loglik_grad_hess_scaled(
+    thetas: Float64[Array, "theta_len"],
+    class_probs_by_panel: Float64[Array, "panels classes"],
+    data: Data,
+    num_classes: int,
+) -> tuple[
+    Float64[Array, ""],
+    Float64[Array, "theta_len"],
+    Float64[Array, "theta_len theta_len"],
+]:
+    """Compute mean fractional-response value, gradient, and Hessian."""
+    neg_loglik, grad, hess = _compute_grouped_data_loglik_grad_hess(
+        thetas, class_probs_by_panel, data, num_classes
+    )
+    scale = jnp.maximum(class_probs_by_panel.sum(), 1.0)
+    return neg_loglik / scale, grad / scale, hess / scale
 
 
 @filter_jit
@@ -131,32 +249,32 @@ def _compute_grouped_data_loglik_and_grad(
         the gradient. (Conceptualize as [Np, D, C].)
 
     """
-    thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)  # (D + 1, C - 1)
-    predicted_class_probs, exp_latent_class_vars, sum_exp_latent_class_vars = (
-        _predict_class_membership_probs(thetas, data)
+    thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)
+    predicted_class_probs, *_ = _predict_class_membership_probs(thetas, data)
+    predicted_nonbaseline = predicted_class_probs[:, 1:]
+
+    neg_loglik = _compute_grouped_data_loglik_value(
+        thetas.ravel(), class_probs_by_panel, data, num_classes
     )
+    dem_design = _demographic_design_matrix(data)
+    row_weights = class_probs_by_panel.sum(axis=1)
+    score_n = dem_design[:, :, None] * (
+        class_probs_by_panel[:, None, 1:]
+        - row_weights[:, None, None] * predicted_nonbaseline[:, None, :]
+    )
+    grad_n = score_n.reshape(-1, (data.num_dem_vars + 1) * (num_classes - 1))
+    grad = -score_n.sum(axis=0).ravel()
 
-    neg_loglik = -jnp.sum(class_probs_by_panel * jnp.log(predicted_class_probs))
+    return (neg_loglik, grad_n), grad
 
-    probs_times_quotient = (
-        class_probs_by_panel[:, 1:] * sum_exp_latent_class_vars[:, None]
-        - exp_latent_class_vars
-    ) / sum_exp_latent_class_vars[:, None]  # (Np, C - 1)
 
-    grad_n = jnp.concat(
-        [
-            probs_times_quotient[:, None, :],  # (Np, C - 1)
-            probs_times_quotient[:, None, :] * data.dems[..., None],  # (Np, D, C - 1)
-        ],
+@filter_jit
+def _demographic_design_matrix(data: Data) -> Float64[Array, "panels dem_vars_plus_one"]:
+    """Return the intercept-augmented demographic design matrix."""
+    return jnp.concatenate(
+        [jnp.ones((data.dems.shape[0], 1), dtype=data.dems.dtype), data.dems],
         axis=1,
-    )  # (Np, D + 1, C - 1)
-
-    grad = grad_n.sum(axis=0)  # (D, C - 1)
-
-    grad_n = grad_n.reshape(
-        -1, (data.num_dem_vars + 1) * (num_classes - 1)
-    )  # (Np, (D + 1) * (C - 1))
-    return (neg_loglik, grad_n), -grad.ravel()
+    )
 
 
 @filter_jit
@@ -195,24 +313,15 @@ def _predict_class_membership_probs(
 
     """
     V = thetas[None, 0] + data.dems @ thetas[1:]
+    V_full = jnp.concatenate([jnp.zeros((V.shape[0], 1)), V], axis=1)
+    predicted_class_probs = softmax(V_full, axis=1)
+
     exp_latent_class_vars: Float64[Array, "panels classes-1"] = jnp.exp(
-        jnp.clip(V, a_max=700.0)
+        jnp.minimum(V, 700.0)
     )
     sum_exp_latent_class_vars: Float64[Array, "panels"] = (
         1.0 + exp_latent_class_vars.sum(axis=1)
     )
-
-    probs_identified_classes: Float64[Array, "panels classes-1"] = (
-        exp_latent_class_vars / sum_exp_latent_class_vars[:, None]
-    )  # (Np, C - 1)
-
-    predicted_class_probs = jnp.concat(
-        [
-            (1.0 / sum_exp_latent_class_vars)[:, None],  # (Np, 1)
-            probs_identified_classes,  # (Np, C - 1)
-        ],
-        axis=1,
-    )  # (Np, C)
 
     return predicted_class_probs, exp_latent_class_vars, sum_exp_latent_class_vars
 

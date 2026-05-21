@@ -2,10 +2,11 @@
 
 import jax.numpy as jnp
 import numpy as onp
+from jax.nn import sigmoid
 
-from lcl._case_utils import _loglik_gradient, _to_structural_betas
+from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._em_alg_steps import _compute_conditional_class_probs
-from lcl._optimize import _minimize
+from lcl._optimize import exact_newton_minimize
 from lcl._struct import Data, DiffUnchosenChosen, EMAlgConfig, EMVars, MleConfig
 
 
@@ -45,6 +46,7 @@ def _get_starting_vals(
         Container holding the initialized taste parameters, uniform starting shares,
         and first-pass posterior class probabilities.
     """
+
     diff_unchosen_chosen_by_class = _random_class_partition(
         diff_unchosen_chosen, data, num_classes, em_alg_config
     )
@@ -52,15 +54,40 @@ def _get_starting_vals(
     latent_betas_list = []
 
     for class_diff_unchosen_chosen in diff_unchosen_chosen_by_class:
-        optim_res = _minimize(
-            loglik_fn=_loglik_gradient,
-            params=jnp.zeros(data.num_alt_vars),
-            args=(
-                class_diff_unchosen_chosen,
-                jnp.ones(class_diff_unchosen_chosen.num_cases),
-            ),
-            mle_config=mle_config,
-            numeraire_idx=numeraire_idx,
+        # We can bake the weights directly into the closures for the startup
+        w_ones = jnp.ones(class_diff_unchosen_chosen.num_cases)
+
+        def _startup_value_closure(p):
+            p_struct = _to_structural_betas(p, numeraire_idx)
+            return _loglik_value(p_struct, class_diff_unchosen_chosen, w_ones)
+
+        def _startup_loglik_closure(p):
+            p_struct = _to_structural_betas(p, numeraire_idx)
+            (val, aux), grad, hessian = _loglik_gradient(
+                p_struct, class_diff_unchosen_chosen, w_ones
+            )
+
+            if numeraire_idx is not None:
+                derivative = -sigmoid(p[numeraire_idx])
+                grad_struct = grad[numeraire_idx]
+
+                grad = grad.at[numeraire_idx].multiply(derivative)
+                aux = aux.at[:, numeraire_idx].multiply(derivative)
+
+                hessian = hessian.at[numeraire_idx, :].multiply(derivative)
+                hessian = hessian.at[:, numeraire_idx].multiply(derivative)
+                second_deriv = derivative * (1.0 + derivative)
+                hessian = hessian.at[numeraire_idx, numeraire_idx].add(
+                    grad_struct * second_deriv
+                )
+            return val, grad, hessian
+
+        optim_res = exact_newton_minimize(
+            _startup_value_closure,
+            _startup_loglik_closure,
+            jnp.zeros(data.num_alt_vars),
+            tol=mle_config.ftol,
+            maxiter=mle_config.maxiter,
         )
         latent_betas_list.append(optim_res.params)
 
@@ -80,7 +107,7 @@ def _get_starting_vals(
         structural_betas=structural_betas,
         thetas=thetas,
         shares=jnp.mean(starting_class_probs_by_panel, axis=0),
-        unconditional_loglik=jnp.array(1.0),  # Placeholder prior to first EM step
+        unconditional_loglik=jnp.array(1.0),
         class_probs_by_panel=starting_class_probs_by_panel,
     )
 
@@ -114,13 +141,19 @@ def _random_class_partition(
         A list of length `num_classes`, where each element is a valid, independent
         differenced design matrix subset ready for conditional logit estimation.
     """
-    assert diff_unchosen_chosen.panels is not None
-    assert data.num_panels is not None
+    if diff_unchosen_chosen.panels is None or data.num_panels is None:
+        raise ValueError(
+            "Panel identifiers are required for latent-class initialization."
+        )
+    if num_classes > data.num_panels:
+        raise ValueError("num_classes cannot exceed the number of panels.")
 
     # 1. Randomly assign each panel to one of K classes
-    onp.random.seed(em_alg_config.jax_prng_seed)
-    shuffled_panels = onp.random.permutation(data.num_panels)
+    rng = onp.random.default_rng(em_alg_config.jax_prng_seed)
+    shuffled_panels = rng.permutation(data.num_panels)
     panels_per_class = onp.array_split(shuffled_panels, num_classes)
+    if any(len(panels_in_class) == 0 for panels_in_class in panels_per_class):
+        raise ValueError("Initialization produced an empty latent class.")
 
     panel_to_class = onp.empty(data.num_panels, dtype=onp.int32)
     for class_idx, panels_in_class in enumerate(panels_per_class):
@@ -154,8 +187,8 @@ def _random_class_partition(
             DiffUnchosenChosen(
                 X=jnp.array(class_X),
                 alts=jnp.array(class_alts),
-                cases=jnp.array(contiguous_cases),
-                panels=jnp.array(contiguous_panels),
+                cases=jnp.array(contiguous_cases, dtype="uint32"),
+                panels=jnp.array(contiguous_panels, dtype="uint32"),
                 num_cases=num_cases,
             )
         )
