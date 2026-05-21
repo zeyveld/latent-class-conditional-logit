@@ -1,9 +1,11 @@
-# Standard Conditional Logit
+# Conditional logit
 
-Specification and estimation for standard Multinomial Conditional Logit models, estimating a single vector of homogenous taste parameters across the entire sample.
+The standard McFadden conditional logit: a single vector of taste parameters across the entire sample, fit by maximum likelihood. Useful both as a baseline against richer models and as the inner kernel of the latent-class M-step.
 
-## Model Specification
+## Model
+
 ::: lcl.conditional_logit.ConditionalLogit
 
-## Post-Estimation Results
+## Results
+
 ::: lcl.conditional_logit.CLResults

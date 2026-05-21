@@ -1,12 +1,15 @@
-# Latent-Class Conditional Logit
+# Latent-class conditional logit
 
-This module contains the core estimation logic for the latent-class conditional logit model.
+The headline estimator. A finite mixture of conditional logits, fit by expectation-maximization, with optional demographic regression on class membership. Class-specific taste vectors are recovered via maximum likelihood at each M-step; class probabilities are updated either as aggregate shares or, when demographics are present, through a fractional-response multinomial logit.
 
-## Model Specification
+## Model
+
 ::: lcl.latent_class_conditional_logit.LatentClassConditionalLogit
 
-## Post-Estimation Results
+## Results
+
 ::: lcl._results.LCLResults
 
-## Counterfactual Prediction & WTP
+## Prediction and counterfactuals
+
 ::: lcl._prediction.LCLPrediction

@@ -1,6 +1,8 @@
-# Model Selection
+# Cross-validation
 
-!!! warning "Experimental Feature"
-    The cross-validation utilities are currently a Work in Progress (WIP). Use them with caution when evaluating the optimal number of latent classes.
+Blocked K-fold cross-validation for choosing the number of latent classes. Folds are drawn at the decision-maker level, so an individual's entire choice history sits in exactly one fold.
 
-::: lcl._wip_cross_validation.cv_optimal_classes
+!!! warning "Experimental"
+    The cross-validation utility is functional but still under active refinement. See the [model-selection tutorial](../tutorials/cross_validation.md) for a worked example.
+
+::: lcl._cross_validation.cv_optimal_classes

@@ -1,32 +1,45 @@
 site_name: LCL
+site_description: A JAX-accelerated Python package for latent-class conditional logit models.
 site_url: https://zeyveld.github.io/latent-class-conditional-logit/
 repo_url: https://github.com/zeyveld/latent-class-conditional-logit
 
 theme:
   name: material
+  logo: assets/logo.svg
+  favicon: assets/favicon.svg
   features:
     - navigation.tabs
     - navigation.indexes
+    - navigation.top
     - content.code.copy
     - content.code.annotate
+    - toc.follow
+  font: false  # disable Material's Google Fonts; Luciole is self-hosted via extra.css
   palette:
     - media: "(prefers-color-scheme: light)"
       scheme: default
+      primary: custom
+      accent: custom
       toggle:
-        icon: material/brightness-7
+        icon: material/weather-sunny
         name: Switch to dark mode
     - media: "(prefers-color-scheme: dark)"
       scheme: slate
+      primary: custom
+      accent: custom
       toggle:
-        icon: material/brightness-4
+        icon: material/weather-night
         name: Switch to light mode
+
+extra_css:
+  - stylesheets/extra.css
 
 plugins:
   - search
   - mkdocstrings:
       handlers:
         python:
-          paths: ["src"] 
+          paths: ["src"]
           options:
             docstring_style: numpy
             merge_init_into_class: true
@@ -47,12 +60,12 @@ markdown_extensions:
 nav:
   - Home: index.md
   - Tutorials:
-    - Estimation & Counterfactuals: tutorials/estimation.md
-    - Cross-Validation & Model Selection: tutorials/cross_validation.md
+      - Estimation & counterfactuals: tutorials/estimation.md
+      - Cross-validation & model selection: tutorials/cross_validation.md
   - API Reference:
-    - Latent-Class Logit: api/latent_class.md
-    - Standard Conditional Logit: api/conditional_logit.md
-    - Model Selection (WIP): api/cross_validation.md
+      - Latent-class logit: api/latent_class.md
+      - Conditional logit: api/conditional_logit.md
+      - Cross-validation: api/cross_validation.md
 
 extra_javascript:
   - https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?version=4.8.0&features=es6

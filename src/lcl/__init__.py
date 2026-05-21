@@ -23,10 +23,10 @@ config.update("jax_enable_x64", True)
 
 # Ensure array args have mutually compatible shapes throughout the package
 with install_import_hook("lcl", "beartype.beartype"):
+    from lcl._cross_validation import cv_optimal_classes
     from lcl._prediction import LCLPrediction
     from lcl._results import LCLResults
     from lcl._struct import PartitionType, PastChoicesData, WTPRequest
-    from lcl._wip_cross_validation import cv_optimal_classes
     from lcl.conditional_logit import CLResults, ConditionalLogit
     from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
