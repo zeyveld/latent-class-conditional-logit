@@ -1,10 +1,10 @@
 # Estimation & counterfactuals
 
-This walkthrough fits a three-class latent-class conditional logit to the Apollo `modeChoice` dataset, then uses the estimated model to evaluate a counterfactual fare increase and compute the value of time across income quintiles. It is the canonical end-to-end workflow.
+This walkthrough fits a three-class latent-class conditional logit on the Apollo `modeChoice` dataset, then uses the estimated model to evaluate a counterfactual fare increase and compute the value of time across income quintiles. The goal is to illustrate a standard end-to-end workflow.
 
 ## 1. Reshape the data
 
-LCL expects a strictly sorted long-format frame: one row per `(decision-maker, choice situation, alternative)` triple. The Apollo data ships in wide format, so the first step is a melt. Polars handles this in milliseconds even for millions of rows.
+LCL expects a long-format dataframe: one row per `(decision-maker, choice situation, alternative)` triple. The Apollo data ships in wide format, so the first step is a melt. Polars handles this in milliseconds even for millions of rows.
 
 ```python
 import polars as pl
@@ -125,7 +125,7 @@ time & -0.011 & 0.003 \\
  CAIC: 15323.8 | BIC: 15311.8 | Adj. BIC: 15240.9>
 ```
 
-The table reports population-level moments of the structural β's — i.e., the share-weighted mean and standard deviation across latent classes, with Delta-method standard errors in parentheses. Class-specific coefficients are on `results.em_res.structural_betas`; posterior class-membership probabilities by panel are on `results.em_res.class_probs_by_panel`.
+The table reports population-level moments of the structural β's — i.e., the share-weighted mean and standard deviation across latent classes, with Delta-method standard errors in parentheses. Class-specific coefficients are in `results.em_res.structural_betas`, while posterior class-membership probabilities by panel are in `results.em_res.class_probs_by_panel`.
 
 ## 3. A counterfactual fare increase
 
@@ -161,7 +161,7 @@ shape: (8, 4)
 └────────┴───────┴──────┴──────────────┘
 ```
 
-The `LCLPrediction` object also carries expected consumer surplus by choice situation (the log-sum-exp inclusive value rescaled by marginal utility of income) and a per-panel willingness-to-pay frame. Both are useful as inputs to welfare analysis.
+The `LCLPrediction` object also reports expected consumer surplus by choice situation (the log-sum-exp inclusive value rescaled by marginal utility of income) and a per-panel willingness-to-pay frame. Both are useful as inputs to welfare analysis.
 
 ## 4. Elasticities
 
@@ -190,11 +190,11 @@ shape: (8, 6)
 └────────┴───────┴──────┴─────────────┴─────────────────┴─────────────────┘
 ```
 
-`alts` indexes the alternative whose probability changes, and `target_alts` indexes the alternative whose attribute changes. Diagonal entries (`alts == target_alts`) are own-elasticities; the rest are cross-elasticities.
+`alts` indexes the alternative whose probability changes, and `target_alts` indexes the alternative whose attribute changes. Diagonal entries (`alts == target_alts`) represent own-elasticities; the rest are cross-elasticities.
 
 ## 5. Marginal willingness-to-pay
 
-Because we declared `numeraire="cost"`, LCL can compute the value of time analytically as the ratio $-\beta_{\text{time}}/\beta_{\text{cost}}$ and propagate uncertainty through the Delta method. Partitions are evaluated lazily — you ask for income quintiles, the encoder bins the panel-level demographics, and you receive one row per bin.
+Because we declared `numeraire="cost"`, LCL computes the value of time analytically as the ratio $-\beta_{\text{time}}/\beta_{\text{cost}}$ and propagates uncertainty using the Delta method. Partitions are evaluated lazily — you ask for income quintiles, the encoder bins the panel-level demographics, and you receive one row per bin.
 
 ```python
 from lcl._struct import PartitionType, WTPRequest
@@ -226,6 +226,6 @@ shape: (2, 3)
 | 1.0    | -0.2558           | 0.0097         |
 ```
 
-The value-of-time rises monotonically with income — wealthier households are willing to pay more to save a minute on the journey — and is essentially flat across gender once income is controlled for. The signs are negative because `time` enters utility as a disamenity; flip the sign convention if you prefer the marginal cost framing.
+The value-of-time rises monotonically with income — wealthier households are willing to pay more to save a minute on the journey — and proves essentially flat across gender after accounting for income. The signs are negative because `time` enters utility as a disamenity; flip the sign convention if you prefer the marginal cost framing.
 
 That covers a complete pass: ingest, estimate, predict, decompose. The same `LCLResults` object remains usable for further counterfactuals; nothing about `predict` mutates the fitted model.
