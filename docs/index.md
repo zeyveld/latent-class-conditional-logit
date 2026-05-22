@@ -9,7 +9,7 @@ hide:
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-LCL is a Python package for estimating latent-class conditional logit models. It runs an expectation-maximization (EM) algorithm on JAX, sharding the per-class M-steps across available GPUs and TPUs, and returns a results object with clustered standard errors, counterfactual predictions, and Delta-method willingness-to-pay distributions.
+LCL is a Python package for estimating latent-class conditional logit models. It runs an expectation-maximization (EM) algorithm on JAX, sharding the per-class M-steps across available accelerators. After estimation, the results object supports counterfactual predictions and consumer welfare analysis.
 
 Although I'm an economist by training, this package is intended for all social scientists who study household-level panel data: marketers, transportation researchers, operations researchers, political scientists, and public policy researchers, among others. 
 
@@ -19,7 +19,7 @@ Although I'm an economist by training, this package is intended for all social s
 - **`ConditionalLogit`**: standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
 - **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Folds are split at the decision-maker level, so no individuals' choices appear in both training and held-out data.
 - **Counterfactual prediction**: out-of-sample choice probabilities, expected consumer surplus, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
-- **Inference**: clustered sandwich covariance at the panel level and the Delta method for non-linear parameter combinations such as the value of time.
+- **Inference**: clustered sandwich covariance at the panel level and the Delta method for non-linear functions of the parameters (such as the value of time).
 
 Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped design matrix should raise a readable error at the call site rather than a cryptic XLA trace.
 
@@ -112,7 +112,7 @@ Information criteria: CAIC=1233.4, BIC=1227.4, adjusted BIC=1197.4
  CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1197.4>
 ```
 
-The parentheses enclose delta-method standard errors on the population moments. The class-specific β's themselves are available in `results.em_res.structural_betas`.
+The parentheses enclose Delta-method standard errors on the population moments. The class-specific β's themselves are available in `results.em_res.structural_betas`.
 
 ## Roadmap
 

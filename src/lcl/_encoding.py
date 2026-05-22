@@ -1,7 +1,7 @@
 """Data encoding layer shared by fit and predict APIs."""
 
-from dataclasses import dataclass
 from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import jax.numpy as jnp
@@ -160,6 +160,7 @@ class ChoiceDataEncoder:
             df.join(panel_keys, on=self.panels_col, how="left")
             .join(case_keys, on=case_key_cols, how="left")
             .join(alt_keys, on=self.alts_col, how="left")
+            .sort(["_seq_panels", "_seq_cases", "_seq_alts"])
         )
 
     def _encode_features(
