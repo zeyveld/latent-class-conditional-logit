@@ -8,7 +8,7 @@ from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient
 from lcl._demographics import _compute_grouped_data_loglik_grad_hess
 from lcl._em_alg_steps import _compute_panel_logliks
 from lcl._optimize import exact_newton_minimize
-from lcl._struct import Data, EMAlgConfig, ErrorConfig, MleConfig
+from lcl._struct import Data, EMAlgConfig, ErrorConfig, MleConfig, PastChoicesData
 from lcl.conditional_logit import ConditionalLogit
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
@@ -249,6 +249,70 @@ def test_prediction_uses_demographics_when_no_past_choices() -> None:
     assert prediction.class_probs_by_panel is not None
     assert not jnp.allclose(
         prediction.class_probs_by_panel[0], prediction.class_probs_by_panel[1]
+    )
+
+
+def test_prediction_accepts_tabular_past_choices() -> None:
+    df = _small_lcl_df()
+    model = LatentClassConditionalLogit(num_classes=2)
+    results = model.fit(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["x"],
+        dem_varnames=["dem"],
+        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
+        mle_config=MleConfig(maxiter=2),
+        error_config=ErrorConfig(skip_std_errs=True),
+    )
+    results.em_res = results.em_res._replace(
+        structural_betas=jnp.array([[1.0, -1.0]]),
+        latent_betas=jnp.array([[1.0, -1.0]]),
+        thetas=jnp.array([[0.0], [0.5]]),
+        shares=jnp.array([0.5, 0.5]),
+    )
+    dem_matrix = (
+        df.select(["panel", "dem"])
+        .unique(subset=["panel"], maintain_order=True)
+        .sort("panel")
+        .select(["dem"])
+        .to_numpy()
+    )
+    wrapped_past_choices = PastChoicesData(
+        X=df.select(["x"]).to_numpy(),
+        y=df["choice"].to_numpy(),
+        alts=df["alt"].to_numpy(),
+        cases=df["case"].to_numpy(),
+        panels=df["panel"].to_numpy(),
+        dems=dem_matrix,
+    )
+
+    from_tabular = results.predict(data=df, past_choices=df)
+    from_tabular_with_separate_dems = results.predict(
+        data=df,
+        past_choices=df.drop("dem"),
+        past_choices_dems_data=df.select(["panel", "dem"]).unique(
+            subset=["panel"], maintain_order=True
+        ),
+    )
+    from_wrapper = results.predict(data=df, past_choices=wrapped_past_choices)
+
+    assert from_tabular.class_probs_by_panel is not None
+    assert from_tabular_with_separate_dems.class_probs_by_panel is not None
+    assert from_wrapper.class_probs_by_panel is not None
+    assert jnp.allclose(
+        from_tabular.class_probs_by_panel,
+        from_wrapper.class_probs_by_panel,
+    )
+    assert jnp.allclose(
+        from_tabular_with_separate_dems.class_probs_by_panel,
+        from_wrapper.class_probs_by_panel,
+    )
+    assert onp.allclose(
+        from_tabular.predicted_probs["choice_probs"].to_numpy(),
+        from_wrapper.predicted_probs["choice_probs"].to_numpy(),
     )
 
 

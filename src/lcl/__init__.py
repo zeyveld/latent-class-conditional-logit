@@ -26,7 +26,14 @@ with install_import_hook("lcl", "beartype.beartype"):
     from lcl._cross_validation import cv_optimal_classes
     from lcl._prediction import LCLPrediction
     from lcl._results import LCLResults
-    from lcl._struct import PartitionType, PastChoicesData, WTPRequest
+    from lcl._struct import (
+        EMAlgConfig,
+        ErrorConfig,
+        MleConfig,
+        PartitionType,
+        PastChoicesData,
+        WTPRequest,
+    )
     from lcl.conditional_logit import CLResults, ConditionalLogit
     from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
@@ -35,6 +42,9 @@ __all__ = [
     "LatentClassConditionalLogit",
     "ConditionalLogit",
     "CLResults",
+    "EMAlgConfig",
+    "ErrorConfig",
+    "MleConfig",
     "LCLResults",
     "LCLPrediction",
     "WTPRequest",

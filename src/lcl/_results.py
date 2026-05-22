@@ -2,7 +2,7 @@
 
 import logging
 from collections.abc import Callable
-from typing import Any, cast
+from typing import Any, Protocol, cast, runtime_checkable
 
 import jax.numpy as jnp
 import numpy as onp
@@ -34,6 +34,23 @@ from lcl._struct import (
 
 
 logger = logging.getLogger(__name__)
+
+
+@runtime_checkable
+class _PastChoicesParser(Protocol):
+    """Fitted model interface needed to encode historical choices."""
+
+    case_varnames: list[str]
+    dem_varnames: list[str] | None
+
+    def _transform_data(
+        self,
+        data: object,
+        dems_data: object | None = None,
+        require_choice: bool = False,
+    ) -> ParsedData:
+        """Transform raw choice data with the fitted empirical specification."""
+        ...
 
 
 class LCLResults:
@@ -398,12 +415,64 @@ class LCLResults:
         cases: ArrayLike | None = None,
         panels: ArrayLike | None = None,
         dems: ArrayLike | None = None,
-        past_choices: PastChoicesData | None = None,
+        past_choices: object | None = None,
         data: object | None = None,
         dems_data: object | None = None,
+        past_choices_dems_data: object | None = None,
     ) -> LCLPrediction:
-        """Generate out-of-sample predictions and counterfactual inclusive values (consumer surplus)."""
+        """Generate out-of-sample latent-class predictions.
 
+        Prediction can be requested either with raw tabular data, which is encoded
+        using the fitted model specification, or with already-constructed arrays.
+        When historical choices are supplied through ``past_choices``, class
+        membership probabilities are updated with Bayes' rule before computing
+        counterfactual choice probabilities, consumer surplus, and willingness to pay.
+
+        Parameters
+        ----------
+        X : ArrayLike | None, optional
+            Alternative-specific design matrix for array-style prediction. Ignored
+            when ``data`` is provided.
+        alts : ArrayLike | None, optional
+            Alternative identifiers aligned to rows of ``X``.
+        cases : ArrayLike | None, optional
+            Choice-situation identifiers aligned to rows of ``X``.
+        panels : ArrayLike | None, optional
+            Decision-maker identifiers aligned to rows of ``X``.
+        dems : ArrayLike | None, optional
+            Panel-level demographics for array-style prediction.
+        past_choices : PastChoicesData or tabular data, optional
+            Historical choices used to condition latent-class membership probabilities.
+            Pass a :class:`~lcl._struct.PastChoicesData` instance for array-style
+            inputs, or a Polars/Pandas/DataFrame-like object containing the fitted
+            model's alternative, case, panel, choice, alternative-specific, and
+            demographic columns.
+        data : object | None, optional
+            Long-format prediction data. If provided, the fitted encoder parses this
+            data using the original empirical specification.
+        dems_data : object | None, optional
+            Optional panel-level demographics to merge into ``data`` during prediction.
+        past_choices_dems_data : object | None, optional
+            Optional panel-level demographics to merge into tabular ``past_choices``.
+            This argument is not used with :class:`~lcl._struct.PastChoicesData`.
+
+        Returns
+        -------
+        :class:`~lcl._prediction.LCLPrediction`
+            Prediction results, including choice probabilities, consumer surplus,
+            panel-level WTP values, and the class probabilities used for prediction.
+
+        Raises
+        ------
+        ValueError
+            If required prediction identifiers are missing, if fitted latent-class
+            parameters are unavailable, or if ``past_choices_dems_data`` is provided
+            without tabular ``past_choices``.
+        """
+        if past_choices is None and past_choices_dems_data is not None:
+            raise ValueError(
+                "past_choices_dems_data can only be used when past_choices is provided."
+            )
         if data is not None:
             parsed_predict = self.model._transform_data(data, dems_data=dems_data)
         else:
@@ -433,15 +502,10 @@ class LCLResults:
             raise ValueError("Class shares are required for prediction.")
 
         if past_choices is not None:
-            parsed_past = _parsed_prediction_arrays(
-                X=past_choices.X,
-                dems=past_choices.dems,
-                alts=past_choices.alts,
-                cases=past_choices.cases,
-                panels=past_choices.panels,
-                y=past_choices.y,
-                case_varnames=self.model.case_varnames,
-                dem_varnames=self.model.dem_varnames,
+            parsed_past = _parse_past_choices(
+                model=self.model,
+                past_choices=past_choices,
+                past_choices_dems_data=past_choices_dems_data,
             )
             data_past = cast(Data, self.model._setup_data(parsed_past)[0])
             diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
@@ -542,6 +606,59 @@ class LCLResults:
             results=self,
             class_probs_by_panel=class_probs_by_panel,
         )
+
+
+def _parse_past_choices(
+    model: _PastChoicesParser,
+    past_choices: object,
+    past_choices_dems_data: object | None,
+) -> ParsedData:
+    """Parse historical choices for prediction-time class updating.
+
+    Parameters
+    ----------
+    model : _PastChoicesParser
+        Fitted model specification that owns the trained encoder and variable
+        metadata.
+    past_choices : PastChoicesData or object
+        Historical choices. ``PastChoicesData`` supports array-style callers; any
+        other object is treated as tabular data and transformed with the fitted
+        encoder.
+    past_choices_dems_data : object | None
+        Optional panel-level demographics to join to tabular ``past_choices``.
+
+    Returns
+    -------
+    :class:`~lcl._struct.ParsedData`
+        Encoded historical choices with validated choice indicators.
+
+    Raises
+    ------
+    ValueError
+        If ``past_choices_dems_data`` is supplied with ``PastChoicesData``.
+    """
+    if isinstance(past_choices, PastChoicesData):
+        if past_choices_dems_data is not None:
+            raise ValueError(
+                "past_choices_dems_data is only supported when past_choices is "
+                "provided as tabular data."
+            )
+        return _parsed_prediction_arrays(
+            X=past_choices.X,
+            dems=past_choices.dems,
+            alts=past_choices.alts,
+            cases=past_choices.cases,
+            panels=past_choices.panels,
+            y=past_choices.y,
+            case_varnames=model.case_varnames,
+            dem_varnames=model.dem_varnames,
+        )
+
+    return model._transform_data(
+        past_choices,
+        dems_data=past_choices_dems_data,
+        require_choice=True,
+    )
 
 
 def _parsed_prediction_arrays(

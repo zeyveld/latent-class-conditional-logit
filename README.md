@@ -40,7 +40,7 @@ A two-class model on a small synthetic panel. The [estimation tutorial](https://
 import numpy as onp
 import polars as pl
 import lcl
-from lcl._struct import EMAlgConfig, MleConfig
+from lcl import EMAlgConfig, MleConfig
 
 rng = onp.random.default_rng(7)
 

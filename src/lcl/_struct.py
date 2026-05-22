@@ -203,10 +203,29 @@ class EMVars(NamedTuple):
 
 @dataclass
 class PastChoicesData:
-    """Container for a decision-maker's historical choices.
+    """Array-style container for historical choices used during prediction.
 
-    Pass to predict() to update conditional class membership probabilities
-    using Bayesian updating for out-of-sample counterfactual prediction.
+    Pass to ``LCLResults.predict(past_choices=...)`` to update latent-class
+    membership probabilities with observed choices before scoring counterfactual
+    choice sets. Users with tabular historical-choice data can pass that DataFrame
+    directly to ``past_choices``; this wrapper is intended for callers that already
+    manage design matrices and ID arrays.
+
+    Attributes
+    ----------
+    X : ArrayLike
+        Alternative-specific design matrix in long format.
+    y : ArrayLike
+        Boolean or binary choice indicators aligned to rows of ``X``.
+    alts : ArrayLike
+        Alternative identifiers aligned to rows of ``X``.
+    cases : ArrayLike
+        Choice-situation identifiers aligned to rows of ``X``.
+    panels : ArrayLike
+        Decision-maker identifiers aligned to rows of ``X``.
+    dems : ArrayLike | None, optional
+        Panel-level demographic matrix, one row per unique panel, when the fitted
+        latent-class membership model includes demographics.
     """
 
     X: ArrayLike

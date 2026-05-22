@@ -1,10 +1,10 @@
 # Estimation & counterfactuals
 
-This walkthrough fits a three-class latent-class conditional logit on the Apollo `modeChoice` dataset, then uses the estimated model to evaluate a counterfactual fare increase and compute the value of time across income quintiles. The goal is to illustrate a standard end-to-end workflow.
+This tutorial fits a three-class latent-class conditional logit on the Apollo `modeChoice` dataset, then uses the estimated model to evaluate a counterfactual fare increase and compute the value of time across income quintiles. The goal is to illustrate a standard end-to-end workflow.
 
 ## 1. Reshape the data
 
-LCL expects a long-format dataframe: one row per `(decision-maker, choice situation, alternative)` triple. The Apollo data ships in wide format, so the first step is a melt. Polars handles this in milliseconds even for millions of rows.
+LCL expects a long-format dataframe: one row per `(decision-maker, choice situation, alternative)` triple. The Apollo data ship in wide format, so the first step is a wide-to-long melt; Polars performs this in milliseconds.
 
 ```python
 import polars as pl
@@ -33,8 +33,8 @@ for num, name in alts_map.items():
 
 df_long = (
     pl.concat(dfs)
-      .filter(pl.col("av") == 1)        # drop unavailable alternatives
-      .sort(["ID", "qID", "alt"])       # required: panel, then case, then alt
+      .filter(pl.col("av") == 1)        # Drop unavailable alternatives
+      .sort(["ID", "qID", "alt"])       # Required: panel, then case, then alt
 )
 print(df_long.head(8))
 ```
@@ -62,11 +62,11 @@ shape: (8, 9)
 
 ## 2. Estimate the model
 
-Three latent classes, cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparametrization), and demographics — income and a female indicator — driving class membership.
+Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparametrization). We'll model class membership as a function of two demographic variables: income and an indicator for being female. 
 
 ```python
 import lcl
-from lcl._struct import EMAlgConfig, ErrorConfig, MleConfig
+from lcl import EMAlgConfig, ErrorConfig, MleConfig
 
 model = lcl.LatentClassConditionalLogit(num_classes=3, numeraire="cost")
 
@@ -125,11 +125,11 @@ time & -0.011 & 0.003 \\
  CAIC: 15323.8 | BIC: 15311.8 | Adj. BIC: 15240.9>
 ```
 
-The table reports population-level moments of the structural β's — i.e., the share-weighted mean and standard deviation across latent classes, with Delta-method standard errors in parentheses. Class-specific coefficients are in `results.em_res.structural_betas`, while posterior class-membership probabilities by panel are in `results.em_res.class_probs_by_panel`.
+The table reports population-level moments of the structural β's—that is, the share-weighted mean and standard deviation across latent classes—with Delta-method standard errors in parentheses. Class-specific coefficients are in `results.em_res.structural_betas`, while posterior class-membership probabilities by panel are in `results.em_res.class_probs_by_panel`.
 
-## 3. A counterfactual fare increase
+## 3. A counterfactual fare increase, conditioned on observed choices
 
-Suppose a regulator raises bus and rail fares by 25 percent. `predict` re-uses the fitted encoder, so you only need to pass the modified DataFrame.
+Suppose the regulator raises bus and rail fares by 25%. `predict` re-uses the fitted encoder, so you only need to pass the modified DataFrame. The optional `past_choices` argument lets you condition the latent-class membership posterior on each decision-maker's observed choices. The intuition is that combining panels' revealed preferences with the (estimated) demographic prior provides sharper class assignments for counterfactual predictions. Here, we reuse `df_long`, which contains the very sequences on which we fitted the model, as the historical record. In practice, you might pass a separate frame of observed choices for each decision-maker prior to the policy change.
 
 ```python
 cf_df = df_long.with_columns(
@@ -139,7 +139,7 @@ cf_df = df_long.with_columns(
       .alias("cost")
 )
 
-prediction = results.predict(data=cf_df)
+prediction = results.predict(data=cf_df, past_choices=df_long)
 print(prediction.predicted_probs.head(8))
 ```
 
@@ -150,22 +150,24 @@ shape: (8, 4)
 │ ---    ┆ ---   ┆ ---  ┆ ---          │
 │ i64    ┆ u32   ┆ str  ┆ f64          │
 ╞════════╪═══════╪══════╪══════════════╡
-│ 1      ┆ 0     ┆ air  ┆ 0.629067     │
-│ 1      ┆ 0     ┆ rail ┆ 0.370933     │
-│ 1      ┆ 1     ┆ air  ┆ 0.526480     │
-│ 1      ┆ 1     ┆ rail ┆ 0.473520     │
-│ 1      ┆ 2     ┆ air  ┆ 0.744888     │
-│ 1      ┆ 2     ┆ rail ┆ 0.255112     │
-│ 1      ┆ 3     ┆ air  ┆ 0.831142     │
-│ 1      ┆ 3     ┆ rail ┆ 0.168858     │
+│ 1      ┆ 0     ┆ air  ┆ 0.541747     │
+│ 1      ┆ 0     ┆ rail ┆ 0.458253     │
+│ 1      ┆ 1     ┆ air  ┆ 0.398250     │
+│ 1      ┆ 1     ┆ rail ┆ 0.601750     │
+│ 1      ┆ 2     ┆ air  ┆ 0.666931     │
+│ 1      ┆ 2     ┆ rail ┆ 0.333069     │
+│ 1      ┆ 3     ┆ air  ┆ 0.858308     │
+│ 1      ┆ 3     ┆ rail ┆ 0.141692     │
 └────────┴───────┴──────┴──────────────┘
 ```
+
+Panel 1 chose rail in every observed situation, so the posterior tends towards rail-leaning classes. So, after the 25% fare increase, they're more likely to stick with rail travel than would be suggested by the demographic prior alone. The same posterior `class_probs_by_panel` is stored on `prediction` and guides the elasticity and welfare calculations below. Pass `past_choices` as a `PastChoicesData` instance instead of a DataFrame when you already manage design matrices and ID arrays directly.
 
 The `LCLPrediction` object also reports expected consumer surplus by choice situation (the log-sum-exp inclusive value rescaled by marginal utility of income) and a per-panel willingness-to-pay frame. Both are useful as inputs to welfare analysis.
 
 ## 4. Elasticities
 
-LCL computes the full table of own- and cross-elasticities — the percentage change in the probability of choosing alternative $j$ given a one-percent change in attribute $v$ of alternative $k$ — in one pass.
+LCL computes the full table of own- and cross-price elasticities—that is, the percentage change in the probability of choosing alternative $j$ given a one-percent change in attribute $k$ of alternative $j'$—in one pass.
 
 ```python
 elast_df = prediction.elasticities(["cost", "time"])
@@ -179,25 +181,25 @@ shape: (8, 6)
 │ ---    ┆ ---   ┆ ---  ┆ ---         ┆ ---             ┆ ---             │
 │ u32    ┆ u32   ┆ u32  ┆ u32         ┆ f64             ┆ f64             │
 ╞════════╪═══════╪══════╪═════════════╪═════════════════╪═════════════════╡
-│ 0      ┆ 0     ┆ 0    ┆ 0           ┆ -1.281914       ┆ -0.203956       │
-│ 0      ┆ 0     ┆ 0    ┆ 1           ┆  1.101645       ┆  0.571078       │
-│ 0      ┆ 0     ┆ 1    ┆ 0           ┆  2.174003       ┆  0.345890       │
-│ 0      ┆ 0     ┆ 1    ┆ 1           ┆ -1.868284       ┆ -0.968492       │
-│ 0      ┆ 1     ┆ 0    ┆ 0           ┆ -1.583079       ┆ -0.361833       │
-│ 0      ┆ 1     ┆ 0    ┆ 1           ┆  1.113102       ┆  0.878737       │
-│ 0      ┆ 1     ┆ 1    ┆ 0           ┆  1.760136       ┆  0.402301       │
-│ 0      ┆ 1     ┆ 1    ┆ 1           ┆ -1.237595       ┆ -0.977018       │
+│ 0      ┆ 0     ┆ 0    ┆ 0           ┆ -1.975733       ┆ -0.196076       │
+│ 0      ┆ 0     ┆ 0    ┆ 1           ┆  1.697896       ┆  0.549013       │
+│ 0      ┆ 0     ┆ 1    ┆ 0           ┆  2.335712       ┆  0.231801       │
+│ 0      ┆ 0     ┆ 1    ┆ 1           ┆ -2.007252       ┆ -0.649043       │
+│ 0      ┆ 1     ┆ 0    ┆ 0           ┆ -2.525647       ┆ -0.358665       │
+│ 0      ┆ 1     ┆ 0    ┆ 1           ┆  1.775845       ┆  0.871044       │
+│ 0      ┆ 1     ┆ 1    ┆ 0           ┆  1.671520       ┆  0.237371       │
+│ 0      ┆ 1     ┆ 1    ┆ 1           ┆ -1.175287       ┆ -0.576473       │
 └────────┴───────┴──────┴─────────────┴─────────────────┴─────────────────┘
 ```
 
-`alts` indexes the alternative whose probability changes, and `target_alts` indexes the alternative whose attribute changes. Diagonal entries (`alts == target_alts`) represent own-elasticities; the rest are cross-elasticities.
+`alts` indexes the alternative whose probability changes, while `target_alts` indexes the alternative whose attribute changes. Diagonal entries (`alts == target_alts`) represent own-price elasticities; the rest are cross-price elasticities. Because the elasticities are evaluated at the posterior class probabilities, each panel's table reflects what we have learned about that decision-maker's class membership. So, panels whose observed choices suggest they belong to cost-sensitive classes will show correspondingly larger own-price responses.
 
 ## 5. Marginal willingness-to-pay
 
-Because we declared `numeraire="cost"`, LCL computes the value of time analytically as the ratio $-\beta_{\text{time}}/\beta_{\text{cost}}$ and propagates uncertainty using the Delta method. Partitions are evaluated lazily — you ask for income quintiles, the encoder bins the panel-level demographics, and you receive one row per bin.
+Because we declared `numeraire="cost"`, LCL computes the value of time analytically as the ratio $-\beta_{\text{time}}/\beta_{\text{cost}}$, quantifying uncertainty using the Delta method. Partitions are evaluated lazily; when you ask for income quintiles, the encoder bins the panel-level demographics, and you receive one row per bin.
 
 ```python
-from lcl._struct import PartitionType, WTPRequest
+from lcl import PartitionType, WTPRequest
 
 prediction.compute_wtp(
     WTPRequest(alt_var="time", demographic_var="income",
@@ -226,6 +228,6 @@ shape: (2, 3)
 | 1.0    | -0.2558           | 0.0097         |
 ```
 
-The value-of-time rises monotonically with income — wealthier households are willing to pay more to save a minute on the journey — and proves essentially flat across gender after accounting for income. The signs are negative because `time` enters utility as a disamenity; flip the sign convention if you prefer the marginal cost framing.
+The value of time tends to rise with income—wealthier households are willing to pay more to save a minute on the journey—and proves essentially flat across gender after accounting for income. Notice that the signs are negative: this is because `time` enters utility as a disamenity; flip the sign convention if you prefer a marginal cost framing.
 
-That covers a complete pass: ingest, estimate, predict, decompose. The same `LCLResults` object remains usable for further counterfactuals; nothing about `predict` mutates the fitted model.
+That concludes a complete pass: ingest, estimate, predict, decompose. The same `LCLResults` object remains usable for further counterfactuals; nothing about `predict` mutates the fitted model.

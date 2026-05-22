@@ -1,19 +1,19 @@
 # Cross-validation & model selection
 
-Choosing the number of latent classes is the central modelling decision for any finite mixture. Information criteria (BIC, CAIC, adjusted BIC) are useful, and LCL reports all three on every fit. But the criteria can disagree, and they reward in-sample fit by construction. Out-of-sample log-likelihood under a panel-respecting split is the cleaner benchmark when you can spare the time (and shoulder the GPU expense).
+Choosing the number of latent classes is an important modelling decision for any finite mixture. Information criteria (BIC, CAIC, adjusted BIC) are useful, and LCL reports all three on every fit. But these criteria can disagree, and they reward in-sample fit by construction. Out-of-sample log-likelihood under a panel-respecting split is the cleaner benchmark when you can spare the time (and shoulder the GPU expense).
 
 `cv_optimal_classes` automates that exercise. Folds are drawn at the decision-maker level: an individual's entire choice history sits in exactly one fold so that a panel cannot leak between training and held-out data.
 
 !!! warning "Experimental"
-    The cross-validation utility is functional but still labelled experimental. Expect occasional refinements as I use this function in my own work.
+    The cross-validation utility is functional but still labelled experimental. Expect occasional refinements as I use this functionality in my own work.
 
 ## Running the sweep
 
-Let's re-use the long-format Apollo frame from the [estimation tutorial](estimation.md). The sweep below evaluates two, three, four, and five classes with three-fold CV. To keep the example speedy on a single device, we trim the inner EM loop to twenty-five iterations; in practice you'd loosen this when the optimum is already obvious from a coarse sweep.
+Let's re-use the long-format Apollo frame from the [estimation tutorial](estimation.md). The search below evaluates two, three, four, and five classes with three-fold CV. To keep the example speedy on a single device, we trim the inner EM loop to twenty-five iterations; in practice you'd loosen this when the optimum is already obvious from a coarse sweep.
 
 ```python
 import lcl
-from lcl._struct import EMAlgConfig, MleConfig
+from lcl import EMAlgConfig, MleConfig
 
 cv_results = lcl.cv_optimal_classes(
     data=df_long,
@@ -47,11 +47,11 @@ shape: (4, 2)
 └─────────────┴──────────────┘
 ```
 
-The out-of-sample log-likelihood rises sharply from two to three classes (an improvement of about ten log-units per fold), increases marginally at four, and remains essentially flat at five. On Apollo, three or four classes is the defensible choice — the diminishing returns past four suggest that a fifth component is fitting noise.
+The out-of-sample log-likelihood rises sharply from two to three classes, increases marginally at four, and remains essentially flat at five. On Apollo, three or four classes are defensible choices; the diminishing returns past four suggest that a fifth component is fitting noise.
 
 ## Plotting the curve
 
-Eye-balling a table of likelihoods is easy when there are four rows, but tougher when you're comparing a dozen candidate Ks. Vega-Altair creates a tidy interactive curve:
+Eye-balling a table of likelihoods is easy when there are four rows, but tougher when you're comparing a dozen candidate Ks. Vega-Altair generates a tidy interactive curve:
 
 ```python
 import altair as alt
@@ -101,4 +101,4 @@ Open `cv_plot.html` and you have an interactive plot of the curve with the peak 
 - **Stick with a small number of folds for initial screening.** Three folds is plenty to see the qualitative shape of the curve. Bump to five or ten once you've narrowed the range.
 - **Use the same `EMAlgConfig` across folds.** Differing iteration budgets across folds confound the comparison.
 - **Inspect a fold that fails to converge.** `cv_optimal_classes` swallows individual fold failures and records `NaN`; if you see one, refit that fold standalone with `LatentClassConditionalLogit.fit` to see the diagnostic logs.
-- **Pair CV with the information criteria.** When CV picks $K^*$ and BIC picks $K^* - 1$, the latter is often the right call for inference — the smaller model trades a small amount of fit for tighter standard errors.
+- **Pair CV with the information criteria.** When CV picks $K^*$ and BIC picks $K^* - 1$, the latter is often the right call for inference; the smaller model trades a small amount of fit for tighter standard errors.
