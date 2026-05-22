@@ -1,7 +1,9 @@
 """General utilities for LCL library."""
 
+from typing import cast
+
 import jax.numpy as jnp
-import pandas as pd
+import pandas as pd  # type: ignore[import-untyped]
 import polars as pl
 from jax import Array
 from jax.typing import ArrayLike, DTypeLike
@@ -31,7 +33,7 @@ def _as_array_or_none(
         return jnp.asarray(data, dtype=dtype)
 
 
-def _robust_covariance(hess_inv: ArrayLike, grad_n: ArrayLike) -> ArrayLike:
+def _robust_covariance(hess_inv: ArrayLike, grad_n: ArrayLike) -> Array:
     """Apply the Huber/White heteroskedasticity correction to the covariance matrix.
 
     Utilizes the outer product of the gradients (BHHH estimator) to construct
@@ -55,7 +57,7 @@ def _robust_covariance(hess_inv: ArrayLike, grad_n: ArrayLike) -> ArrayLike:
     )  # Subtract the mean gradient value
     inner = jnp.transpose(grad_n_sub) @ grad_n_sub
     correction = (n) / (n - 1)
-    return correction * (hess_inv @ inner @ hess_inv)
+    return cast(Array, correction * (hess_inv @ inner @ hess_inv))
 
 
 # EOF

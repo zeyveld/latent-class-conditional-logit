@@ -57,13 +57,23 @@ def _em_alg(
     :class:`~lcl._struct.EMVars`
         Updated parameter state following the complete EM recursion.
     """
+    if em_vars.structural_betas is None:
+        raise ValueError("Structural betas are required before running an EM step.")
+    if em_vars.latent_betas is None:
+        raise ValueError("Latent betas are required before running an EM step.")
+    if em_vars.shares is None:
+        raise ValueError("Class shares are required before running an EM step.")
+
+    structural_betas = em_vars.structural_betas
+    latent_betas = em_vars.latent_betas
+    shares = em_vars.shares
 
     # 1. Compute conditional class membership probabilities given choices and demographics
     updated_class_probs_by_panel, updated_class_probs_by_choice = (
         _compute_conditional_class_probs(
-            em_vars.structural_betas,
+            structural_betas,
             em_vars.thetas,
-            em_vars.shares,
+            shares,
             diff_unchosen_chosen,
             data,
         )
@@ -72,7 +82,7 @@ def _em_alg(
     # 2. Update classes' respective taste coefficients based on conditional
     # class membership probabilities
     updated_latent_betas = _update_betas(
-        em_vars.latent_betas,
+        latent_betas,
         updated_class_probs_by_choice,
         diff_unchosen_chosen,
         mle_config,
@@ -272,7 +282,35 @@ def _update_betas(
     return out_betas[:, :num_classes]
 
 
-def _distributed_update(device_betas, device_weights, diff, numeraire_idx, mle_config):
+def _distributed_update(
+    device_betas: Float64[Array, "... classes_per_device alt_vars"],
+    device_weights: Float64[Array, "... classes_per_device cases"],
+    diff: DiffUnchosenChosen,
+    numeraire_idx: int | None,
+    mle_config: MleConfig,
+) -> Float64[Array, "... classes_per_device alt_vars"]:
+    """Update class-specific betas on one shard.
+
+    Parameters
+    ----------
+    device_betas : Float64[Array, "... classes_per_device alt_vars"]
+        Current latent beta vectors assigned to this shard. Some JAX execution
+        paths include a leading singleton shard axis, which is preserved on return.
+    device_weights : Float64[Array, "... classes_per_device cases"]
+        Case weights assigned to each class on this shard.
+    diff : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix shared by all class updates.
+    numeraire_idx : int | None
+        Optional column index constrained through the softplus transform.
+    mle_config : :class:`~lcl._struct.MleConfig`
+        Newton optimization settings.
+
+    Returns
+    -------
+    Float64[Array, "... classes_per_device alt_vars"]
+        Optimized latent beta vectors for the shard, with any leading singleton
+        shard axis restored.
+    """
     has_shard_axis = device_betas.ndim == 3
     if has_shard_axis:
         device_betas = device_betas[0]
@@ -280,15 +318,35 @@ def _distributed_update(device_betas, device_weights, diff, numeraire_idx, mle_c
 
     dyn_diff, static_diff = partition(diff, is_array)
 
-    def optimize_single_class(mapped_inputs):
+    def optimize_single_class(
+        mapped_inputs: tuple[
+            Float64[Array, "alt_vars"],
+            Float64[Array, "cases"],
+        ],
+    ) -> Float64[Array, "alt_vars"]:
+        """Optimize the beta vector for one latent class on the current shard."""
         b, w = mapped_inputs
 
-        def _value_fn_closure(p, d_diff, w_inner) -> Array:
+        def _value_fn_closure(
+            p: Float64[Array, "alt_vars"],
+            d_diff: object,
+            w_inner: Float64[Array, "cases"],
+        ) -> Float64[Array, ""]:
+            """Evaluate the objective using the dynamic/static diff PyTree split."""
             full_diff = combine(d_diff, static_diff)
             p_struct = _to_structural_betas(p, numeraire_idx)
             return _loglik_value(p_struct, full_diff, w_inner)
 
-        def _loglik_fn_closure(p, d_diff, w_inner) -> tuple[Array, Array, Array]:
+        def _loglik_fn_closure(
+            p: Float64[Array, "alt_vars"],
+            d_diff: object,
+            w_inner: Float64[Array, "cases"],
+        ) -> tuple[
+            Float64[Array, ""],
+            Float64[Array, "alt_vars"],
+            Float64[Array, "alt_vars alt_vars"],
+        ]:
+            """Evaluate objective, gradient, and Hessian with numeraire chain rule."""
             full_diff = combine(d_diff, static_diff)
             p_struct = _to_structural_betas(p, numeraire_idx)
 
@@ -352,8 +410,7 @@ def _compute_panel_logliks(
     """
     log_kernels = _compute_log_kernels(betas, diff_unchosen_chosen, data)
     weighted_log_kernels = (
-        jnp.log(jnp.maximum(unconditional_class_probs_by_panel, 1e-300))
-        + log_kernels
+        jnp.log(jnp.maximum(unconditional_class_probs_by_panel, 1e-300)) + log_kernels
     )
     row_max = jnp.max(weighted_log_kernels, axis=1, keepdims=True)
     return row_max[:, 0] + jnp.log(

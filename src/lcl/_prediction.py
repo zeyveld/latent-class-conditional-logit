@@ -8,7 +8,7 @@ import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jax import Array
-from jaxtyping import Float64
+from jaxtyping import Float64, Int
 
 from lcl._case_utils import _to_structural_betas
 from lcl._kernels import _choice_probabilities_and_logsum
@@ -52,9 +52,27 @@ class LCLPrediction:
         surplus_df: pl.DataFrame,
         wtp_alt_vars_by_panel_df: pl.DataFrame,
         predict_data: Data,
-        results,
-        class_probs_by_panel: Array | None = None,
+        results: Any,
+        class_probs_by_panel: Float64[Array, "panels classes"] | None = None,
     ) -> None:
+        """Store prediction outputs and references needed for post-processing.
+
+        Parameters
+        ----------
+        predicted_probs_df : pl.DataFrame
+            Long-format alternative choice probabilities.
+        surplus_df : pl.DataFrame
+            Case-level consumer surplus estimates.
+        wtp_alt_vars_by_panel_df : pl.DataFrame
+            Panel-level marginal WTP values for non-numeraire variables.
+        predict_data : :class:`~lcl._struct.Data`
+            Encoded data used to generate the predictions.
+        results : Any
+            Parent results object. Kept broad to support both latent-class and
+            conditional-logit result containers without a circular import.
+        class_probs_by_panel : Float64[Array, "panels classes"] | None, optional
+            Class probabilities used to marginalize class-specific predictions.
+        """
         self.predicted_probs = predicted_probs_df
         self.surplus = surplus_df
         self.wtp_alt_vars_by_panel = wtp_alt_vars_by_panel_df
@@ -230,8 +248,13 @@ class LCLPrediction:
             raise ValueError("A numeraire must be defined to compute WTP.")
 
         cost_idx = self.results.model.numeraire_idx
+        if self.predict_data.panels is None or self.predict_data.num_panels is None:
+            raise ValueError("Panel identifiers are required to compute WTP.")
 
-        def _flatten(items) -> Generator[Any, Any, None]:
+        def _flatten(
+            items: Iterable[WTPRequest | Iterable[WTPRequest]],
+        ) -> Generator[WTPRequest, None, None]:
+            """Yield WTP requests from a variadic mix of requests and iterables."""
             for item in items:
                 if isinstance(item, Iterable):
                     yield from item
@@ -261,13 +284,22 @@ class LCLPrediction:
 
         for req in _flatten(wtp_requests):
             demo_col = pl.col(req.demographic_var)
+            partition_type = req.partition_type
+            if not isinstance(partition_type, PartitionType):
+                partition_type = PartitionType(partition_type)
 
-            if req.partition_type == PartitionType.CATEGORICAL:
+            if partition_type == PartitionType.CATEGORICAL:
                 group_expr = demo_col
-            elif req.partition_type == PartitionType.QUINTILES:
+            elif partition_type == PartitionType.QUINTILES:
                 group_expr = demo_col.qcut(5, labels=["Q1", "Q2", "Q3", "Q4", "Q5"])
-            elif req.partition_type == PartitionType.CUSTOM_BREAKS:
+            elif partition_type == PartitionType.CUSTOM_BREAKS:
+                if not isinstance(req.bins, list):
+                    raise ValueError(
+                        "Custom WTP partitions require bins as a list of breakpoints."
+                    )
                 group_expr = demo_col.cut(req.bins)
+            else:
+                raise ValueError(f"Unsupported partition type: {partition_type}")
 
             partitioned_df = df_with_idx.with_columns(Partition=group_expr)
             target_idx = self.results.model.case_varnames.index(req.alt_var)
@@ -297,17 +329,17 @@ class LCLPrediction:
                 )
 
             res_df = pl.DataFrame(summary_rows)
-            title = f"Marginal WTP for {req.alt_var} by {req.demographic_var} ({req.partition_type.value})"
+            title = f"Marginal WTP for {req.alt_var} by {req.demographic_var} ({partition_type.value})"
             with pl.Config(tbl_rows=20, tbl_formatting="MARKDOWN", float_precision=4):
                 logger.info("%s\n%s", title, res_df)
 
     def _compute_subset_mean_wtp(
         self,
-        flat_params: Array,
+        flat_params: Float64[Array, "all_params"],
         target_idx: int,
         cost_idx: int,
-        subset_panel_indices: Array,
-        dems: Array | None,
+        subset_panel_indices: Int[Array, "subset_panels"],
+        dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
     ) -> Float64[Array, ""]:
         """Internal objective function for Delta Method variance evaluation.

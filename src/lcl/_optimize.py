@@ -6,7 +6,8 @@ from equinox import combine, is_array, partition
 from jax import Array, lax
 from jax.nn import sigmoid
 from jax.scipy.linalg import cho_factor, cho_solve
-from jaxopt import BFGS
+from jaxopt import BFGS  # type: ignore[import-untyped]
+from jaxtyping import Float64
 
 from lcl._case_utils import _to_structural_betas
 from lcl._struct import MleConfig, OptimizeResult
@@ -22,10 +23,17 @@ class NewtonState(NamedTuple):
 
 
 def exact_newton_minimize(
-    value_fn: Callable,
-    value_grad_hess_fn: Callable,
-    init_params: jnp.ndarray,
-    *args,
+    value_fn: Callable[..., Float64[Array, ""]],
+    value_grad_hess_fn: Callable[
+        ...,
+        tuple[
+            Float64[Array, ""],
+            Float64[Array, "params"],
+            Float64[Array, "params params"],
+        ],
+    ],
+    init_params: Float64[Array, "params"],
+    *args: object,
     tol: float = 1e-6,
     maxiter: int = 50,
     damping: float = 1e-6,
@@ -33,28 +41,37 @@ def exact_newton_minimize(
     line_search_maxiter: int = 25,
     accept_any_decrease: bool = False,
 ) -> NewtonState:
-    """
-    A lightweight, exact Newton-Raphson minimizer with Armijo backtracking.
+    """Minimize a scalar objective with exact Newton steps and Armijo backtracking.
 
     Parameters
     ----------
+    value_fn : Callable[..., Float64[Array, ""]]
+        Scalar objective used for line-search evaluations.
     value_grad_hess_fn : Callable
         Function returning a tuple of (loss, gradient, hessian) at current params.
-    init_params : jnp.ndarray
-        Starting parameter vector (1D array).
+    init_params : Float64[Array, "params"]
+        Starting parameter vector.
     *args :
         Additional arguments passed to the objective function (e.g., data, weights).
-    tol : float
+    tol : float, default=1e-6
         L-infinity norm tolerance for the gradient.
-    damping : float
+    maxiter : int, default=50
+        Maximum number of Newton iterations.
+    damping : float, default=1e-6
         Tikhonov regularization (ridge penalty) applied to the diagonal of the Hessian.
-    max_step_norm : float
+    max_step_norm : float, default=25.0
         Maximum norm allowed for a trial direction before line search.
-    line_search_maxiter : int
+    line_search_maxiter : int, default=25
         Maximum number of Armijo backtracking iterations per Newton step.
-    accept_any_decrease : bool
+    accept_any_decrease : bool, default=False
         If True, accept a finite step that decreases the objective even when it does
         not satisfy the stricter Armijo sufficient-decrease rule.
+
+    Returns
+    -------
+    NewtonState
+        Final optimizer state containing parameters, value, gradient, Hessian, and
+        convergence diagnostics.
     """
 
     init_loss, init_grad, init_hess = value_grad_hess_fn(init_params, *args)
@@ -69,11 +86,13 @@ def exact_newton_minimize(
     )
 
     def outer_cond(state: NewtonState) -> jnp.ndarray:
+        """Continue while the gradient is too large and iterations remain."""
         return jnp.logical_and(state.error > tol, state.step_num < maxiter)
 
     def outer_body(state: NewtonState) -> NewtonState:
-        # Use cho_solve (Cholesky) instead of solve (LU) since damped Hessian is strictly positive definite.
-        # This is roughly 2x faster for small-to-medium K.
+        """Run one damped Newton step plus backtracking line search."""
+        # Use Cholesky rather than LU because the damped Hessian is positive
+        # definite; this is materially faster for the small systems optimized here.
         H_sym = 0.5 * (state.hess + state.hess.T)
         H_damped = H_sym + jnp.eye(state.params.shape[0]) * damping
 
@@ -99,6 +118,7 @@ def exact_newton_minimize(
             ls_iter: int
 
         def ls_cond(ls_state: LSState) -> jnp.ndarray:
+            """Continue backtracking until the candidate is finite and acceptable."""
             expected_improvement = 1e-4 * ls_state.step_size * directional_derivative
             finite_candidate = jnp.isfinite(ls_state.loss) & jnp.all(
                 jnp.isfinite(ls_state.params)
@@ -112,6 +132,7 @@ def exact_newton_minimize(
             )
 
         def ls_body(ls_state: LSState) -> LSState:
+            """Halve the step size and re-evaluate the line-search candidate."""
             new_step = ls_state.step_size * 0.5
             new_params = state.params + new_step * search_direction
 
@@ -166,12 +187,15 @@ def exact_newton_minimize(
 
 
 def _minimize(
-    loglik_fn: Callable,
-    params: Array,
-    args: tuple,
+    loglik_fn: Callable[
+        ...,
+        tuple[tuple[Array, Array], Array] | tuple[tuple[Array, Array], Array, Array],
+    ],
+    params: Float64[Array, "params"],
+    args: tuple[object, ...],
     mle_config: MleConfig | None = None,
     numeraire_idx: int | None = None,
-    assert_converge=False,
+    assert_converge: bool = False,
 ) -> OptimizeResult:
     """Execute the L-BFGS optimization routine for Maximum Likelihood Estimation.
 
@@ -218,7 +242,10 @@ def _minimize(
     init_val = init_res[0] if isinstance(init_res, tuple) else init_res
     scale_factor = jnp.maximum(jnp.abs(init_val), 1.0)
 
-    def _loglik_fn_closure(p, *dyn_args) -> tuple[tuple[Array, Array], Array]:
+    def _loglik_fn_closure(
+        p: Float64[Array, "params"], *dyn_args: object
+    ) -> tuple[tuple[Array, Array], Array]:
+        """Scale the objective and apply the numeraire chain rule for JAXopt."""
         p_struct = _to_structural_betas(p, numeraire_idx)
         all_args = combine(dyn_args, static_args)
 

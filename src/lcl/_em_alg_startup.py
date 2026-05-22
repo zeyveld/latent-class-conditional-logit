@@ -3,6 +3,7 @@
 import jax.numpy as jnp
 import numpy as onp
 from jax.nn import sigmoid
+from jaxtyping import Array, Float64
 
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._em_alg_steps import _compute_conditional_class_probs
@@ -57,11 +58,21 @@ def _get_starting_vals(
         # We can bake the weights directly into the closures for the startup
         w_ones = jnp.ones(class_diff_unchosen_chosen.num_cases)
 
-        def _startup_value_closure(p):
+        def _startup_value_closure(
+            p: Float64[Array, "alt_vars"],
+        ) -> Float64[Array, ""]:
+            """Evaluate the subset objective after applying the numeraire transform."""
             p_struct = _to_structural_betas(p, numeraire_idx)
             return _loglik_value(p_struct, class_diff_unchosen_chosen, w_ones)
 
-        def _startup_loglik_closure(p):
+        def _startup_loglik_closure(
+            p: Float64[Array, "alt_vars"],
+        ) -> tuple[
+            Float64[Array, ""],
+            Float64[Array, "alt_vars"],
+            Float64[Array, "alt_vars alt_vars"],
+        ]:
+            """Evaluate the subset objective, gradient, and Hessian for Newton steps."""
             p_struct = _to_structural_betas(p, numeraire_idx)
             (val, aux), grad, hessian = _loglik_gradient(
                 p_struct, class_diff_unchosen_chosen, w_ones

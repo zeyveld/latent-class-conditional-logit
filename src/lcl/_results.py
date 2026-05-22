@@ -1,6 +1,8 @@
 """In-sample estimation results and inference."""
 
 import logging
+from collections.abc import Callable
+from typing import Any, cast
 
 import jax.numpy as jnp
 import numpy as onp
@@ -20,7 +22,15 @@ from lcl._em_alg_steps import (
 from lcl._kernels import _choice_probabilities_and_logsum, _class_membership_probs
 from lcl._logging import log_or_print
 from lcl._prediction import LCLPrediction
-from lcl._struct import Data, EMVars, ErrorConfig, ParsedData, PastChoicesData
+from lcl._struct import (
+    Data,
+    DiffUnchosenChosen,
+    EMAlgConfig,
+    EMVars,
+    ErrorConfig,
+    ParsedData,
+    PastChoicesData,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -47,14 +57,34 @@ class LCLResults:
 
     def __init__(
         self,
-        model_spec,
+        model_spec: Any,
         em_vars: EMVars,
         estimation_data: Data,
         em_recursion: int,
-        em_alg_config,
+        em_alg_config: EMAlgConfig,
         error_config: ErrorConfig | None,
         estim_time_sec: float,
     ) -> None:
+        """Build a latent-class results object and compute inference artifacts.
+
+        Parameters
+        ----------
+        model_spec : Any
+            Fitted model specification. Kept broad to avoid a runtime circular import
+            with :class:`~lcl.latent_class_conditional_logit.LatentClassConditionalLogit`.
+        em_vars : :class:`~lcl._struct.EMVars`
+            Final EM state containing parameters, probabilities, and log likelihood.
+        estimation_data : :class:`~lcl._struct.Data`
+            Encoded estimation data.
+        em_recursion : int
+            Number of EM recursions completed before termination.
+        em_alg_config : :class:`~lcl._struct.EMAlgConfig`
+            EM convergence and iteration configuration.
+        error_config : :class:`~lcl._struct.ErrorConfig` | None
+            Covariance and standard-error configuration.
+        estim_time_sec : float
+            Wall-clock estimation time in seconds.
+        """
         self.model = model_spec
         self.em_res = em_vars
         self.data = estimation_data
@@ -62,11 +92,20 @@ class LCLResults:
         self.converged = em_recursion < (em_alg_config.maxiter - 1)
         self.estim_time_sec = estim_time_sec
         self.error_config = error_config if error_config is not None else ErrorConfig()
+        if self.em_res.latent_betas is None:
+            raise ValueError("Latent betas are required to construct LCL results.")
+        if self.em_res.structural_betas is None:
+            raise ValueError("Structural betas are required to construct LCL results.")
+        if self.em_res.shares is None:
+            raise ValueError("Class shares are required to construct LCL results.")
+        if self.data.num_panels is None:
+            raise ValueError("Panel identifiers are required for LCL results.")
 
         self.flat_params = self._pack_params()
 
         # Calculate degrees of freedom
-        num_beta_params = self.em_res.latent_betas.size
+        latent_betas = self.em_res.latent_betas
+        num_beta_params = latent_betas.size
         if self.em_res.thetas is not None:
             num_theta_params = self.em_res.thetas.size
         else:
@@ -76,17 +115,16 @@ class LCLResults:
         self.cov_matrix = self._compute_covariance()
 
         # Compute information criteria
+        num_panels = self.data.num_panels
         self.caic = (
-            jnp.log(self.data.num_panels) + 1
+            jnp.log(num_panels) + 1
         ) * self.num_params - 2 * self.em_res.unconditional_loglik
         self.bic = (
-            jnp.log(self.data.num_panels) * self.num_params
-            - 2 * self.em_res.unconditional_loglik
+            jnp.log(num_panels) * self.num_params - 2 * self.em_res.unconditional_loglik
         )
         n_star = (self.num_params + 2) / 24
         self.adjusted_bic = (
-            jnp.log(self.data.num_panels) * n_star
-            - 2 * self.em_res.unconditional_loglik
+            jnp.log(num_panels) * n_star - 2 * self.em_res.unconditional_loglik
         )
         logger.info(
             "Information criteria: CAIC=%.1f, BIC=%.1f, adjusted BIC=%.1f",
@@ -102,6 +140,7 @@ class LCLResults:
             )
 
     def __repr__(self) -> str:
+        """Return a compact, human-readable summary of fit quality."""
         status = "Converged" if self.converged else "Did Not Converge"
         return " | ".join(
             [
@@ -116,10 +155,15 @@ class LCLResults:
 
     def _pack_params(self) -> Float64[Array, "all_params"]:
         """Flatten structural parameters and class memberships for Hessian calculation."""
-        latent_betas_flat = self.em_res.latent_betas.ravel()
+        latent_betas = self.em_res.latent_betas
+        if latent_betas is None:
+            raise ValueError("Latent betas are required to pack parameters.")
+        latent_betas_flat = latent_betas.ravel()
         if self.em_res.thetas is not None:
             theta_flat = self.em_res.thetas.ravel()
         else:
+            if self.em_res.shares is None:
+                raise ValueError("Class shares are required to pack parameters.")
             shares = jnp.clip(self.em_res.shares, 1e-10)
             shares = shares / shares.sum()
             theta_flat = jnp.log(shares[1:] / shares[0]).ravel()
@@ -157,6 +201,13 @@ class LCLResults:
         return _class_membership_probs(thetas, dems, num_panels)
 
     def _compute_covariance(self) -> Float64[Array, "all_params all_params"]:
+        """Compute Hessian-based covariance, optionally with clustered sandwich correction.
+
+        Returns
+        -------
+        Float64[Array, "all_params all_params"]
+            Covariance matrix aligned with the flattened parameter vector.
+        """
         if self.error_config.skip_std_errs:
             return jnp.full((self.num_params, self.num_params), jnp.nan)
 
@@ -181,26 +232,38 @@ class LCLResults:
         return (H_inv @ B @ H_inv) * (G / (G - 1))
 
     def _panel_loglik_fn(
-        self, flat_params, diff_unchosen_chosen, data
+        self,
+        flat_params: Float64[Array, "all_params"],
+        diff_unchosen_chosen: DiffUnchosenChosen,
+        data: Data,
     ) -> Float64[Array, "panels"]:
         """Compute the log-likelihood for each panel (used to build the Jacobian)."""
         latent_betas, thetas = self._unpack_params(flat_params)
         structural_betas = _to_structural_betas(
             latent_betas, getattr(self.model, "numeraire_idx", None)
         )
+        if data.num_panels is None:
+            raise ValueError("Panel identifiers are required for LCL log-likelihoods.")
         class_probs = self._get_class_probs(thetas, data.dems, data.num_panels)
         return _compute_panel_logliks(
             structural_betas, class_probs, diff_unchosen_chosen, data
         )
 
     def _full_loglik_fn(
-        self, flat_params, diff_unchosen_chosen, data
+        self,
+        flat_params: Float64[Array, "all_params"],
+        diff_unchosen_chosen: DiffUnchosenChosen,
+        data: Data,
     ) -> Float64[Array, ""]:
         """Re-sums the panel log-likelihoods to a scalar for the Hessian."""
         return jnp.sum(self._panel_loglik_fn(flat_params, diff_unchosen_chosen, data))
 
     def _apply_delta_method(
-        self, func, flat_params: Float64[Array, "all_params"], *args, **kwargs
+        self,
+        func: Callable[..., Float64[Array, "..."]],
+        flat_params: Float64[Array, "all_params"],
+        *args: object,
+        **kwargs: object,
     ) -> tuple[Float64[Array, "..."], Float64[Array, "..."]]:
         """Apply the Delta Method to derive standard errors for non-linear parameter functions."""
         target_func = Partial(func, *args, **kwargs)
@@ -357,7 +420,17 @@ class LCLResults:
                 case_varnames=self.model.case_varnames,
                 dem_varnames=self.model.dem_varnames,
             )
-        data, *_ = self.model._setup_data(parsed_predict)
+        predict_data = cast(Data, self.model._setup_data(parsed_predict)[0])
+        if predict_data.num_panels is None or predict_data.panels is None:
+            raise ValueError(
+                "Panel identifiers are required for latent-class prediction."
+            )
+        structural_betas = self.em_res.structural_betas
+        if structural_betas is None:
+            raise ValueError("Structural betas are required for prediction.")
+        shares = self.em_res.shares
+        if shares is None:
+            raise ValueError("Class shares are required for prediction.")
 
         if past_choices is not None:
             parsed_past = _parsed_prediction_arrays(
@@ -370,29 +443,29 @@ class LCLResults:
                 case_varnames=self.model.case_varnames,
                 dem_varnames=self.model.dem_varnames,
             )
-            data_past, *_ = self.model._setup_data(parsed_past)
+            data_past = cast(Data, self.model._setup_data(parsed_past)[0])
             diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
             class_probs_by_panel, _ = _compute_conditional_class_probs(
-                structural_betas=self.em_res.structural_betas,
+                structural_betas=structural_betas,
                 thetas=self.em_res.thetas,
-                shares=self.em_res.shares,
+                shares=shares,
                 diff_unchosen_chosen=diff_unchosen_chosen_past,
                 data=data_past,
             )
-        elif self.em_res.thetas is not None and data.dems is not None:
+        elif self.em_res.thetas is not None and predict_data.dems is not None:
             class_probs_by_panel = self._get_class_probs(
-                self.em_res.thetas, data.dems, data.num_panels
+                self.em_res.thetas, predict_data.dems, predict_data.num_panels
             )
         else:
             class_probs_by_panel = jnp.repeat(
-                self.em_res.shares[None, :], data.num_panels, axis=0
+                shares[None, :], predict_data.num_panels, axis=0
             )
 
         choice_probs_by_class, log_sum_exp_utility = _choice_probabilities_and_logsum(
-            data.X,
-            self.em_res.structural_betas,
-            data.cases,
-            data.num_cases,
+            predict_data.X,
+            structural_betas,
+            predict_data.cases,
+            predict_data.num_cases,
         )
 
         # Ensure alpha (marginal utility of income) is correctly signed
@@ -400,44 +473,45 @@ class LCLResults:
         if numeraire_idx is None:
             marginal_utility_income = jnp.ones(self.model.num_classes)
         else:
-            marginal_utility_income = -self.em_res.structural_betas[numeraire_idx, :]
+            marginal_utility_income = -structural_betas[numeraire_idx, :]
 
         surplus_by_class = (
             log_sum_exp_utility / marginal_utility_income[None, :]
         ).squeeze()
 
         if numeraire_idx is not None:
-            betas_sans_numeraire = jnp.delete(
-                self.em_res.structural_betas, numeraire_idx, axis=0
-            )
+            betas_sans_numeraire = jnp.delete(structural_betas, numeraire_idx, axis=0)
             wtp_alt_vars_by_class = betas_sans_numeraire / marginal_utility_income
             wtp_alt_vars_by_panel = class_probs_by_panel @ wtp_alt_vars_by_class.T
             schema = [
                 var for var in self.model.case_varnames if var != self.model.numeraire
             ]
         else:
-            wtp_alt_vars_by_panel = jnp.empty((data.num_panels, 0))
+            wtp_alt_vars_by_panel = jnp.empty((predict_data.num_panels, 0))
             schema = []
 
-        panel_first_rows = data.panels != jnp.roll(data.panels, shift=1)
+        panel_first_rows = predict_data.panels != jnp.roll(predict_data.panels, shift=1)
         panel_first_rows = panel_first_rows.at[0].set(True)
         panels_unique = onp.array(parsed_predict.original_panels[panel_first_rows])
         wtp_alt_vars_by_panel_df = pl.DataFrame(
             onp.array(wtp_alt_vars_by_panel), schema=schema
         ).with_columns(pl.Series("panels", panels_unique))
 
-        if data.num_cases_per_panel is None or data.panels_of_cases is None:
+        if (
+            predict_data.num_cases_per_panel is None
+            or predict_data.panels_of_cases is None
+        ):
             raise ValueError(
                 "Panel identifiers are required for latent-class prediction."
             )
         conditional_surplus = jnp.einsum(
             "np,np->n",
-            class_probs_by_panel[data.panels_of_cases],
+            class_probs_by_panel[predict_data.panels_of_cases],
             surplus_by_class,
         )
 
         unconditional_choice_probs = jnp.sum(
-            class_probs_by_panel[data.panels] * choice_probs_by_class, axis=1
+            class_probs_by_panel[predict_data.panels] * choice_probs_by_class, axis=1
         )
 
         predicted_probs_df = pl.DataFrame(
@@ -451,11 +525,7 @@ class LCLResults:
             }
         )
 
-        if data.panels is None:
-            raise ValueError(
-                "Panel identifiers are required for latent-class prediction."
-            )
-        first_case_rows = data.cases != jnp.roll(data.cases, shift=1)
+        first_case_rows = predict_data.cases != jnp.roll(predict_data.cases, shift=1)
         surplus_df = pl.DataFrame(
             {
                 "panels": onp.array(parsed_predict.original_panels[first_case_rows]),
@@ -468,7 +538,7 @@ class LCLResults:
             predicted_probs_df=predicted_probs_df,
             surplus_df=surplus_df,
             wtp_alt_vars_by_panel_df=wtp_alt_vars_by_panel_df,
-            predict_data=data,
+            predict_data=predict_data,
             results=self,
             class_probs_by_panel=class_probs_by_panel,
         )
@@ -484,6 +554,32 @@ def _parsed_prediction_arrays(
     dem_varnames: list[str] | None,
     y: ArrayLike | None = None,
 ) -> ParsedData:
+    """Parse array-style prediction inputs into the shared encoded-data container.
+
+    Parameters
+    ----------
+    X : ArrayLike
+        Alternative-specific design matrix in long format.
+    dems : ArrayLike | None
+        Optional panel-level demographic matrix, one row per unique panel.
+    alts : ArrayLike
+        Alternative identifiers aligned to rows of ``X``.
+    cases : ArrayLike
+        Choice-situation identifiers aligned to rows of ``X``.
+    panels : ArrayLike
+        Panel identifiers aligned to rows of ``X``.
+    case_varnames : list[str]
+        Names corresponding to columns of ``X``.
+    dem_varnames : list[str] | None
+        Names corresponding to columns of ``dems``.
+    y : ArrayLike | None, optional
+        Optional choice indicators for historical-choice updating.
+
+    Returns
+    -------
+    :class:`~lcl._struct.ParsedData`
+        Sorted arrays with contiguous zero-indexed IDs and original labels preserved.
+    """
     X_np = onp.asarray(X)
     alts_np = onp.asarray(alts)
     cases_np = onp.asarray(cases)
@@ -502,6 +598,7 @@ def _parsed_prediction_arrays(
 
     case_seq = onp.empty_like(cases_sorted, dtype=onp.uint32)
     case_lookup: dict[tuple[object, object], int] = {}
+    # Cases are only unique within panel for some user datasets, so key on both IDs.
     for idx, key in enumerate(zip(panels_sorted.tolist(), cases_sorted.tolist())):
         if key not in case_lookup:
             case_lookup[key] = len(case_lookup)

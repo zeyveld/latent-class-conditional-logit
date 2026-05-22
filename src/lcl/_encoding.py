@@ -30,6 +30,20 @@ class ChoiceDataEncoder:
     dem_model_spec: Any | None = None
 
     def fit_transform(self, data: Any, dems_data: Any | None = None) -> ParsedData:
+        """Fit the encoder metadata and return aligned JAX-ready arrays.
+
+        Parameters
+        ----------
+        data : Any
+            Long-format choice data accepted by :func:`_coerce_frame`.
+        dems_data : Any | None, optional
+            Optional panel-level demographics to join by ``panels_col``.
+
+        Returns
+        -------
+        :class:`~lcl._struct.ParsedData`
+            Encoded arrays, sequential IDs, original labels, and variable names.
+        """
         return self._transform(data, dems_data=dems_data, fit=True, require_choice=True)
 
     def transform(
@@ -38,6 +52,22 @@ class ChoiceDataEncoder:
         dems_data: Any | None = None,
         require_choice: bool = False,
     ) -> ParsedData:
+        """Transform new data with an already-fitted encoder.
+
+        Parameters
+        ----------
+        data : Any
+            Long-format prediction or validation data.
+        dems_data : Any | None, optional
+            Optional panel-level demographics to join by ``panels_col``.
+        require_choice : bool, default=False
+            Whether the transformed data must include a valid choice indicator.
+
+        Returns
+        -------
+        :class:`~lcl._struct.ParsedData`
+            Encoded arrays using the model specification learned during fitting.
+        """
         return self._transform(
             data, dems_data=dems_data, fit=False, require_choice=require_choice
         )
@@ -49,6 +79,25 @@ class ChoiceDataEncoder:
         fit: bool,
         require_choice: bool,
     ) -> ParsedData:
+        """Encode raw data into sorted arrays and zero-indexed IDs.
+
+        Parameters
+        ----------
+        data : Any
+            Long-format choice data.
+        dems_data : Any | None
+            Optional panel-level demographic data.
+        fit : bool
+            If True, learn formula model specs and variable names. If False, reuse
+            specs stored on the encoder.
+        require_choice : bool
+            Whether to encode and validate one chosen row per choice situation.
+
+        Returns
+        -------
+        :class:`~lcl._struct.ParsedData`
+            Strictly sorted, aligned arrays and metadata.
+        """
         df = _coerce_frame(data)
         _require_columns(df, [self.alts_col, self.cases_col, self.panels_col])
         sort_cols = list(
@@ -81,6 +130,18 @@ class ChoiceDataEncoder:
         )
 
     def _attach_sequential_ids(self, df: pl.DataFrame) -> pl.DataFrame:
+        """Attach contiguous panel, case, and alternative IDs.
+
+        Parameters
+        ----------
+        df : pl.DataFrame
+            Sorted choice data containing the configured identifier columns.
+
+        Returns
+        -------
+        pl.DataFrame
+            DataFrame with ``_seq_panels``, ``_seq_cases``, and ``_seq_alts`` columns.
+        """
         panel_keys = df.select(self.panels_col).unique(maintain_order=True)
         panel_keys = panel_keys.with_row_index("_seq_panels")
 
@@ -104,6 +165,28 @@ class ChoiceDataEncoder:
     def _encode_features(
         self, df: pl.DataFrame, fit: bool, require_choice: bool
     ) -> tuple[jnp.ndarray | None, list[str], list[str] | None, pl.DataFrame]:
+        """Encode choice indicators and alternative-specific features.
+
+        Parameters
+        ----------
+        df : pl.DataFrame
+            Choice data with sequential ID columns attached.
+        fit : bool
+            Whether to fit formulaic model specifications and store column metadata.
+        require_choice : bool
+            Whether a choice outcome is required in the returned arrays.
+
+        Returns
+        -------
+        y_array : jnp.ndarray | None
+            Boolean choice indicators, or None when choices are not required.
+        case_vars : list[str]
+            Encoded alternative-specific feature names.
+        dem_vars : list[str] | None
+            Encoded demographic feature names, if present.
+        df : pl.DataFrame
+            DataFrame with encoded formula columns appended.
+        """
         y_array = None
 
         if self.formula:
@@ -187,6 +270,23 @@ class ChoiceDataEncoder:
     def _encode_demographics(
         self, df: pl.DataFrame, dem_vars: list[str] | None, dems_data: Any | None
     ) -> jnp.ndarray | None:
+        """Return panel-level demographic arrays aligned to sequential panel IDs.
+
+        Parameters
+        ----------
+        df : pl.DataFrame
+            Choice data with sequential panel IDs.
+        dem_vars : list[str] | None
+            Demographic variables to encode.
+        dems_data : Any | None
+            Optional separate panel-level demographics source.
+
+        Returns
+        -------
+        jnp.ndarray | None
+            ``(panels, dem_vars)`` matrix sorted by ``_seq_panels``, or None when
+            no demographic variables are specified.
+        """
         if not dem_vars:
             return None
 
@@ -222,6 +322,20 @@ class ChoiceDataEncoder:
 
     @staticmethod
     def _validate_one_choice_per_case(df: pl.DataFrame, y_array: jnp.ndarray) -> None:
+        """Validate that every choice situation has exactly one selected alternative.
+
+        Parameters
+        ----------
+        df : pl.DataFrame
+            Encoded choice data containing ``_seq_cases``.
+        y_array : jnp.ndarray
+            Boolean choice indicator aligned to ``df``.
+
+        Raises
+        ------
+        ValueError
+            If any choice situation has zero or multiple chosen alternatives.
+        """
         cases = df["_seq_cases"].to_numpy()
         y = onp.asarray(y_array, dtype=onp.int32)
         choices_per_case = onp.bincount(cases, weights=y)
@@ -232,6 +346,19 @@ class ChoiceDataEncoder:
 
 
 def _coerce_frame(data: Any) -> pl.DataFrame:
+    """Coerce supported tabular inputs to a Polars DataFrame.
+
+    Parameters
+    ----------
+    data : Any
+        Polars DataFrame, pandas-like DataFrame, dict-like data, or other object
+        accepted by ``pl.DataFrame``.
+
+    Returns
+    -------
+    pl.DataFrame
+        Polars representation of the input.
+    """
     if isinstance(data, pl.DataFrame):
         return data
     if hasattr(data, "columns"):
@@ -240,23 +367,66 @@ def _coerce_frame(data: Any) -> pl.DataFrame:
 
 
 def _to_pandas_frame(df: pl.DataFrame) -> Any:
+    """Convert Polars data to pandas for formulaic.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        Data to convert.
+
+    Returns
+    -------
+    Any
+        A pandas DataFrame. The return type is kept broad to avoid importing pandas
+        unless Polars requires the fallback path.
+    """
     try:
         return df.to_pandas()
     except ModuleNotFoundError as exc:
         if exc.name != "pyarrow":
             raise
-        import pandas as pd
+        import pandas as pd  # type: ignore[import-untyped]
 
         return pd.DataFrame(df.to_dicts())
 
 
 def _require_columns(df: pl.DataFrame, columns: Sequence[str]) -> None:
+    """Raise when required columns are absent.
+
+    Parameters
+    ----------
+    df : pl.DataFrame
+        DataFrame to validate.
+    columns : Sequence[str]
+        Required column names.
+
+    Raises
+    ------
+    ValueError
+        If one or more required columns are missing.
+    """
     missing = [col for col in columns if col not in df.columns]
     if missing:
         raise ValueError(f"Data is missing required columns: {missing}")
 
 
 def _validate_matrix_height(matrix: Any, expected_height: int, label: str) -> None:
+    """Validate that a formula matrix preserves the input row count.
+
+    Parameters
+    ----------
+    matrix : Any
+        Formulaic model matrix, or None when no matrix was produced.
+    expected_height : int
+        Required number of rows.
+    label : str
+        Human-readable source label used in error messages.
+
+    Raises
+    ------
+    ValueError
+        If the encoded matrix has a different number of rows than the source data.
+    """
     if matrix is None:
         return
     if len(matrix) != expected_height:

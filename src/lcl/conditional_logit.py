@@ -53,6 +53,7 @@ class ConditionalLogit(ChoiceModel):
     """
 
     def __init__(self, numeraire: str | None = None) -> None:
+        """Create an unfitted conditional-logit model specification."""
         super().__init__()
         self.numeraire = numeraire
         self.numeraire_idx: int | None = None
@@ -190,6 +191,23 @@ class CLResults:
         estim_time_sec: float,
         has_panels: bool,
     ) -> None:
+        """Compute inference summaries from a fitted conditional-logit model.
+
+        Parameters
+        ----------
+        model_spec : :class:`~lcl.conditional_logit.ConditionalLogit`
+            Fitted model specification and variable metadata.
+        optim_res : :class:`~lcl._struct.OptimizeResult`
+            Optimizer output containing parameters, gradients, and Hessian inverse.
+        data_struct : :class:`~lcl._struct.Data`
+            Encoded estimation data.
+        error_config : :class:`~lcl._struct.ErrorConfig`
+            Covariance and standard-error configuration.
+        estim_time_sec : float
+            Wall-clock estimation time in seconds.
+        has_panels : bool
+            Whether robust covariance should cluster scores at the panel level.
+        """
         self.model = model_spec
         self.data = data_struct
         self.convergence = optim_res.success
@@ -228,7 +246,10 @@ class CLResults:
         # Apply delta method for standard errors if numeraire (softplus) is used
         if self.model.numeraire_idx is not None:
 
-            def struct_fn(p) -> Float64[Array, "..."]:
+            def struct_fn(
+                p: Float64[Array, "alt_vars"],
+            ) -> Float64[Array, "alt_vars"]:
+                """Map latent coefficients to structural coefficients."""
                 return _to_structural_betas(p, self.model.numeraire_idx)
 
             jac = jacrev(struct_fn)(self.latent_coeff_)

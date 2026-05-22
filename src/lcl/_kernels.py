@@ -15,7 +15,26 @@ def _choice_probabilities_and_logsum(
     cases: UInt[Array, "rows"],
     num_cases: int,
 ) -> tuple[Float64[Array, "rows classes"], Float64[Array, "cases classes"]]:
-    """Compute logit probabilities and inclusive values with a case-level shift."""
+    """Compute logit probabilities and inclusive values with a stable case shift.
+
+    Parameters
+    ----------
+    X : Float64[Array, "rows alt_vars"]
+        Long-format design matrix.
+    betas : Float64[Array, "alt_vars classes"]
+        Taste parameters, one column per latent class.
+    cases : UInt[Array, "rows"]
+        Contiguous zero-indexed choice-situation IDs.
+    num_cases : int
+        Number of choice situations.
+
+    Returns
+    -------
+    probs : Float64[Array, "rows classes"]
+        Choice probabilities for each alternative row and class.
+    logsum : Float64[Array, "cases classes"]
+        Inclusive values for each case and class.
+    """
     V = X @ betas
     shift = segment_max(V, cases, num_segments=num_cases)
     shift = lax.stop_gradient(shift)
@@ -33,7 +52,26 @@ def _diff_logit_components(
     cases: UInt[Array, "unchosen_rows"],
     num_cases: int,
 ) -> tuple[Float64[Array, "cases"], Float64[Array, "unchosen_rows"]]:
-    """Compute chosen log probabilities and unchosen probabilities from differenced X."""
+    """Compute chosen log probabilities from differenced alternative features.
+
+    Parameters
+    ----------
+    X_diff : Float64[Array, "unchosen_rows alt_vars"]
+        Differences ``X_ij - X_iy`` for unchosen alternatives only.
+    betas : Float64[Array, "alt_vars"]
+        Taste parameters for one model or latent class.
+    cases : UInt[Array, "unchosen_rows"]
+        Choice-situation IDs for each unchosen row.
+    num_cases : int
+        Number of choice situations.
+
+    Returns
+    -------
+    log_chosen_probs : Float64[Array, "cases"]
+        Log probability of the observed chosen alternative in each case.
+    p_unchosen : Float64[Array, "unchosen_rows"]
+        Conditional probabilities assigned to the unchosen alternatives.
+    """
     Vd = X_diff @ betas
     shift = jnp.maximum(0.0, segment_max(Vd, cases, num_segments=num_cases))
     shift = lax.stop_gradient(shift)
@@ -55,7 +93,28 @@ def _diff_log_kernels(
     panels_of_cases: UInt[Array, "cases"],
     num_panels: int,
 ) -> Float64[Array, "panels classes"]:
-    """Compute panel-level log likelihood kernels by latent class."""
+    """Compute panel-level log-likelihood kernels by latent class.
+
+    Parameters
+    ----------
+    X_diff : Float64[Array, "unchosen_rows alt_vars"]
+        Differences ``X_ij - X_iy`` for unchosen alternatives only.
+    betas : Float64[Array, "alt_vars classes"]
+        Taste parameters for each latent class.
+    diff_cases : UInt[Array, "unchosen_rows"]
+        Choice-situation IDs for each differenced row.
+    num_cases : int
+        Number of choice situations.
+    panels_of_cases : UInt[Array, "cases"]
+        Panel ID associated with each choice situation.
+    num_panels : int
+        Number of panels.
+
+    Returns
+    -------
+    Float64[Array, "panels classes"]
+        Log likelihood of each panel's observed choice sequence by class.
+    """
     Vd = X_diff @ betas
     shift = jnp.maximum(0.0, segment_max(Vd, diff_cases, num_segments=num_cases))
     shift = lax.stop_gradient(shift)
@@ -73,7 +132,23 @@ def _class_membership_probs(
     dems: Float64[Array, "panels dem_vars"] | None,
     num_panels: int,
 ) -> Float64[Array, "panels classes"]:
-    """Compute class-membership probabilities from fractional-logit coefficients."""
+    """Compute class-membership probabilities from fractional-logit coefficients.
+
+    Parameters
+    ----------
+    thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
+        Class-membership coefficients. If ``dems`` is None, this is treated as
+        already containing non-baseline logits to repeat across panels.
+    dems : Float64[Array, "panels dem_vars"] | None
+        Panel-level demographic matrix.
+    num_panels : int
+        Number of panels to score.
+
+    Returns
+    -------
+    Float64[Array, "panels classes"]
+        Class-membership probabilities, including the baseline class.
+    """
     if dems is not None:
         V = thetas[None, 0] + dems @ thetas[1:]
     else:

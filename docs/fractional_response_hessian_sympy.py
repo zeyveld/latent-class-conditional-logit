@@ -6,7 +6,7 @@ The vector case follows by replacing ``x**2`` with the outer product ``z z'``.
 
 from __future__ import annotations
 
-import sympy as sp
+import sympy as sp  # type: ignore[import-not-found]
 
 
 def main() -> None:

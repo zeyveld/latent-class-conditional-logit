@@ -6,7 +6,7 @@ import lcl
 
 
 def test_jax_installation() -> None:
-    assert jax.config.jax_enable_x64
+    assert getattr(jax.config, "jax_enable_x64")
     x = jnp.array([1.0, 2.0, 3.0])
     assert x.sum() == 6.0
 

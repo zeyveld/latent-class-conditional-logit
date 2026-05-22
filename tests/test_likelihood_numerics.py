@@ -246,6 +246,7 @@ def test_prediction_uses_demographics_when_no_past_choices() -> None:
 
     prediction = results.predict(data=df)
 
+    assert prediction.class_probs_by_panel is not None
     assert not jnp.allclose(
         prediction.class_probs_by_panel[0], prediction.class_probs_by_panel[1]
     )

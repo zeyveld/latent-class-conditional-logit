@@ -36,11 +36,13 @@ def _loglik_gradient(
     -------
     objective_and_aux : tuple
         A tuple containing:
-        * ``neg_loglik``: The scalar negative log-likelihood.
-        * ``grad_n``: A ``Float64[Array, "cases alt_vars"]`` matrix of case-level score
-          contributions utilized for robust sandwich covariance estimation.
+        * ``neg_loglik``: Scalar negative log-likelihood.
+        * ``grad_n``: ``Float64[Array, "cases alt_vars"]`` matrix of case-level score
+          contributions used for robust sandwich covariance estimation.
     grad : Float64[Array, "alt_vars"]
         The analytic gradient of the negative log-likelihood with respect to ``structural_betas``.
+    hessian : Float64[Array, "alt_vars alt_vars"]
+        Observed Hessian of the negative log-likelihood with respect to ``structural_betas``.
     """
     log_probs, p_unchosen = _diff_logit_components(
         diff_unchosen_chosen.X,
@@ -81,7 +83,22 @@ def _loglik_value(
     diff_unchosen_chosen: DiffUnchosenChosen,
     weights: Float64[Array, "cases"],
 ) -> Float64[Array, ""]:
-    """Lightweight forward pass for line-search evaluations."""
+    """Evaluate the conditional-logit negative log-likelihood.
+
+    Parameters
+    ----------
+    structural_betas : Float64[Array, "alt_vars"]
+        Structural taste parameters used in representative utility.
+    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+        Differenced design matrix, with one row for each unchosen alternative.
+    weights : Float64[Array, "cases"]
+        Case-level weights for the objective.
+
+    Returns
+    -------
+    Float64[Array, ""]
+        Scalar negative log-likelihood.
+    """
     Vd = jnp.minimum(diff_unchosen_chosen.X.dot(structural_betas), 700.0)
     eVd = jnp.exp(Vd)
     probs = 1 / (

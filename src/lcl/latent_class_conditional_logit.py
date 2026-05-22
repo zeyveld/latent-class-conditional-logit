@@ -58,6 +58,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         num_classes: int = 5,
         numeraire: str | None = None,
     ) -> None:
+        """Create an unfitted latent-class conditional-logit model specification."""
         super().__init__()
         self.num_classes = num_classes
         self.numeraire = numeraire

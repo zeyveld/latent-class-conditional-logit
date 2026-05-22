@@ -5,6 +5,7 @@ from typing import Any
 
 import jax.numpy as jnp
 from jax import Array
+from jax.typing import ArrayLike
 
 from lcl._encoding import ChoiceDataEncoder
 from lcl._struct import Data, ParsedData
@@ -32,6 +33,7 @@ class ChoiceModel(ABC):
     _fit_start_time: float
 
     def __init__(self) -> None:
+        """Initialize shared model metadata before fitting."""
         self.case_varnames, self.dem_varnames = [], []
         self.numeraire = None
         self.convergence = False
@@ -104,6 +106,22 @@ class ChoiceModel(ABC):
         dems_data: Any | None = None,
         require_choice: bool = False,
     ) -> ParsedData:
+        """Transform new data with the encoder learned during fitting.
+
+        Parameters
+        ----------
+        data : Any
+            New long-format data to encode.
+        dems_data : Any | None, optional
+            Optional panel-level demographics for prediction data.
+        require_choice : bool, default=False
+            Whether a valid choice indicator must be present.
+
+        Returns
+        -------
+        :class:`~lcl._struct.ParsedData`
+            Encoded arrays and metadata aligned to the fitted model specification.
+        """
         if self._encoder is None:
             raise ValueError("Model must be fitted before transforming new data.")
         return self._encoder.transform(
@@ -113,8 +131,8 @@ class ChoiceModel(ABC):
     def _setup_data(
         self,
         parsed: ParsedData,
-        weights: Array | None = None,
-        init_beta: Array | None = None,
+        weights: ArrayLike | None = None,
+        init_beta: ArrayLike | None = None,
     ) -> tuple[Data, Array, Array]:
         """Construct the immutable Data struct for the JAX estimation engine.
 

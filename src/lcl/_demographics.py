@@ -12,6 +12,13 @@ from lcl._struct import Data, MleConfig
 logger = logging.getLogger(__name__)
 
 
+def _require_demographics(data: Data) -> Float64[Array, "panels dem_vars"]:
+    """Return demographics, raising a clear error if the model was fit without them."""
+    if data.dems is None:
+        raise ValueError("Demographics are required for the class-membership model.")
+    return data.dems
+
+
 def _update_thetas(
     starting_thetas: Float64[Array, "dem_vars_plus_one classes_minus_one"],
     class_probs_by_panel: Float64[Array, "panels classes"],
@@ -22,33 +29,28 @@ def _update_thetas(
     Float64[Array, "dem_vars_plus_one classes_minus_one"],
     Float64[Array, "panels classes"],
 ]:
-    """Update class shares based on conditional choice probabilities and demographics.
+    """Update the class-membership regression from posterior class probabilities.
 
     Parameters
     ----------
-    starting_thetas : array
-        (D, C) matrix of coefficients relating demographic variables to
-        membership in specific latent classes.
-    class_probs_by_panel : array
-        (Np, C) matrix of class membership probabilities conditional on each
-        panel's respective choices.
-    dems : array
-        (Np, D) matrix of demographic variables.
-    _grouped_data_loglik_fn : fun
-        Function that computes log-likelihood given class membership coefficients
-        and explanatory variables.
-    _class_membership_probs_fn : fun
-        Function that computes class membership probabilities given class membership
-        coefficients and explanatory variables.
+    starting_thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
+        Initial coefficients for the baseline-category multinomial logit that maps
+        an intercept and demographics to non-baseline latent class logits.
+    class_probs_by_panel : Float64[Array, "panels classes"]
+        Posterior class probabilities from the E-step, one row per panel.
+    data : :class:`~lcl._struct.Data`
+        Estimation data containing the panel-level demographic matrix.
+    num_classes : int
+        Total number of latent classes, including the baseline class.
+    mle_config : :class:`~lcl._struct.MleConfig` | None, optional
+        Newton optimizer configuration for the fractional-response M-step.
 
     Returns
     -------
-    updated_thetas : array
-        (D, C) matrix of coefficients relating demographic variables to
-        membership in specific latent classes.
-    predicted_class_probs : array
-        (Np, C) matrix of predicted class membership probabilities.
-
+    updated_thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
+        Optimized class-membership coefficients.
+    predicted_class_probs : Float64[Array, "panels classes"]
+        Unconditional class probabilities implied by the optimized demographic model.
     """
     updated_thetas, convergence = _perform_frac_response_reg(
         starting_thetas, class_probs_by_panel, data, num_classes, mle_config
@@ -68,27 +70,31 @@ def _perform_frac_response_reg(
     num_classes: int,
     mle_config: MleConfig | None = None,
 ) -> tuple[Float64[Array, "dem_vars_plus_one classes_minus_one"], bool]:
-    """Perform fractional response regression of class membership probabilities.
+    """Fit the fractional-response class-membership model.
+
+    The objective is the cross-entropy between posterior class assignments from
+    the E-step and demographic multinomial-logit predictions. Coefficients are
+    optimized in flattened form for the Newton solver and reshaped before return.
 
     Parameters
     ----------
-    thetas : array
-        (D, C) matrix of coefficients relating demographic variables to
-        membership in specific latent classes.
-    class_probs_by_panel : array
-        (Np, C) matrix of class membership probabilities conditional on each
-        panel's respective choices.
-    dems : array
-        (Np, D) matrix of demographic variables.
-    _grouped_data_loglik_fn : fun
-        Function that computes log-likelihood given class membership coefficients
-        and explanatory variables.
+    thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
+        Starting class-membership coefficients.
+    class_probs_by_panel : Float64[Array, "panels classes"]
+        Posterior class probabilities by panel.
+    data : :class:`~lcl._struct.Data`
+        Estimation data containing demographics and dimensional metadata.
+    num_classes : int
+        Total number of latent classes, including the baseline class.
+    mle_config : :class:`~lcl._struct.MleConfig` | None, optional
+        Optimizer settings. Defaults to :class:`~lcl._struct.MleConfig`.
 
     Returns
     -------
-    updated_shares : array
-        (C,) vector of class shares.
-
+    updated_thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
+        Optimized class-membership coefficients.
+    converged : bool
+        Whether the final Newton error is within ``mle_config.ftol``.
     """
     if mle_config is None:
         mle_config = MleConfig()
@@ -119,8 +125,7 @@ def _compute_grouped_data_loglik_value(
     predicted_class_probs, *_ = _predict_class_membership_probs(thetas, data)
 
     return -jnp.sum(
-        class_probs_by_panel
-        * jnp.log(jnp.maximum(predicted_class_probs, 1e-250))
+        class_probs_by_panel * jnp.log(jnp.maximum(predicted_class_probs, 1e-250))
     )
 
 
@@ -148,8 +153,7 @@ def _compute_grouped_data_loglik_grad_hess(
     predicted_nonbaseline = predicted_class_probs[:, 1:]
 
     neg_loglik = -jnp.sum(
-        class_probs_by_panel
-        * jnp.log(jnp.maximum(predicted_class_probs, 1e-250))
+        class_probs_by_panel * jnp.log(jnp.maximum(predicted_class_probs, 1e-250))
     )
 
     dem_design = _demographic_design_matrix(data)
@@ -218,36 +222,27 @@ def _compute_grouped_data_loglik_and_grad(
     tuple[Float64[Array, ""], Float64[Array, "panels theta_len"]],
     Float64[Array, "theta_len"],
 ]:
-    """Compute grouped-data log likelihood.
+    """Compute the fractional-response objective and analytic gradient.
 
     Parameters
     ----------
-    thetas : array
-        (D, C) matrix of coefficients relating demographic variables to
-        membership in specific latent classes.
-    class_probs_by_panel : array
-        (Np, C) matrix of class membership probabilities conditional on each
-        panel's respective choices.
-    dems : array
-        (Np, D) matrix of demographic variables.
-    _class_membership_probs_fn : fun, optional
-        Function that computes predicted probabilities of class membership
-        based on demographics.
-    num_dem_vars : int
-        Number of demographic variables.
-    num_classes: int
-        Number of latent classes.
+    thetas : Float64[Array, "theta_len"]
+        Flattened coefficient matrix with shape
+        ``((data.num_dem_vars + 1) * (num_classes - 1),)``.
+    class_probs_by_panel : Float64[Array, "panels classes"]
+        Fractional class targets from the E-step.
+    data : :class:`~lcl._struct.Data`
+        Estimation data containing demographics and dimensional metadata.
+    num_classes : int
+        Total number of latent classes, including the baseline class.
 
     Returns
     -------
-    neg_grouped_data_loglik : float
-        Grouped-data log likelihood given current coefficients.
-    grad : array, optional
-        (D * C,) vector representing the gradient, which is actually (D, C).
-    grad_n: array, optional
-        (Np, D * C) matrix representing individual panels' contributions to
-        the gradient. (Conceptualize as [Np, D, C].)
-
+    objective_and_aux : tuple
+        ``(neg_loglik, grad_n)`` where ``grad_n`` stores panel-level score
+        contributions in flattened theta order.
+    grad : Float64[Array, "theta_len"]
+        Analytic gradient of the negative objective.
     """
     thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)
     predicted_class_probs, *_ = _predict_class_membership_probs(thetas, data)
@@ -269,10 +264,13 @@ def _compute_grouped_data_loglik_and_grad(
 
 
 @filter_jit
-def _demographic_design_matrix(data: Data) -> Float64[Array, "panels dem_vars_plus_one"]:
+def _demographic_design_matrix(
+    data: Data,
+) -> Float64[Array, "panels dem_vars_plus_one"]:
     """Return the intercept-augmented demographic design matrix."""
+    dems = _require_demographics(data)
     return jnp.concatenate(
-        [jnp.ones((data.dems.shape[0], 1), dtype=data.dems.dtype), data.dems],
+        [jnp.ones((dems.shape[0], 1), dtype=dems.dtype), dems],
         axis=1,
     )
 
@@ -285,34 +283,28 @@ def _predict_class_membership_probs(
     Float64[Array, "panels classes_minus_one"],
     Float64[Array, "panels"],
 ]:
-    """Compute predicted probabilities of class membership based on demographics.
+    """Compute predicted class-membership probabilities from demographics.
 
     Parameters
     ----------
-    thetas : array
-        (D, C) matrix of coefficients relating demographic variables to
-        membership in specific latent classes.
-    dems : array
-        (Np, D) matrix of demographic variables.
-    num_dem_vars : int
-        Number of demographic variables.
-    num_classes: int
-        Number of latent classes.
-    return_grad_components : bool, default=False
-        Return
+    thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
+        Baseline-category multinomial-logit coefficients. The first row is the
+        intercept and the remaining rows correspond to ``data.dems`` columns.
+    data : :class:`~lcl._struct.Data`
+        Estimation data containing the panel-level demographic matrix.
 
     Returns
     -------
-    predicted_class_probs : array
-        (Np, C) matrix of conditional probabilities of class membership for
-        each panel.
-    exp_latent_class_vars : array, optional
-        (Np, C - 1) matrix of exponentiated latent variables
-    sum_exp_latent_class_vars : array, optional
-        (Np,) vector of sum of exponentiated latent variables
-
+    predicted_class_probs : Float64[Array, "panels classes"]
+        Class-membership probabilities for each panel, including the baseline class.
+    exp_latent_class_vars : Float64[Array, "panels classes_minus_one"]
+        Exponentiated non-baseline logits, returned for callers that need low-level
+        diagnostic components.
+    sum_exp_latent_class_vars : Float64[Array, "panels"]
+        Denominator terms for the non-baseline logit representation.
     """
-    V = thetas[None, 0] + data.dems @ thetas[1:]
+    dems = _require_demographics(data)
+    V = thetas[None, 0] + dems @ thetas[1:]
     V_full = jnp.concatenate([jnp.zeros((V.shape[0], 1)), V], axis=1)
     predicted_class_probs = softmax(V_full, axis=1)
 
