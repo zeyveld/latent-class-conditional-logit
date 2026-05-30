@@ -12,10 +12,12 @@ from collections.abc import Callable
 from typing import Any, TypeAlias, TypeVar, cast
 
 import jax
+from jax import Device
 from jax.sharding import Mesh, NamedSharding
 from jax.sharding import PartitionSpec as P
 
 F = TypeVar("F", bound=Callable[..., Any])
+T = TypeVar("T")
 
 # A JAX spec is a PyTree whose leaves are PartitionSpec values.  JAX does not
 # expose a precise public type for that shape, so callers keep their exact data
@@ -75,5 +77,36 @@ def shard_map(
     return cast(F, _RAW_SHARD_MAP(fun, **kwargs))
 
 
-__all__ = ["Mesh", "NamedSharding", "P", "shard_map"]
+def cpu_device() -> Device:
+    """Return the first available CPU device for host-side inference work."""
+    try:
+        return jax.devices("cpu")[0]
+    except IndexError as exc:
+        raise RuntimeError("JAX did not report an addressable CPU device.") from exc
 
+
+def device_put_array_leaves(tree: T, device: Device) -> T:
+    """Move JAX array leaves in a PyTree to ``device`` while preserving metadata.
+
+    ``jax.device_put`` accepts whole Python containers, but it also converts
+    ordinary scalar metadata in :class:`~lcl._struct.Data` into device arrays.  The
+    likelihood kernels expect those counts to remain Python integers, so inference
+    uses this leaf-wise helper instead.
+    """
+
+    def put_leaf(leaf: object) -> object:
+        if isinstance(leaf, jax.Array):
+            return jax.device_put(leaf, device)
+        return leaf
+
+    return cast(T, jax.tree_util.tree_map(put_leaf, tree))
+
+
+__all__ = [
+    "Mesh",
+    "NamedSharding",
+    "P",
+    "cpu_device",
+    "device_put_array_leaves",
+    "shard_map",
+]

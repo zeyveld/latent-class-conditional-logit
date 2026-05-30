@@ -7,6 +7,7 @@ from jax.nn import softmax
 from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient
 from lcl._demographics import _compute_grouped_data_loglik_grad_hess
 from lcl._em_alg_steps import _compute_panel_logliks
+from lcl._jax_compat import device_put_array_leaves
 from lcl._optimize import exact_newton_minimize
 from lcl._struct import Data, EMAlgConfig, ErrorConfig, MleConfig, PastChoicesData
 from lcl.conditional_logit import ConditionalLogit
@@ -44,6 +45,20 @@ def _tiny_panel_data() -> Data:
         num_panels=2,
         num_dem_vars=0,
     )
+
+
+def _device_platform(array: jax.Array) -> str:
+    return next(iter(array.devices())).platform
+
+
+def test_device_put_array_leaves_preserves_static_metadata() -> None:
+    data = _tiny_panel_data()
+
+    moved = device_put_array_leaves(data, jax.devices("cpu")[0])
+
+    assert _device_platform(moved.X) == "cpu"
+    assert isinstance(moved.num_cases, int)
+    assert isinstance(moved.num_panels, int)
 
 
 def test_loglik_gradient_and_hessian_match_autodiff() -> None:
@@ -250,6 +265,37 @@ def test_prediction_uses_demographics_when_no_past_choices() -> None:
     assert not jnp.allclose(
         prediction.class_probs_by_panel[0], prediction.class_probs_by_panel[1]
     )
+
+
+def test_lcl_robust_covariance_and_delta_method_outputs_are_on_cpu() -> None:
+    df = _small_lcl_df()
+    model = LatentClassConditionalLogit(num_classes=2)
+
+    results = model.fit(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["x"],
+        dem_varnames=["dem"],
+        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
+        mle_config=MleConfig(maxiter=2),
+        error_config=ErrorConfig(robust=True),
+    )
+
+    means, se_means = results._apply_delta_method(
+        results._calc_population_mean_betas,
+        results.flat_params,
+        dems=results.data.dems,
+        num_panels=results.data.num_panels,
+    )
+
+    assert _device_platform(results.cov_matrix) == "cpu"
+    assert _device_platform(means) == "cpu"
+    assert _device_platform(se_means) == "cpu"
+    assert jnp.all(jnp.isfinite(results.cov_matrix))
+    assert jnp.all(jnp.isfinite(se_means))
 
 
 def test_prediction_accepts_tabular_past_choices() -> None:

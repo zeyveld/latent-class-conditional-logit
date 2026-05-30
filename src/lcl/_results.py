@@ -4,10 +4,11 @@ import logging
 from collections.abc import Callable
 from typing import Any, Protocol, cast, runtime_checkable
 
+import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import Array, hessian, jacrev
+from jax import Array, hessian, jacfwd, jacrev
 from jax.tree_util import Partial
 from jax.typing import ArrayLike
 from jaxtyping import Float64
@@ -19,6 +20,7 @@ from lcl._em_alg_steps import (
     _compute_conditional_class_probs,
     _compute_panel_logliks,
 )
+from lcl._jax_compat import cpu_device, device_put_array_leaves
 from lcl._kernels import _choice_probabilities_and_logsum, _class_membership_probs
 from lcl._logging import log_or_print
 from lcl._prediction import LCLPrediction
@@ -34,6 +36,13 @@ from lcl._struct import (
 
 
 logger = logging.getLogger(__name__)
+
+
+def _symmetrize(
+    matrix: Float64[Array, "all_params all_params"],
+) -> Float64[Array, "all_params all_params"]:
+    """Remove tiny numerical asymmetry from covariance-style matrices."""
+    return 0.5 * (matrix + matrix.T)
 
 
 @runtime_checkable
@@ -218,35 +227,53 @@ class LCLResults:
         return _class_membership_probs(thetas, dems, num_panels)
 
     def _compute_covariance(self) -> Float64[Array, "all_params all_params"]:
-        """Compute Hessian-based covariance, optionally with clustered sandwich correction.
+        """Compute covariance on CPU, optionally with clustered sandwich correction.
+
+        The EM algorithm may leave fitted arrays committed to a GPU or sharded
+        accelerator placement.  Robust inference builds dense Hessians/Jacobians,
+        so this method explicitly moves only the inference inputs to CPU and runs
+        all derived differencing, Hessian, pseudo-inverse, and score-Jacobian work
+        there.  The robust score Jacobian maps parameters to panel contributions;
+        because that Jacobian is usually tall, forward-mode AD is the better default
+        than reverse-mode AD for this calculation.
 
         Returns
         -------
         Float64[Array, "all_params all_params"]
             Covariance matrix aligned with the flattened parameter vector.
         """
+        cpu = cpu_device()
         if self.error_config.skip_std_errs:
-            return jnp.full((self.num_params, self.num_params), jnp.nan)
+            with jax.default_device(cpu):
+                return jnp.full((self.num_params, self.num_params), jnp.nan)
 
         logger.info("Computing LCL covariance matrix.")
-        diff_unchosen_chosen = _diff_unchosen_chosen(self.data)
-        H = hessian(self._full_loglik_fn)(
-            self.flat_params, diff_unchosen_chosen, self.data
-        )
-        H_inv = jnp.array(onp.linalg.pinv(onp.array(-H)))
+        with jax.default_device(cpu):
+            flat_params = device_put_array_leaves(self.flat_params, cpu)
+            data = device_put_array_leaves(self.data, cpu)
+            diff_unchosen_chosen = device_put_array_leaves(
+                _diff_unchosen_chosen(data), cpu
+            )
 
-        if not self.error_config.robust:
-            return H_inv
+            H = hessian(self._full_loglik_fn)(
+                flat_params, diff_unchosen_chosen, data
+            )
+            H_inv = jax.device_put(onp.linalg.pinv(onp.asarray(-H)), cpu)
 
-        J = jacrev(self._panel_loglik_fn)(
-            self.flat_params, diff_unchosen_chosen, self.data
-        )
-        B = J.T @ J
+            if not self.error_config.robust:
+                return _symmetrize(H_inv)
 
-        if self.data.num_panels is None:
-            raise ValueError("Panel identifiers are required for clustered covariance.")
-        G = self.data.num_panels
-        return (H_inv @ B @ H_inv) * (G / (G - 1))
+            J = jacfwd(self._panel_loglik_fn)(
+                flat_params, diff_unchosen_chosen, data
+            )
+            B = J.T @ J
+
+            if data.num_panels is None:
+                raise ValueError(
+                    "Panel identifiers are required for clustered covariance."
+                )
+            G = data.num_panels
+            return _symmetrize((H_inv @ B @ H_inv) * (G / (G - 1)))
 
     def _panel_loglik_fn(
         self,
@@ -282,17 +309,29 @@ class LCLResults:
         *args: object,
         **kwargs: object,
     ) -> tuple[Float64[Array, "..."], Float64[Array, "..."]]:
-        """Apply the Delta Method to derive standard errors for non-linear parameter functions."""
-        target_func = Partial(func, *args, **kwargs)
-        val = target_func(flat_params)
-        jac = jacrev(target_func)(flat_params)
+        """Apply the Delta Method on CPU for non-linear parameter functions.
 
-        if val.ndim == 0:
-            variance = jac.T @ self.cov_matrix @ jac
-        else:
-            variance = jnp.einsum("kp,pq,kq->k", jac, self.cov_matrix, jac)
+        The target functions used for summaries and WTP inference generally return
+        scalars or short vectors, so reverse-mode AD remains appropriate here even
+        though the robust covariance score Jacobian uses ``jacfwd``.
+        """
+        cpu = cpu_device()
+        with jax.default_device(cpu):
+            flat_params_cpu = device_put_array_leaves(flat_params, cpu)
+            args_cpu = device_put_array_leaves(args, cpu)
+            kwargs_cpu = device_put_array_leaves(kwargs, cpu)
+            cov_matrix = device_put_array_leaves(self.cov_matrix, cpu)
 
-        return val, jnp.sqrt(jnp.maximum(variance, 0.0))
+            target_func = Partial(func, *args_cpu, **kwargs_cpu)
+            val = target_func(flat_params_cpu)
+            jac = jacrev(target_func)(flat_params_cpu)
+
+            if val.ndim == 0:
+                variance = jac.T @ cov_matrix @ jac
+            else:
+                variance = jnp.einsum("kp,pq,kq->k", jac, cov_matrix, jac)
+
+            return val, jnp.sqrt(jnp.maximum(variance, 0.0))
 
     def _calc_population_mean_betas(
         self,
