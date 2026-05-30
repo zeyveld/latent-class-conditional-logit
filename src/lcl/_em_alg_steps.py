@@ -8,12 +8,11 @@ import numpy as onp
 from equinox import combine, filter_jit, is_array, partition
 from jax import Array, lax
 from jax.nn import sigmoid, softmax
-from jax.sharding import Mesh, NamedSharding
-from jax.sharding import PartitionSpec as P
 from jaxtyping import Float64
 
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._demographics import _predict_class_membership_probs, _update_thetas
+from lcl._jax_compat import Mesh, NamedSharding, P, shard_map
 from lcl._kernels import _diff_log_kernels
 from lcl._optimize import exact_newton_minimize
 from lcl._struct import Data, DiffUnchosenChosen, EMAlgConfig, EMVars, MleConfig
@@ -258,7 +257,7 @@ def _update_betas(
     diff_specs = jax.tree_util.tree_map(lambda _: P(), dyn_diff)
 
     with mesh:
-        mapped_update = jax.shard_map(
+        mapped_update = shard_map(
             lambda device_betas, device_weights, dynamic_diff: _distributed_update(
                 device_betas,
                 device_weights,

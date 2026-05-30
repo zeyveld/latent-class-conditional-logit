@@ -1,6 +1,6 @@
 [project]
 name = "lcl-choice"
-version = "0.1.26"
+version = "0.1.27"
 description = "A high-performance Python package for estimating latent-class conditional logit models."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -11,7 +11,7 @@ authors = [
 ]
 
 dependencies = [
-    "jax>=0.4.0",
+    "jax>=0.5.3",
     "polars>=0.20.0",
     "jaxtyping>=0.2.25",
     "beartype>=0.17.0",

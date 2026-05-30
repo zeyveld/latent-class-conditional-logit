@@ -3,6 +3,7 @@ import jax.numpy as jnp
 import polars as pl
 
 import lcl
+from lcl._jax_compat import _resolve_shard_map_check_kwarg
 
 
 def test_jax_installation() -> None:
@@ -18,3 +19,14 @@ def test_polars_installation() -> None:
 
 def test_lcl_import() -> None:
     assert lcl is not None
+
+
+def test_shard_map_check_keyword_resolution() -> None:
+    def modern_shard_map(*, check_vma: bool = True) -> None:
+        pass
+
+    def legacy_shard_map(*, check_rep: bool = True) -> None:
+        pass
+
+    assert _resolve_shard_map_check_kwarg(modern_shard_map) == "check_vma"
+    assert _resolve_shard_map_check_kwarg(legacy_shard_map) == "check_rep"
