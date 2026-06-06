@@ -8,7 +8,6 @@ from jaxtyping import Array, Float64
 from lcl._optimize import exact_newton_minimize
 from lcl._struct import Data, MleConfig
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -316,6 +315,3 @@ def _predict_class_membership_probs(
     )
 
     return predicted_class_probs, exp_latent_class_vars, sum_exp_latent_class_vars
-
-
-# EOF

@@ -176,6 +176,3 @@ def _diff_unchosen_chosen(case_data: Data) -> DiffUnchosenChosen:
     cases_d = case_data.cases[~case_data.y]  # case ID for unchosen alts only
 
     return DiffUnchosenChosen(X_d, alts_d, cases_d, panels, case_data.num_cases)
-
-
-# EOF

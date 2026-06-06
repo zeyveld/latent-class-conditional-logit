@@ -58,6 +58,3 @@ def _robust_covariance(hess_inv: ArrayLike, grad_n: ArrayLike) -> Array:
     inner = jnp.transpose(grad_n_sub) @ grad_n_sub
     correction = (n) / (n - 1)
     return cast(Array, correction * (hess_inv @ inner @ hess_inv))
-
-
-# EOF

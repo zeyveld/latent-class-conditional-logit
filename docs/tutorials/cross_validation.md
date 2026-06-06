@@ -1,8 +1,8 @@
 # Cross-validation & model selection
 
-Choosing the number of latent classes is an important modelling decision for any finite mixture. Information criteria (BIC, CAIC, adjusted BIC) are useful, and LCL reports all three on every fit. But these criteria can disagree, and they reward in-sample fit by construction. Out-of-sample log-likelihood under a panel-respecting split is the cleaner benchmark when you can spare the time (and shoulder the GPU expense).
+Choosing the number of latent classes is an important modelling decision for any finite mixture. Information criteria (BIC, CAIC, adjusted BIC) are useful, and LCL reports all three. But these criteria can disagree, and can prove unstable over repeated sampling (see Preacher and Merkle [2012, Psychological Methods]). Out-of-sample log-likelihood under a panel-respecting split is preferable when you can spare the time (and shoulder the GPU expense).
 
-`cv_optimal_classes` automates that exercise. Folds are drawn at the decision-maker level: an individual's entire choice history sits in exactly one fold so that a panel cannot leak between training and held-out data.
+`cv_optimal_classes` automates that procedure. Folds are drawn at the decision-maker level: an individual's entire choice history sits in exactly one fold so that a panel cannot leak between training and hold-out data.
 
 !!! warning "Experimental"
     The cross-validation utility is functional but still labelled experimental. Expect occasional refinements as I use this functionality in my own work.
@@ -100,5 +100,5 @@ Open `cv_plot.html` and you have an interactive plot of the curve with the peak 
 
 - **Stick with a small number of folds for initial screening.** Three folds is plenty to see the qualitative shape of the curve. Bump to five or ten once you've narrowed the range.
 - **Use the same `EMAlgConfig` across folds.** Differing iteration budgets across folds confound the comparison.
-- **Inspect a fold that fails to converge.** `cv_optimal_classes` swallows individual fold failures and records `NaN`; if you see one, refit that fold standalone with `LatentClassConditionalLogit.fit` to see the diagnostic logs.
+- **Inspect a fold that fails to converge.** `cv_optimal_classes` swallows individual fold failures and records `NaN`; if you see one, refit that fold with `LatentClassConditionalLogit.fit` to see the diagnostic logs.
 - **Pair CV with the information criteria.** When CV picks $K^*$ and BIC picks $K^* - 1$, the latter is often the right call for inference; the smaller model trades a small amount of fit for tighter standard errors.

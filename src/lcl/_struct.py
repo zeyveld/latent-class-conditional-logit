@@ -248,25 +248,39 @@ class PartitionType(StrEnum):
 class WTPRequest:
     """Configuration object for calculating Marginal Willingness-to-Pay (WTP).
 
-    Attributes
+    Parameters
     ----------
     alt_var : str
         The target alternative-specific variable for the WTP numerator.
     demographic_var : str
-        The demographic variable used to partition the decision-makers.
+        The demographic variable used to partition the decision-makers. When
+        ``dummy_vars`` is supplied, this is the semantic factor name used in the
+        output table.
     partition_type : PartitionType | str
-        The strategy for grouping the demographic variable (e.g., quintiles).
-    bins : int | list[float] | None, optional
-        Custom breakpoints if `partition_type` is 'custom_breaks'.
+        The strategy for grouping ``demographic_var``. Dummy-coded factors must use
+        ``PartitionType.CATEGORICAL``.
+    bins : list[float] | None, optional
+        Custom breakpoints if ``partition_type`` is ``"custom_breaks"``.
+    dummy_vars : list[str] | None, optional
+        One-hot dummy columns that jointly represent a categorical variable. The
+        all-zero row is treated as the base category.
+    dummy_labels : list[str] | None, optional
+        Display labels for ``dummy_vars`` in the same order. Defaults to the dummy
+        column names.
+    base_category : str, default="base"
+        Display label for the all-zero base category when ``dummy_vars`` is supplied.
     """
 
     alt_var: str
     demographic_var: str
     partition_type: PartitionType | str
     bins: Optional[Union[int, list[float]]] = None
+    dummy_vars: list[str] | None = None
+    dummy_labels: list[str] | None = None
+    base_category: str = "base"
 
     def __post_init__(self) -> None:
-        """Catch runtime errors if the user overlooks type hints"""
+        """Validate and normalize WTP request options."""
         # Attempt to coerce partition into PartitionType
         if not isinstance(self.partition_type, PartitionType):
             try:
@@ -288,6 +302,18 @@ class WTPRequest:
             raise ValueError(
                 "When partition_type is 'custom_breaks', 'bins' must be a list of breakpoints."
             )
-
-
-# EOF
+        if self.dummy_vars is not None:
+            if not self.dummy_vars:
+                raise ValueError("'dummy_vars' must contain at least one column name.")
+            if len(set(self.dummy_vars)) != len(self.dummy_vars):
+                raise ValueError("'dummy_vars' cannot contain duplicate column names.")
+            if self.partition_type != PartitionType.CATEGORICAL:
+                raise ValueError(
+                    "Dummy-coded WTP partitions require partition_type='categorical'."
+                )
+            if self.dummy_labels is not None and len(self.dummy_labels) != len(
+                self.dummy_vars
+            ):
+                raise ValueError(
+                    "'dummy_labels' must have one label for each dummy column."
+                )

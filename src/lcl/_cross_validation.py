@@ -11,7 +11,6 @@ from lcl._case_utils import _diff_unchosen_chosen
 from lcl._struct import EMAlgConfig, MleConfig
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -170,6 +169,3 @@ def cv_optimal_classes(
         results.append({"Num_Classes": num_classes, "Avg_OOS_LL": avg_oos_ll})
 
     return pl.DataFrame(results)
-
-
-# EOF

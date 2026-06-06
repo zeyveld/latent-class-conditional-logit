@@ -212,6 +212,3 @@ class ChoiceModel(ABC):
         self.dem_varnames = list(dem_varnames) if dem_varnames is not None else None
         self.numeraire = numeraire
         self.numeraire_idx = case_varnames.index(numeraire) if numeraire else None
-
-
-# EOF

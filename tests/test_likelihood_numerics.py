@@ -9,7 +9,15 @@ from lcl._demographics import _compute_grouped_data_loglik_grad_hess
 from lcl._em_alg_steps import _compute_panel_logliks
 from lcl._jax_compat import device_put_array_leaves
 from lcl._optimize import exact_newton_minimize
-from lcl._struct import Data, EMAlgConfig, ErrorConfig, MleConfig, PastChoicesData
+from lcl._struct import (
+    Data,
+    EMAlgConfig,
+    ErrorConfig,
+    MleConfig,
+    PartitionType,
+    PastChoicesData,
+    WTPRequest,
+)
 from lcl.conditional_logit import ConditionalLogit
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
@@ -230,6 +238,31 @@ def _small_lcl_df() -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
+def _small_wtp_df() -> pl.DataFrame:
+    rows = []
+    panel_ids = [101, 205, 309, 415, 588]
+    for panel_idx, panel in enumerate(panel_ids):
+        quintile = panel_idx + 1
+        for case in [1, 2]:
+            for alt in [0, 1]:
+                rows.append(
+                    {
+                        "panel": panel,
+                        "case": case,
+                        "alt": alt,
+                        "choice": alt == ((panel_idx + case) % 2),
+                        "cost": float(2.0 + alt + case + 0.25 * quintile),
+                        "time": float(8.0 - alt + 0.5 * case + quintile),
+                        "income_quintile": f"Q{quintile}",
+                        "income_q2": float(quintile == 2),
+                        "income_q3": float(quintile == 3),
+                        "income_q4": float(quintile == 4),
+                        "income_q5": float(quintile == 5),
+                    }
+                )
+    return pl.DataFrame(rows)
+
+
 def test_lcl_no_dem_share_pack_unpack_roundtrip() -> None:
     shares = jnp.array([0.2, 0.3, 0.5])
     theta = jnp.log(shares[1:] / shares[0])
@@ -359,6 +392,62 @@ def test_prediction_accepts_tabular_past_choices() -> None:
     assert onp.allclose(
         from_tabular.predicted_probs["choice_probs"].to_numpy(),
         from_wrapper.predicted_probs["choice_probs"].to_numpy(),
+    )
+
+
+def test_wtp_accepts_dummy_bundle_and_external_partition_data() -> None:
+    df = _small_wtp_df()
+    dummy_vars = ["income_q2", "income_q3", "income_q4", "income_q5"]
+    model = LatentClassConditionalLogit(num_classes=2, numeraire="cost")
+    results = model.fit(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["cost", "time"],
+        dem_varnames=dummy_vars,
+        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
+        mle_config=MleConfig(maxiter=2),
+        error_config=ErrorConfig(robust=True),
+    )
+    prediction = results.predict(data=df)
+
+    dummy_tables = prediction.compute_wtp(
+        WTPRequest(
+            alt_var="time",
+            demographic_var="income_quintile",
+            partition_type=PartitionType.CATEGORICAL,
+            dummy_vars=dummy_vars,
+            dummy_labels=["Q2", "Q3", "Q4", "Q5"],
+            base_category="Q1",
+        )
+    )
+    partition_data = df.select(["panel", "income_quintile"]).unique(
+        subset=["panel"], maintain_order=True
+    )
+    raw_tables = prediction.compute_wtp(
+        WTPRequest(
+            alt_var="time",
+            demographic_var="income_quintile",
+            partition_type=PartitionType.CATEGORICAL,
+        ),
+        partition_data=partition_data,
+        panel_col="panel",
+    )
+
+    dummy_df = next(iter(dummy_tables.values())).sort("income_quintile")
+    raw_df = next(iter(raw_tables.values())).sort("income_quintile")
+
+    assert dummy_df["income_quintile"].to_list() == ["Q1", "Q2", "Q3", "Q4", "Q5"]
+    assert dummy_df["income_quintile"].to_list() == raw_df["income_quintile"].to_list()
+    assert onp.allclose(
+        dummy_df["Mean_Marginal_WTP"].to_numpy(),
+        raw_df["Mean_Marginal_WTP"].to_numpy(),
+    )
+    assert onp.allclose(
+        dummy_df["Standard_Error"].to_numpy(),
+        raw_df["Standard_Error"].to_numpy(),
     )
 
 

@@ -14,7 +14,6 @@ from lcl._logging import log_or_print
 from lcl._results import LCLResults
 from lcl._struct import EMAlgConfig, ErrorConfig, MleConfig
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -256,6 +255,3 @@ class LatentClassConditionalLogit(ChoiceModel):
             error_config=error_config,
             estim_time_sec=estim_time_sec,
         )
-
-
-# EOF

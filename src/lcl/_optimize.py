@@ -329,6 +329,3 @@ def _minimize(
         nfev=state.num_fun_eval.item(),
         njev=state.num_grad_eval.item(),
     )
-
-
-# EOF

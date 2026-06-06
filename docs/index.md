@@ -17,7 +17,7 @@ Although I'm an economist by training, this package is intended for all social s
 
 - **`LatentClassConditionalLogit`**: finite-mixture conditional logit with a fractional-response multinomial logit regression of class membership on demographics.
 - **`ConditionalLogit`**: standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
-- **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Folds are split at the decision-maker level, so no individuals' choices appear in both training and held-out data.
+- **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Folds are split at the decision-maker level, so no individuals' choices appear in both training and hold-out data.
 - **Counterfactual prediction**: out-of-sample choice probabilities, expected consumer surplus, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
 - **Inference**: clustered sandwich covariance at the panel level and the Delta method for non-linear functions of the parameters (such as the value of time).
 

@@ -205,6 +205,3 @@ def _random_class_partition(
         )
 
     return diff_unchosen_chosen_by_class
-
-
-# EOF

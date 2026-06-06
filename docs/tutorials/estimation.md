@@ -4,7 +4,7 @@ This tutorial fits a three-class latent-class conditional logit on the Apollo `m
 
 ## 1. Reshape the data
 
-LCL expects a long-format dataframe: one row per `(decision-maker, choice situation, alternative)` triple. The Apollo data ship in wide format, so the first step is a wide-to-long melt; Polars performs this in milliseconds.
+LCL expects a long-format DataFrame: one row per `(decision-maker, choice situation, alternative)` triple. The Apollo data ship in wide format, so the first step is a wide-to-long melt.
 
 ```python
 import polars as pl
@@ -58,11 +58,11 @@ shape: (8, 9)
 ```
 
 !!! note "Why the availability filter matters"
-    A row that an individual could not have chosen still contributes to the denominator of every conditional choice probability unless it is dropped. Leaving unavailable rows in place silently biases the estimates.
+    An alternative that an individual could not have chosen still contributes to the denominator of every conditional choice probability unless it is dropped. Leaving unavailable alternatives in place silently biases the estimates.
 
 ## 2. Estimate the model
 
-Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparametrization). We'll model class membership as a function of two demographic variables: income and an indicator for being female. 
+Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparameterization). We'll model class membership as a function of two demographic variables: income and an indicator for being female. 
 
 ```python
 import lcl
@@ -125,11 +125,11 @@ time & -0.011 & 0.003 \\
  CAIC: 15323.8 | BIC: 15311.8 | Adj. BIC: 15240.9>
 ```
 
-The table reports population-level moments of the structural β's—that is, the share-weighted mean and standard deviation across latent classes—with Delta-method standard errors in parentheses. Class-specific coefficients are in `results.em_res.structural_betas`, while posterior class-membership probabilities by panel are in `results.em_res.class_probs_by_panel`.
+The table reports population-level moments of the structural β's—that is, the share-weighted mean and standard deviation across latent classes—with Delta-method standard errors in parentheses. Class-specific coefficients can be found in `results.em_res.structural_betas`, while posterior class-membership probabilities by panel are located in `results.em_res.class_probs_by_panel`.
 
 ## 3. A counterfactual fare increase, conditioned on observed choices
 
-Suppose the regulator raises bus and rail fares by 25%. `predict` re-uses the fitted encoder, so you only need to pass the modified DataFrame. The optional `past_choices` argument lets you condition the latent-class membership posterior on each decision-maker's observed choices. The intuition is that combining panels' revealed preferences with the (estimated) demographic prior provides sharper class assignments for counterfactual predictions. Here, we reuse `df_long`, which contains the very sequences on which we fitted the model, as the historical record. In practice, you might pass a separate frame of observed choices for each decision-maker prior to the policy change.
+Suppose the regulator raises bus and rail fares by 25%. `predict` reuses the fitted encoder, so you only need to pass the modified DataFrame. The optional `past_choices` argument lets you condition the latent-class membership posterior on each decision-maker's observed choices. The intuition is that combining panels' revealed preferences with the (estimated) demographic prior provides sharper class assignments for counterfactual predictions. Here, we reuse `df_long`, which contains the very sequences on which we fitted the model, as the historical record. In practice, you might pass a separate frame of observed choices for each decision-maker prior to the policy change.
 
 ```python
 cf_df = df_long.with_columns(
@@ -161,7 +161,7 @@ shape: (8, 4)
 └────────┴───────┴──────┴──────────────┘
 ```
 
-Panel 1 chose rail in every observed situation, so the posterior tends towards rail-leaning classes. So, after the 25% fare increase, they're more likely to stick with rail travel than would be suggested by the demographic prior alone. The same posterior `class_probs_by_panel` is stored on `prediction` and guides the elasticity and welfare calculations below. Pass `past_choices` as a `PastChoicesData` instance instead of a DataFrame when you already manage design matrices and ID arrays directly.
+Panel 1 chose rail in every observed situation, so the posterior tends towards rail-leaning classes. So, after the 25% fare increase, they're more likely to stick with rail travel than would be suggested by the demographic prior alone. The same posterior `class_probs_by_panel` is stored on `prediction` and informs the elasticity and welfare calculations below. Pass `past_choices` as a `PastChoicesData` instance instead of a DataFrame when you already manage design matrices and ID arrays directly.
 
 The `LCLPrediction` object also reports expected consumer surplus by choice situation (the log-sum-exp inclusive value rescaled by marginal utility of income) and a per-panel willingness-to-pay frame. Both are useful as inputs to welfare analysis.
 
@@ -228,6 +228,41 @@ shape: (2, 3)
 | 1.0    | -0.2558           | 0.0097         |
 ```
 
-The value of time tends to rise with income—wealthier households are willing to pay more to save a minute on the journey—and proves essentially flat across gender after accounting for income. Notice that the signs are negative: this is because `time` enters utility as a disamenity; flip the sign convention if you prefer a marginal cost framing.
+The value of time tends to rise with income—wealthier households are willing to pay more to save a minute on the journey—and proves essentially flat across gender after accounting for income. Notice that the signs are negative: this is because `time` enters utility as a disamenity. (Flip the sign convention if you prefer a marginal cost framing.)
+
+If you discretized a continuous demographic variable before estimation, pass the dummy bundle as a single categorical factor. For example, a five-level income quintile factor with `income_q1` as the omitted base could be summarized in one request:
+
+```python
+wtp_tables = prediction.compute_wtp(
+    WTPRequest(
+        alt_var="time",
+        demographic_var="income_quintile",
+        partition_type=PartitionType.CATEGORICAL,
+        dummy_vars=["income_q2", "income_q3", "income_q4", "income_q5"],
+        dummy_labels=["Q2", "Q3", "Q4", "Q5"],
+        base_category="Q1",
+    )
+)
+```
+
+You can also summarize WTP using a panel-level partition that was not included in the class-membership regression. Provide a raw categorical or binned variable through `partition_data`; values must be constant within panel.
+
+```python
+income_partitions = (
+    df_long
+    .select(["ID", "income_quintile"])
+    .unique(subset=["ID"], maintain_order=True)
+)
+
+wtp_tables = prediction.compute_wtp(
+    WTPRequest(
+        alt_var="time",
+        demographic_var="income_quintile",
+        partition_type=PartitionType.CATEGORICAL,
+    ),
+    partition_data=income_partitions,
+    panel_col="ID",
+)
+```
 
 That concludes a complete pass: ingest, estimate, predict, decompose. The same `LCLResults` object remains usable for further counterfactuals; nothing about `predict` mutates the fitted model.

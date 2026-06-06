@@ -34,7 +34,6 @@ from lcl._struct import (
     PastChoicesData,
 )
 
-
 logger = logging.getLogger(__name__)
 
 
@@ -255,17 +254,13 @@ class LCLResults:
                 _diff_unchosen_chosen(data), cpu
             )
 
-            H = hessian(self._full_loglik_fn)(
-                flat_params, diff_unchosen_chosen, data
-            )
+            H = hessian(self._full_loglik_fn)(flat_params, diff_unchosen_chosen, data)
             H_inv = jax.device_put(onp.linalg.pinv(onp.asarray(-H)), cpu)
 
             if not self.error_config.robust:
                 return _symmetrize(H_inv)
 
-            J = jacfwd(self._panel_loglik_fn)(
-                flat_params, diff_unchosen_chosen, data
-            )
+            J = jacfwd(self._panel_loglik_fn)(flat_params, diff_unchosen_chosen, data)
             B = J.T @ J
 
             if data.num_panels is None:
@@ -780,6 +775,3 @@ def _parsed_prediction_arrays(
         original_cases=cases_sorted,
         original_panels=panels_sorted,
     )
-
-
-# EOF

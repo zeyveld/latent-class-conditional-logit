@@ -378,6 +378,3 @@ class CLResults:
             result_dict["panels"] = parsed.original_panels
 
         return pl.DataFrame(result_dict)
-
-
-# EOF

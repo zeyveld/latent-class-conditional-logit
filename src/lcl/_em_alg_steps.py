@@ -506,6 +506,3 @@ def _compute_probs_and_exp_utility(
     eV = jnp.exp(data.X.dot(latent_betas.T) - logsum[data.cases, 0])
     probs = probs[:, 0]
     return probs, eV
-
-
-# EOF
