@@ -13,6 +13,7 @@ from jaxtyping import Float64, Int
 from lcl._case_utils import _to_structural_betas
 from lcl._encoding import _coerce_frame
 from lcl._kernels import _choice_probabilities_and_logsum
+from lcl._logging import log_or_print
 from lcl._struct import Data, PartitionType, WTPRequest
 
 logger = logging.getLogger(__name__)
@@ -547,7 +548,7 @@ class LCLPrediction:
             )
             summary_tables[title] = res_df
             with pl.Config(tbl_rows=20, tbl_formatting="MARKDOWN", float_precision=4):
-                logger.info("%s\n%s", title, res_df)
+                log_or_print(logger, "%s\n%s", title, res_df)
 
         return summary_tables
 

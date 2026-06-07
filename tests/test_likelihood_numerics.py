@@ -2,6 +2,7 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
+import pytest
 from jax.nn import softmax
 
 from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient
@@ -395,7 +396,9 @@ def test_prediction_accepts_tabular_past_choices() -> None:
     )
 
 
-def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data() -> None:
+def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     df = _small_wtp_df()
     dummy_vars = ["income_q2", "income_q3", "income_q4", "income_q5"]
     model = LatentClassConditionalLogit(num_classes=2, numeraire="cost")
@@ -448,6 +451,8 @@ def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data() -
         dummy_df["Standard_Error"].to_numpy(),
         raw_df["Standard_Error"].to_numpy(),
     )
+    captured = capsys.readouterr()
+    assert "Marginal WTP for time by income_quintile" in captured.out
 
 
 def test_formula_encoder_drops_unidentified_intercepts() -> None:
