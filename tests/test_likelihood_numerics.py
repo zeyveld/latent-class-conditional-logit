@@ -453,6 +453,9 @@ def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data(
     )
     captured = capsys.readouterr()
     assert "Marginal WTP for time by income_quintile" in captured.out
+    assert "--- LaTeX Output ---" in captured.out
+    assert "--- Table preview ---" in captured.out
+    assert "shape:" not in captured.out
 
 
 def test_formula_encoder_drops_unidentified_intercepts() -> None:

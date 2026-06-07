@@ -211,21 +211,58 @@ prediction.compute_wtp(
 
 ```text
 Marginal WTP for time by income (quintiles)
-shape: (5, 3)
-| income | Mean_Marginal_WTP | Standard_Error |
-|--------|-------------------|----------------|
-| Q1     | -0.1891           | 0.0095         |
-| Q2     | -0.2377           | 0.0083         |
-| Q3     | -0.2705           | 0.0086         |
-| Q4     | -0.2859           | 0.0109         |
-| Q5     | -0.2946           | 0.0154         |
+
+--- LaTeX Output ---
+
+\toprule
+income & Mean marginal WTP \\
+\midrule
+%
+Q1 & -0.1891 \\
+ & (0.0095) \\
+Q2 & -0.2377 \\
+ & (0.0083) \\
+...
+%
+\bottomrule
+
+--- Table preview ---
+
+┌──────────┬─────────────────────┐
+│ income   │ Mean marginal WTP   │
+├──────────┼─────────────────────┤
+│ Q1       │ -0.1891             │
+│          │ (0.0095)            │
+│ Q2       │ -0.2377             │
+│          │ (0.0083)            │
+│ ...      │ ...                 │
+└──────────┴─────────────────────┘
 
 Marginal WTP for time by female (categorical)
-shape: (2, 3)
-| female | Mean_Marginal_WTP | Standard_Error |
-|--------|-------------------|----------------|
-| 0.0    | -0.2553           | 0.0089         |
-| 1.0    | -0.2558           | 0.0097         |
+
+--- LaTeX Output ---
+
+\toprule
+female & Mean marginal WTP \\
+\midrule
+%
+0.0 & -0.2553 \\
+ & (0.0089) \\
+1.0 & -0.2558 \\
+ & (0.0097) \\
+%
+\bottomrule
+
+--- Table preview ---
+
+┌──────────┬─────────────────────┐
+│   female │ Mean marginal WTP   │
+├──────────┼─────────────────────┤
+│      0.0 │ -0.2553             │
+│          │ (0.0089)            │
+│      1.0 │ -0.2558             │
+│          │ (0.0097)            │
+└──────────┴─────────────────────┘
 ```
 
 The value of time tends to rise with income—wealthier households are willing to pay more to save a minute on the journey—and proves essentially flat across gender after accounting for income. Notice that the signs are negative: this is because `time` enters utility as a disamenity. (Flip the sign convention if you prefer a marginal cost framing.)

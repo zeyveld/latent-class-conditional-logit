@@ -9,6 +9,8 @@ import numpy as onp
 import polars as pl
 from jax import Array
 from jaxtyping import Float64, Int
+from pylatexenc.latex2text import LatexNodes2Text
+from tabulate import tabulate
 
 from lcl._case_utils import _to_structural_betas
 from lcl._encoding import _coerce_frame
@@ -185,6 +187,87 @@ def _partition_label(partition_name: object) -> object:
     if isinstance(partition_name, tuple):
         return partition_name[0]
     return partition_name
+
+
+def _escape_latex(value: object) -> str:
+    """Escape plain-text labels for insertion into a LaTeX table."""
+    replacements = {
+        "\\": r"\textbackslash{}",
+        "&": r"\&",
+        "%": r"\%",
+        "$": r"\$",
+        "#": r"\#",
+        "_": r"\_",
+        "{": r"\{",
+        "}": r"\}",
+        "~": r"\textasciitilde{}",
+        "^": r"\textasciicircum{}",
+    }
+    text = str(value)
+    return "".join(replacements.get(char, char) for char in text)
+
+
+def _format_wtp_table(
+    title: str,
+    res_df: pl.DataFrame,
+    demographic_var: str,
+    num_decimals: int,
+) -> str:
+    """Format a WTP summary as LaTeX plus a terminal preview.
+
+    Parameters
+    ----------
+    title : str
+        Human-readable table title.
+    res_df : pl.DataFrame
+        WTP summary with a demographic column, ``Mean_Marginal_WTP``, and
+        ``Standard_Error``.
+    demographic_var : str
+        Name of the partitioning variable column in ``res_df``.
+    num_decimals : int
+        Number of decimal places for estimates and standard errors.
+
+    Returns
+    -------
+    str
+        A formatted string containing the title, LaTeX table, and terminal preview.
+    """
+    converter = LatexNodes2Text(math_mode="text")
+    header = (demographic_var, "Mean marginal WTP")
+    header_clean = [converter.latex_to_text(col) for col in header]
+    latex_header = [_escape_latex(col) for col in header]
+
+    body_rows: list[str] = []
+    data_clean: list[tuple[str, str]] = []
+    for row in res_df.iter_rows(named=True):
+        partition = str(row[demographic_var])
+        mean_wtp = float(row["Mean_Marginal_WTP"])
+        se_wtp = float(row["Standard_Error"])
+        body_rows.append(
+            f"{_escape_latex(partition)} & {mean_wtp:.{num_decimals}f} \\\\"
+        )
+        body_rows.append(f" & ({se_wtp:.{num_decimals}f}) \\\\")
+        data_clean.append(
+            (converter.latex_to_text(partition), f"{mean_wtp:.{num_decimals}f}")
+        )
+        data_clean.append(("", f"({se_wtp:.{num_decimals}f})"))
+
+    latex_string = "\n".join(
+        [r"\toprule", " & ".join(latex_header) + r" \\", r"\midrule", "%"]
+        + body_rows
+        + ["%", r"\bottomrule "]
+    )
+    table_preview = tabulate(
+        data_clean,
+        headers=header_clean,
+        tablefmt="simple_outline",
+        floatfmt=f".{num_decimals}f",
+    )
+    return (
+        f"{title}\n\n"
+        f"--- LaTeX Output ---\n\n{latex_string}\n\n"
+        f"--- Table preview ---\n\n{table_preview}"
+    )
 
 
 class LCLPrediction:
@@ -403,12 +486,13 @@ class LCLPrediction:
         *wtp_requests: WTPRequest | Iterable[WTPRequest],
         partition_data: object | None = None,
         panel_col: str = "panels",
+        num_decimals: int = 4,
     ) -> dict[str, pl.DataFrame]:
         """Compute the Marginal Willingness-to-Pay (WTP) across demographic partitions.
 
         Evaluates the ratio of the target parameter to the negative cost parameter
         (marginal utility of income) for dynamically defined subsets of decision-makers.
-        Outputs formatted Markdown summary tables to the console, including analytical
+        Outputs formatted LaTeX and terminal summary tables, including analytical
         standard errors derived via the Delta Method.
 
         Parameters
@@ -424,6 +508,8 @@ class LCLPrediction:
             specification. Values must be constant within each panel.
         panel_col : str, default="panels"
             Panel identifier column in ``partition_data``.
+        num_decimals : int, default=4
+            Number of decimal places used in printed WTP tables.
 
         Returns
         -------
@@ -547,8 +633,11 @@ class LCLPrediction:
                 f"{req.demographic_var} ({partition_desc})"
             )
             summary_tables[title] = res_df
-            with pl.Config(tbl_rows=20, tbl_formatting="MARKDOWN", float_precision=4):
-                log_or_print(logger, "%s\n%s", title, res_df)
+            log_or_print(
+                logger,
+                "%s",
+                _format_wtp_table(title, res_df, req.demographic_var, num_decimals),
+            )
 
         return summary_tables
 
