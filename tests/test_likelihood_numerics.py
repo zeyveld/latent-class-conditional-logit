@@ -395,7 +395,7 @@ def test_prediction_accepts_tabular_past_choices() -> None:
     )
 
 
-def test_wtp_accepts_dummy_bundle_and_external_partition_data() -> None:
+def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data() -> None:
     df = _small_wtp_df()
     dummy_vars = ["income_q2", "income_q3", "income_q4", "income_q5"]
     model = LatentClassConditionalLogit(num_classes=2, numeraire="cost")
@@ -406,7 +406,6 @@ def test_wtp_accepts_dummy_bundle_and_external_partition_data() -> None:
         panels_col="panel",
         choice_col="choice",
         case_varnames=["cost", "time"],
-        dem_varnames=dummy_vars,
         em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
         mle_config=MleConfig(maxiter=2),
         error_config=ErrorConfig(robust=True),

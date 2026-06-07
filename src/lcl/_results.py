@@ -16,6 +16,7 @@ from pylatexenc.latex2text import LatexNodes2Text
 from tabulate import tabulate
 
 from lcl._case_utils import _diff_unchosen_chosen, _to_structural_betas
+from lcl._encoding import _coerce_frame
 from lcl._em_alg_steps import (
     _compute_conditional_class_probs,
     _compute_panel_logliks,
@@ -42,6 +43,70 @@ def _symmetrize(
 ) -> Float64[Array, "all_params all_params"]:
     """Remove tiny numerical asymmetry from covariance-style matrices."""
     return 0.5 * (matrix + matrix.T)
+
+
+def _panel_constant_columns(data: object, panel_col: str) -> pl.DataFrame:
+    """Return raw columns that are constant within each prediction panel.
+
+    Parameters
+    ----------
+    data : object
+        Tabular prediction data.
+    panel_col : str
+        Column identifying decision-makers.
+
+    Returns
+    -------
+    pl.DataFrame
+        One row per panel, keyed by ``"panels"``, containing only columns whose
+        values do not vary within panel.
+    """
+    df = _coerce_frame(data)
+    candidate_cols = [col for col in df.columns if col != panel_col]
+    if not candidate_cols:
+        return df.select(panel_col).unique(maintain_order=True).rename(
+            {panel_col: "panels"}
+        )
+
+    max_unique_by_col = (
+        df.group_by(panel_col)
+        .agg([pl.col(col).n_unique().alias(col) for col in candidate_cols])
+        .select(pl.exclude(panel_col).max())
+        .row(0)
+    )
+    constant_cols = [
+        col
+        for col, max_unique in zip(candidate_cols, max_unique_by_col)
+        if max_unique <= 1
+    ]
+    return (
+        df.select([panel_col, *constant_cols])
+        .unique(subset=[panel_col], maintain_order=True)
+        .rename({panel_col: "panels"})
+    )
+
+
+def _prediction_partition_data(
+    data: object,
+    dems_data: object | None,
+    panel_col: str,
+) -> pl.DataFrame:
+    """Build panel-level WTP partition data from raw prediction inputs."""
+    partition_df = _panel_constant_columns(data, panel_col)
+    if dems_data is None:
+        return partition_df
+
+    dems_partition_df = _panel_constant_columns(dems_data, panel_col)
+    dems_cols = [
+        col
+        for col in dems_partition_df.columns
+        if col == "panels" or col not in partition_df.columns
+    ]
+    if len(dems_cols) == 1:
+        return partition_df
+    return partition_df.join(
+        dems_partition_df.select(dems_cols), on="panels", how="left"
+    )
 
 
 @runtime_checkable
@@ -507,8 +572,14 @@ class LCLResults:
             raise ValueError(
                 "past_choices_dems_data can only be used when past_choices is provided."
             )
+        partition_data_df = None
         if data is not None:
             parsed_predict = self.model._transform_data(data, dems_data=dems_data)
+            encoder = getattr(self.model, "_encoder", None)
+            if encoder is not None:
+                partition_data_df = _prediction_partition_data(
+                    data, dems_data, encoder.panels_col
+                )
         else:
             if X is None or alts is None or cases is None or panels is None:
                 raise ValueError(
@@ -639,6 +710,7 @@ class LCLResults:
             predict_data=predict_data,
             results=self,
             class_probs_by_panel=class_probs_by_panel,
+            partition_data_df=partition_data_df,
         )
 
 

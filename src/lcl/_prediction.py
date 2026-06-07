@@ -26,8 +26,24 @@ def _flatten_wtp_requests(
     for item in items:
         if isinstance(item, WTPRequest):
             requests.append(item)
+        elif isinstance(item, Iterable) and not isinstance(item, (str, bytes, dict)):
+            for req in item:
+                if not isinstance(req, WTPRequest):
+                    raise TypeError(
+                        "compute_wtp expects WTPRequest objects or iterables of "
+                        f"WTPRequest objects, not {type(req).__name__}."
+                    )
+                requests.append(req)
         else:
-            requests.extend(item)
+            hint = (
+                " Did you pass the dictionary returned by an earlier compute_wtp call?"
+                if isinstance(item, dict)
+                else ""
+            )
+            raise TypeError(
+                "compute_wtp expects WTPRequest objects or iterables of WTPRequest "
+                f"objects, not {type(item).__name__}.{hint}"
+            )
     return requests
 
 
@@ -196,6 +212,9 @@ class LCLPrediction:
         Posterior (or prior) probabilities of latent class membership used to generate
         these predictions. If historical choices were provided during prediction, these
         represent the Bayesian-updated posteriors.
+    partition_data : pl.DataFrame | None
+        Panel-level columns from raw prediction data that are constant within panel
+        and can be used for WTP partitions.
     """
 
     def __init__(
@@ -206,6 +225,7 @@ class LCLPrediction:
         predict_data: Data,
         results: Any,
         class_probs_by_panel: Float64[Array, "panels classes"] | None = None,
+        partition_data_df: pl.DataFrame | None = None,
     ) -> None:
         """Store prediction outputs and references needed for post-processing.
 
@@ -224,6 +244,8 @@ class LCLPrediction:
             conditional-logit result containers without a circular import.
         class_probs_by_panel : Float64[Array, "panels classes"] | None, optional
             Class probabilities used to marginalize class-specific predictions.
+        partition_data_df : pl.DataFrame | None, optional
+            Panel-level raw prediction columns available for WTP partitions.
         """
         self.predicted_probs = predicted_probs_df
         self.surplus = surplus_df
@@ -231,6 +253,7 @@ class LCLPrediction:
         self.predict_data = predict_data
         self.results = results
         self.class_probs_by_panel = class_probs_by_panel
+        self.partition_data = partition_data_df
 
     def elasticities(self, vars: str | Iterable[str]) -> pl.DataFrame:
         """Compute full matrices of own- and cross-elasticities for continuous features.
@@ -442,7 +465,13 @@ class LCLPrediction:
             col for col in partition_cols if col not in df_with_idx.columns
         ]
         if missing_partition_cols:
-            if partition_data is None:
+            source_partition_data = partition_data
+            source_panel_col = panel_col
+            if source_partition_data is None and self.partition_data is not None:
+                source_partition_data = self.partition_data
+                source_panel_col = "panels"
+
+            if source_partition_data is None:
                 raise ValueError(
                     "WTP partition columns were not found in the fitted/prediction "
                     "demographics: "
@@ -450,7 +479,7 @@ class LCLPrediction:
                     "panel-level grouping variables outside the model specification."
                 )
             external_partitions = _coerce_partition_data(
-                partition_data, panel_col, missing_partition_cols
+                source_partition_data, source_panel_col, missing_partition_cols
             )
             df_with_idx = df_with_idx.join(external_partitions, on="panels", how="left")
             has_missing_partition = df_with_idx.select(

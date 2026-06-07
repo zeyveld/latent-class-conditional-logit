@@ -245,7 +245,7 @@ wtp_tables = prediction.compute_wtp(
 )
 ```
 
-You can also summarize WTP using a panel-level partition that was not included in the class-membership regression. Provide a raw categorical or binned variable through `partition_data`; values must be constant within panel.
+You can also summarize WTP using a panel-level partition that was not included in the class-membership regression. Raw categorical or binned columns passed through `predict(data=...)` are available automatically when they are constant within panel. If the partition lives in a separate table, provide it through `partition_data`.
 
 ```python
 income_partitions = (
