@@ -270,7 +270,7 @@ class LCLResults:
             [
                 f"<LCLResults: {self.model.num_classes} Classes",
                 f"{status}",
-                f"Log likelihood: {self.em_res.unconditional_loglik:.1f}>",
+                f"Log likelihood: {self.em_res.unconditional_loglik:.1f}",
                 f"CAIC: {self.caic:.1f}",
                 f"BIC: {self.bic:.1f}",
                 f"Adj. BIC: {self.adjusted_bic:.1f}>",

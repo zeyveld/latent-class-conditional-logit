@@ -62,25 +62,35 @@ shape: (8, 9)
 
 ## 2. Estimate the model
 
-Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparameterization). We'll model class membership as a function of two demographic variables: income and an indicator for being female. 
+Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparameterization). We'll model class membership as a function of two demographic variables: income and an indicator for being female.
+
+The whole model lives in one `LCLSpec`. The numeraire is declared as a `NegativeCoefficient` constraint—optionally annotated with its units and a warning threshold—and the grouped options objects replace the scattered `em_alg_config`/`mle_config`/`error_config` keywords.
 
 ```python
 import lcl
-from lcl import EMAlgConfig, ErrorConfig, MleConfig
+from lcl import (
+    ChoiceIds,
+    FitOptions,
+    InferenceOptions,
+    LCLSpec,
+    NegativeCoefficient,
+    OptimizationOptions,
+)
 
-model = lcl.LatentClassConditionalLogit(num_classes=3, numeraire="cost")
+spec = LCLSpec(
+    ids=ChoiceIds(alt="alt", case="qID", panel="ID", choice="choice"),
+    utility=["cost", "time"],
+    membership=["income", "female"],
+    classes=3,
+    constraints={"cost": NegativeCoefficient(units="dollars")},
+)
 
-results = model.fit(
-    data=df_long,
-    alts_col="alt",
-    cases_col="qID",
-    panels_col="ID",
-    choice_col="choice",
-    case_varnames=["cost", "time"],
-    dem_varnames=["income", "female"],
-    em_alg_config=EMAlgConfig(maxiter=60, num_devices=1),
-    mle_config=MleConfig(maxiter=40),
-    error_config=ErrorConfig(robust=True),
+results = lcl.fit(
+    df_long,
+    spec,
+    fit_options=FitOptions(max_em_iter=60, num_devices=1),
+    optimization_options=OptimizationOptions(maxiter=40),
+    inference=InferenceOptions(covariance="clustered"),
 )
 
 results.summarize_betas()
@@ -88,14 +98,7 @@ print(results)
 ```
 
 ```text
-Running beta updates on a single device.
-EM recursion: 0
-EM recursion: 1
-...
-EM recursion: 39
-Estimation time: 16.956 seconds
-Computing LCL covariance matrix.
-Information criteria: CAIC=15323.8, BIC=15311.8, adjusted BIC=15240.9
+Estimation time: 16.586 seconds
 
 --- LaTeX Output ---
 
@@ -112,22 +115,95 @@ time & -0.011 & 0.003 \\
 
 --- Table preview ---
 
-┌──────────┬─────────────┬───────────────────────────┐
-│ Variable │ Means (β's) │ Standard deviations (σ's) │
-├──────────┼─────────────┼───────────────────────────┤
-│ cost     │ -0.046      │ 0.010                     │
-│          │ (0.001)     │ (0.002)                   │
-│ time     │ -0.011      │ 0.003                     │
-│          │ (0.000)     │ (0.000)                   │
-└──────────┴─────────────┴───────────────────────────┘
+┌────────────┬───────────────┬─────────────────────────────┐
+│ Variable   │ Means (β's)   │ Standard deviations (σ's)   │
+├────────────┼───────────────┼─────────────────────────────┤
+│ cost       │ -0.046        │ 0.010                       │
+│            │ (0.001)       │ (0.002)                     │
+│ time       │ -0.011        │ 0.003                       │
+│            │ (0.000)       │ (0.000)                     │
+└────────────┴───────────────┴─────────────────────────────┘
 
-<LCLResults: 3 Classes | Converged | Log likelihood: -7618.6 |
- CAIC: 15323.8 | BIC: 15311.8 | Adj. BIC: 15240.9>
+<LCLResults: 3 Classes | Converged | Log likelihood: -7618.6 | CAIC: 15323.8 | BIC: 15311.8 | Adj. BIC: 15240.9>
 ```
 
-The table reports population-level moments of the structural β's—that is, the share-weighted mean and standard deviation across latent classes—with Delta-method standard errors in parentheses. Class-specific coefficients can be found in `results.em_res.structural_betas`, while posterior class-membership probabilities by panel are located in `results.em_res.class_probs_by_panel`.
+!!! tip "Watching the EM iterations"
+    By default LCL prints only the final summary. It routes per-iteration progress (`EM recursion: …`, `Computing LCL covariance matrix`, the information criteria) through the standard library `logging` module, so a one-liner—`import logging; logging.basicConfig(level=logging.INFO)`—surfaces the full trace when you want it.
 
-## 3. A counterfactual fare increase, conditioned on observed choices
+The table reports population-level moments of the structural β's—that is, the share-weighted mean and standard deviation across latent classes—with Delta-method standard errors in parentheses. The class-specific coefficients are available with `results.class_coefficients()` and the latent-class composition with `results.class_shares()`; both feature in the diagnostics below.
+
+## 3. Inspect the fit with the diagnostic tools
+
+Before trusting the estimates, run the built-in diagnostics. `results.diagnostics()` collects fit, data, latent-class, and coefficient checks into one structured object; its `.print()` method renders them as a table with each check flagged `ok` or `warning`. (`repr` reports the count—`LCLDiagnostics(checks=9, warnings=0)`—and `.to_frame()` hands back a Polars frame for programmatic gating.)
+
+```python
+results.diagnostics().print()
+```
+
+```text
+section       check                   status            value  message
+------------  ----------------------  --------  -------------  ----------------------------------------------------------
+fit           converged               ok            1          EM convergence flag.
+fit           log_likelihood          ok        -7618.63       Final unconditional log likelihood.
+data          panels                  ok          500          Number of decision-maker panels.
+data          cases                   ok         8000          Number of choice situations.
+latent_class  posterior_entropy_mean  ok            0.370441   Mean entropy of posterior class membership.
+latent_class  min_class_share         ok            0.193648   Small classes can indicate weakly identified local optima.
+latent_class  min_effective_panels    ok           96.8239     Smallest posterior panel mass across classes.
+coefficients  max_abs_beta            ok            0.0637565  Largest absolute structural coefficient.
+coefficients  min_abs_numeraire       ok            0.03708    Small numeraires can dominate WTP/tradeoff ratios.
+```
+
+The thresholds behind the `warning` flags are tunable through `DiagnosticsOptions` at fit time (for example, `DiagnosticsOptions(large_coefficient_threshold=10.0)`). For a one-glance convergence summary, call `convergence_report()`:
+
+```python
+print(results.convergence_report())
+```
+
+```text
+Converged: True
+EM recursions: 40
+Final log likelihood: -7618.63
+Warnings: 0
+Last EM history row: {'em_iter': 40, 'loglik': -7618.634492495526, 'class_0_share': 0.4367277421868584, 'class_1_share': 0.19364779816101987, 'class_2_share': 0.36962445965212176}
+```
+
+The latent-class composition deserves a look as well. `class_shares()` reports each class's aggregate share alongside its posterior ("effective") panel mass, and `class_coefficients()` returns the class-specific structural β's that the population moments above average over.
+
+```python
+print(results.class_shares())
+print(results.class_coefficients())
+```
+
+```text
+shape: (3, 3)
+┌───────┬──────────┬──────────────────┐
+│ class ┆ share    ┆ effective_panels │
+│ ---   ┆ ---      ┆ ---              │
+│ i64   ┆ f64      ┆ f64              │
+╞═══════╪══════════╪══════════════════╡
+│ 0     ┆ 0.436728 ┆ 218.363871       │
+│ 1     ┆ 0.193648 ┆ 96.823899        │
+│ 2     ┆ 0.369624 ┆ 184.81223        │
+└───────┴──────────┴──────────────────┘
+shape: (6, 4)
+┌──────────┬───────┬─────────────┬─────────────┐
+│ variable ┆ class ┆ coefficient ┆ constrained │
+│ ---      ┆ ---   ┆ ---         ┆ ---         │
+│ str      ┆ i64   ┆ f64         ┆ bool        │
+╞══════════╪═══════╪═════════════╪═════════════╡
+│ cost     ┆ 0     ┆ -0.046454   ┆ true        │
+│ cost     ┆ 1     ┆ -0.063756   ┆ true        │
+│ cost     ┆ 2     ┆ -0.03708    ┆ true        │
+│ time     ┆ 0     ┆ -0.009385   ┆ false       │
+│ time     ┆ 1     ┆ -0.007646   ┆ false       │
+│ time     ┆ 2     ┆ -0.014458   ┆ false       │
+└──────────┴───────┴─────────────┴─────────────┘
+```
+
+Class 1 is the most cost-sensitive ($\beta_{\text{cost}} = -0.064$) but the smallest, carrying just under 97 panels of effective mass; class 2 is the most time-sensitive. For a replication appendix, `results.audit_report()` bundles the specification, fit statistics, class shares, and the diagnostics table into a single text block, while `results.em_history_` and `results.optimization_history_` expose the per-iteration log-likelihood path and the final M-step gradient norms as Polars frames.
+
+## 4. A counterfactual fare increase, conditioned on observed choices
 
 Suppose the regulator raises bus and rail fares by 25%. `predict` reuses the fitted encoder, so you only need to pass the modified DataFrame. The optional `past_choices` argument lets you condition the latent-class membership posterior on each decision-maker's observed choices. The intuition is that combining panels' revealed preferences with the (estimated) demographic prior provides sharper class assignments for counterfactual predictions. Here, we reuse `df_long`, which contains the very sequences on which we fitted the model, as the historical record. In practice, you might pass a separate frame of observed choices for each decision-maker prior to the policy change.
 
@@ -152,8 +228,8 @@ shape: (8, 4)
 ╞════════╪═══════╪══════╪══════════════╡
 │ 1      ┆ 0     ┆ air  ┆ 0.541747     │
 │ 1      ┆ 0     ┆ rail ┆ 0.458253     │
-│ 1      ┆ 1     ┆ air  ┆ 0.398250     │
-│ 1      ┆ 1     ┆ rail ┆ 0.601750     │
+│ 1      ┆ 1     ┆ air  ┆ 0.39825      │
+│ 1      ┆ 1     ┆ rail ┆ 0.60175      │
 │ 1      ┆ 2     ┆ air  ┆ 0.666931     │
 │ 1      ┆ 2     ┆ rail ┆ 0.333069     │
 │ 1      ┆ 3     ┆ air  ┆ 0.858308     │
@@ -165,7 +241,7 @@ Panel 1 chose rail in every observed situation, so the posterior tends towards r
 
 The `LCLPrediction` object also reports expected consumer surplus by choice situation (the log-sum-exp inclusive value rescaled by marginal utility of income) and a per-panel willingness-to-pay frame. Both are useful as inputs to welfare analysis.
 
-## 4. Elasticities
+## 5. Elasticities
 
 LCL computes the full table of own- and cross-price elasticities—that is, the percentage change in the probability of choosing alternative $j$ given a one-percent change in attribute $k$ of alternative $j'$—in one pass.
 
@@ -182,21 +258,23 @@ shape: (8, 6)
 │ u32    ┆ u32   ┆ u32  ┆ u32         ┆ f64             ┆ f64             │
 ╞════════╪═══════╪══════╪═════════════╪═════════════════╪═════════════════╡
 │ 0      ┆ 0     ┆ 0    ┆ 0           ┆ -1.975733       ┆ -0.196076       │
-│ 0      ┆ 0     ┆ 0    ┆ 1           ┆  1.697896       ┆  0.549013       │
-│ 0      ┆ 0     ┆ 1    ┆ 0           ┆  2.335712       ┆  0.231801       │
+│ 0      ┆ 0     ┆ 0    ┆ 1           ┆ 1.697896        ┆ 0.549013        │
+│ 0      ┆ 0     ┆ 1    ┆ 0           ┆ 2.335712        ┆ 0.231801        │
 │ 0      ┆ 0     ┆ 1    ┆ 1           ┆ -2.007252       ┆ -0.649043       │
 │ 0      ┆ 1     ┆ 0    ┆ 0           ┆ -2.525647       ┆ -0.358665       │
-│ 0      ┆ 1     ┆ 0    ┆ 1           ┆  1.775845       ┆  0.871044       │
-│ 0      ┆ 1     ┆ 1    ┆ 0           ┆  1.671520       ┆  0.237371       │
+│ 0      ┆ 1     ┆ 0    ┆ 1           ┆ 1.775845        ┆ 0.871044        │
+│ 0      ┆ 1     ┆ 1    ┆ 0           ┆ 1.67152         ┆ 0.237371        │
 │ 0      ┆ 1     ┆ 1    ┆ 1           ┆ -1.175287       ┆ -0.576473       │
 └────────┴───────┴──────┴─────────────┴─────────────────┴─────────────────┘
 ```
 
 `alts` indexes the alternative whose probability changes, while `target_alts` indexes the alternative whose attribute changes. Diagonal entries (`alts == target_alts`) represent own-price elasticities; the rest are cross-price elasticities. Because the elasticities are evaluated at the posterior class probabilities, each panel's table reflects what we have learned about that decision-maker's class membership. So, panels whose observed choices suggest they belong to cost-sensitive classes will show correspondingly larger own-price responses.
 
-## 5. Marginal willingness-to-pay
+## 6. Marginal willingness-to-pay
 
-Because we declared `numeraire="cost"`, LCL computes the value of time analytically as the ratio $-\beta_{\text{time}}/\beta_{\text{cost}}$, quantifying uncertainty using the Delta method. Partitions are evaluated lazily; when you ask for income quintiles, the encoder bins the panel-level demographics, and you receive one row per bin.
+Because `cost` is the declared numeraire, LCL computes the value of time analytically as the ratio $-\beta_{\text{time}}/\beta_{\text{cost}}$, quantifying uncertainty using the Delta method. Partitions are evaluated lazily; when you ask for income quintiles, the encoder bins the panel-level demographics, and you receive one row per bin.
+
+We built `prediction` with `past_choices`, so the probabilities it stores are Bayesian *posteriors*. Marginal WTP, by contrast, is a population summary whose Delta-method standard errors are propagated through the demographic *prior*—so we ask for `class_probabilities="prior"` explicitly. (To weight by the stored posteriors instead, pass `se="none"`; differentiating the standard errors through the posterior update is not supported.)
 
 ```python
 from lcl import PartitionType, WTPRequest
@@ -206,6 +284,7 @@ prediction.compute_wtp(
                partition_type=PartitionType.QUINTILES),
     WTPRequest(alt_var="time", demographic_var="female",
                partition_type=PartitionType.CATEGORICAL),
+    class_probabilities="prior",
 )
 ```
 
@@ -218,10 +297,8 @@ Marginal WTP for time by income (quintiles)
 income & Mean marginal WTP \\
 \midrule
 %
-Q1 & -0.1891 \\
- & (0.0095) \\
-Q2 & -0.2377 \\
- & (0.0083) \\
+Q3 & -0.2706 \\
+ & (0.0086) \\
 ...
 %
 \bottomrule
@@ -231,11 +308,16 @@ Q2 & -0.2377 \\
 ┌──────────┬─────────────────────┐
 │ income   │ Mean marginal WTP   │
 ├──────────┼─────────────────────┤
+│ Q3       │ -0.2706             │
+│          │ (0.0086)            │
+│ Q5       │ -0.2946             │
+│          │ (0.0154)            │
 │ Q1       │ -0.1891             │
 │          │ (0.0095)            │
 │ Q2       │ -0.2377             │
 │          │ (0.0083)            │
-│ ...      │ ...                 │
+│ Q4       │ -0.2859             │
+│          │ (0.0109)            │
 └──────────┴─────────────────────┘
 
 Marginal WTP for time by female (categorical)
@@ -246,7 +328,7 @@ Marginal WTP for time by female (categorical)
 female & Mean marginal WTP \\
 \midrule
 %
-0.0 & -0.2553 \\
+0.0 & -0.2554 \\
  & (0.0089) \\
 1.0 & -0.2558 \\
  & (0.0097) \\
@@ -258,14 +340,46 @@ female & Mean marginal WTP \\
 ┌──────────┬─────────────────────┐
 │   female │ Mean marginal WTP   │
 ├──────────┼─────────────────────┤
-│      0.0 │ -0.2553             │
+│   0.0000 │ -0.2554             │
 │          │ (0.0089)            │
-│      1.0 │ -0.2558             │
+│   1.0000 │ -0.2558             │
 │          │ (0.0097)            │
 └──────────┴─────────────────────┘
 ```
 
-The value of time tends to rise with income—wealthier households are willing to pay more to save a minute on the journey—and proves essentially flat across gender after accounting for income. Notice that the signs are negative: this is because `time` enters utility as a disamenity. (Flip the sign convention if you prefer a marginal cost framing.)
+(Quintile rows appear in the order each bin first occurs in the panel-sorted data; sort the returned frame if you want a strict Q1–Q5 ordering.)
+
+The value of time rises with income: the lowest quintile will pay roughly 0.19 cost units to shave a minute off the trip, the highest about 0.29. It proves essentially flat across gender once income is accounted for. The signs are negative because `time` enters utility as a disamenity—flip the convention if you prefer a marginal-cost framing.
+
+To inspect the class-level building blocks behind those averages, `wtp_by_class` returns the ratio for each latent class, and `denominator_diagnostics` reports the numeraire coefficient sitting in every denominator—an easy way to catch a near-zero $\beta_{\text{cost}}$ that would blow up a tradeoff ratio.
+
+```python
+print(prediction.wtp_by_class("time"))
+print(prediction.denominator_diagnostics())
+```
+
+```text
+shape: (3, 5)
+┌──────────┬─────────────┬───────┬───────────┬───────────────────┐
+│ variable ┆ denominator ┆ class ┆ tradeoff  ┆ denominator_value │
+│ ---      ┆ ---         ┆ ---   ┆ ---       ┆ ---               │
+│ str      ┆ str         ┆ i64   ┆ f64       ┆ f64               │
+╞══════════╪═════════════╪═══════╪═══════════╪═══════════════════╡
+│ time     ┆ cost        ┆ 0     ┆ -0.202024 ┆ 0.046454          │
+│ time     ┆ cost        ┆ 1     ┆ -0.119925 ┆ 0.063756          │
+│ time     ┆ cost        ┆ 2     ┆ -0.3899   ┆ 0.03708           │
+└──────────┴─────────────┴───────┴───────────┴───────────────────┘
+shape: (3, 5)
+┌───────┬─────────────┬───────────────────┬─────────────────┬───────────────┐
+│ class ┆ denominator ┆ denominator_value ┆ abs_denominator ┆ min_abs_floor │
+│ ---   ┆ ---         ┆ ---               ┆ ---             ┆ ---           │
+│ i64   ┆ str         ┆ f64               ┆ f64             ┆ f64           │
+╞═══════╪═════════════╪═══════════════════╪═════════════════╪═══════════════╡
+│ 0     ┆ cost        ┆ 0.046454          ┆ 0.046454        ┆ 0.00001       │
+│ 1     ┆ cost        ┆ 0.063756          ┆ 0.063756        ┆ 0.00001       │
+│ 2     ┆ cost        ┆ 0.03708           ┆ 0.03708         ┆ 0.00001       │
+└───────┴─────────────┴───────────────────┴─────────────────┴───────────────┘
+```
 
 If you discretized a continuous demographic variable before estimation, pass the dummy bundle as a single categorical factor. For example, a five-level income quintile factor with `income_q1` as the omitted base could be summarized in one request:
 
@@ -278,7 +392,8 @@ wtp_tables = prediction.compute_wtp(
         dummy_vars=["income_q2", "income_q3", "income_q4", "income_q5"],
         dummy_labels=["Q2", "Q3", "Q4", "Q5"],
         base_category="Q1",
-    )
+    ),
+    class_probabilities="prior",
 )
 ```
 
@@ -299,6 +414,7 @@ wtp_tables = prediction.compute_wtp(
     ),
     partition_data=income_partitions,
     panel_col="ID",
+    class_probabilities="prior",
 )
 ```
 

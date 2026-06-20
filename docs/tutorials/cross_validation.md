@@ -9,26 +9,33 @@ Choosing the number of latent classes is an important modelling decision for any
 
 ## Running the sweep
 
-Let's re-use the long-format Apollo frame from the [estimation tutorial](estimation.md). The search below evaluates two, three, four, and five classes with three-fold CV. To keep the example speedy on a single device, we trim the inner EM loop to twenty-five iterations; in practice you'd loosen this when the optimum is already obvious from a coarse sweep.
+Let's re-use the long-format Apollo frame *and the `LCLSpec`* from the [estimation tutorial](estimation.md). Passing the same spec keeps the column mapping and the `cost` numeraire in one place; `num_classes_list` then sweeps the class count, overriding `spec.classes`. The search below evaluates two, three, four, and five classes with three-fold CV. To keep the example speedy on a single device, we trim the inner EM loop to twenty-five iterations; in practice you'd loosen this when the optimum is already obvious from a coarse sweep.
 
 ```python
 import lcl
-from lcl import EMAlgConfig, MleConfig
+from lcl import (
+    ChoiceIds,
+    FitOptions,
+    LCLSpec,
+    NegativeCoefficient,
+    OptimizationOptions,
+)
+
+spec = LCLSpec(
+    ids=ChoiceIds(alt="alt", case="qID", panel="ID", choice="choice"),
+    utility=["cost", "time"],
+    membership=["income", "female"],
+    constraints={"cost": NegativeCoefficient()},
+)
 
 cv_results = lcl.cv_optimal_classes(
-    data=df_long,
-    alts_col="alt",
-    cases_col="qID",
-    panels_col="ID",
-    choice_col="choice",
-    case_varnames=["cost", "time"],
-    dem_varnames=["income", "female"],
-    numeraire="cost",
+    df_long,
+    spec,
     num_classes_list=[2, 3, 4, 5],
     folds=3,
     seed=42,
-    em_alg_config=EMAlgConfig(maxiter=25, num_devices=1),
-    mle_config=MleConfig(maxiter=30),
+    fit_options=FitOptions(max_em_iter=25, num_devices=1),
+    optimization_options=OptimizationOptions(maxiter=30),
 )
 print(cv_results)
 ```
@@ -42,7 +49,7 @@ shape: (4, 2)
 ╞═════════════╪══════════════╡
 │ 2           ┆ -2554.779595 │
 │ 3           ┆ -2544.394819 │
-│ 4           ┆ -2543.206710 │
+│ 4           ┆ -2543.20671  │
 │ 5           ┆ -2543.117616 │
 └─────────────┴──────────────┘
 ```
@@ -99,6 +106,6 @@ Open `cv_plot.html` and you have an interactive plot of the curve with the peak 
 ## Practical notes
 
 - **Stick with a small number of folds for initial screening.** Three folds is plenty to see the qualitative shape of the curve. Bump to five or ten once you've narrowed the range.
-- **Use the same `EMAlgConfig` across folds.** Differing iteration budgets across folds confound the comparison.
-- **Inspect a fold that fails to converge.** `cv_optimal_classes` swallows individual fold failures and records `NaN`; if you see one, refit that fold with `LatentClassConditionalLogit.fit` to see the diagnostic logs.
+- **Use the same `FitOptions` across folds.** Differing iteration budgets across folds confound the comparison.
+- **Inspect a fold that fails to converge.** `cv_optimal_classes` swallows individual fold failures and records `NaN`; if you see one, refit that fold with `lcl.fit` (or `results.diagnostics()` on the refit) to see what went wrong.
 - **Pair CV with the information criteria.** When CV picks $K^*$ and BIC picks $K^* - 1$, the latter is often the right call for inference; the smaller model trades a small amount of fit for tighter standard errors.

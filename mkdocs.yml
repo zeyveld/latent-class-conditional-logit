@@ -16,19 +16,20 @@ theme:
     - toc.follow
   font: false  # disable Material's Google Fonts; Luciole is self-hosted via extra.css
   palette:
-    - media: "(prefers-color-scheme: light)"
-      scheme: default
-      primary: custom
-      accent: custom
-      toggle:
-        icon: material/weather-sunny
-        name: Switch to dark mode
-    - media: "(prefers-color-scheme: dark)"
-      scheme: slate
+    # Light is the default scheme; the toggle below switches to dark and the
+    # choice persists in local storage. (No prefers-color-scheme media query, so
+    # the site opens light regardless of the visitor's OS setting.)
+    - scheme: default
       primary: custom
       accent: custom
       toggle:
         icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
         name: Switch to light mode
 
 extra_css:
@@ -63,6 +64,7 @@ nav:
       - Estimation & counterfactuals: tutorials/estimation.md
       - Cross-validation & model selection: tutorials/cross_validation.md
   - API Reference:
+      - Specification & options: api/specification.md
       - Latent-class conditional logit: api/latent_class.md
       - Conditional logit: api/conditional_logit.md
       - Cross-validation: api/cross_validation.md

@@ -8,18 +8,19 @@ import numpy as onp
 import polars as pl
 
 from lcl._case_utils import _diff_unchosen_chosen
-from lcl._struct import EMAlgConfig, MleConfig
+from lcl._struct import EMAlgConfig, FitOptions, MleConfig, OptimizationOptions
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
+from lcl.spec import LCLSpec
 
 logger = logging.getLogger(__name__)
 
 
 def cv_optimal_classes(
     data: Any,
-    alts_col: str,
-    cases_col: str,
-    panels_col: str,
-    num_classes_list: Sequence[int],
+    alts_col: str | LCLSpec | None = None,
+    cases_col: str | None = None,
+    panels_col: str | None = None,
+    num_classes_list: Sequence[int] | None = None,
     formula: Optional[str] = None,
     choice_col: Optional[str] = None,
     case_varnames: Optional[Sequence[str]] = None,
@@ -28,6 +29,10 @@ def cv_optimal_classes(
     numeraire: Optional[str] = None,
     folds: int = 5,
     seed: int = 42,
+    *,
+    spec: LCLSpec | None = None,
+    fit_options: FitOptions | None = None,
+    optimization_options: OptimizationOptions | None = None,
     em_alg_config: EMAlgConfig | None = None,
     mle_config: MleConfig | None = None,
 ) -> pl.DataFrame:
@@ -36,16 +41,28 @@ def cv_optimal_classes(
     Splits the data safely at the panel (decision-maker) level to ensure that
     the same decision-maker does not appear in both the training and test folds.
 
+    The recommended high-level call mirrors :func:`lcl.fit`: pass the same
+    :class:`~lcl.spec.LCLSpec` you fit with, then sweep ``num_classes_list``::
+
+        cv_optimal_classes(data, spec, num_classes_list=[2, 3, 4, 5])
+
+    The lower-level keyword form (``alts_col=...``, ``case_varnames=...``,
+    ``em_alg_config=...``) remains supported for backward compatibility.
+
     Parameters
     ----------
     data : Any
         The main dataset containing choice situations and alternatives.
-    alts_col : str
-        Name of the column containing alternative identifiers.
-    cases_col : str
+    alts_col : str | LCLSpec | None
+        Either the alternative-identifier column name or, in the high-level form,
+        the :class:`~lcl.spec.LCLSpec` to reuse across the sweep.  An ``LCLSpec``
+        passed here is equivalent to passing it through ``spec=``.
+    cases_col : str | None
         Name of the column grouping observations into distinct choice situations.
-    panels_col : str
+        Optional when an ``LCLSpec`` supplies the identifier columns.
+    panels_col : str | None
         Name of the column mapping observations to specific decision-makers.
+        Optional when an ``LCLSpec`` supplies the identifier columns.
     num_classes_list : Sequence[int]
         A sequence of integers specifying the numbers of latent classes to evaluate
         (e.g., [2, 3, 4, 5, 10, 15, 20]).
@@ -66,10 +83,21 @@ def cv_optimal_classes(
         Number of cross-validation folds.
     seed : int, default=42
         Random seed for replicable panel splitting.
+    spec : :class:`~lcl.spec.LCLSpec` | None, optional
+        Declarative specification supplying the identifier columns, utility and
+        membership variables, formula, and numeraire constraint.  Explicit keyword
+        arguments override the corresponding spec fields.
+    fit_options : :class:`~lcl._struct.FitOptions` | None, optional
+        High-level EM fit options applied to every fold.  Translated internally to
+        an :class:`~lcl._struct.EMAlgConfig`.
+    optimization_options : :class:`~lcl._struct.OptimizationOptions` | None, optional
+        High-level M-step optimizer options applied to every fold.
     em_alg_config : :class:`~lcl._struct.EMAlgConfig`, optional
-        Configuration for the EM algorithm loop.
+        Lower-level configuration for the EM algorithm loop.  Ignored when
+        ``fit_options`` is supplied.
     mle_config : :class:`~lcl._struct.MleConfig`, optional
-        Configuration for the inner L-BFGS optimization routines.
+        Lower-level configuration for the inner optimization routines.  Ignored
+        when ``optimization_options`` is supplied.
 
     Returns
     -------
@@ -77,10 +105,35 @@ def cv_optimal_classes(
         A DataFrame containing the Average Out-of-Sample Log-Likelihood for each
         specified number of classes.
     """
+    if isinstance(alts_col, LCLSpec):
+        if spec is not None:
+            raise ValueError("Pass an LCLSpec either positionally or via spec=, not both.")
+        spec = alts_col
+        alts_col = None
+
+    if spec is not None:
+        alts_col = alts_col or spec.ids.alt
+        cases_col = cases_col or spec.ids.case
+        panels_col = panels_col or spec.ids.panel
+        choice_col = choice_col or spec.ids.choice
+        formula = formula if formula is not None else spec.formula
+        if formula is None:
+            case_varnames = case_varnames if case_varnames is not None else spec.utility
+            dem_varnames = dem_varnames if dem_varnames is not None else spec.membership
+        numeraire = numeraire or spec.numeraire
+
+    if num_classes_list is None:
+        raise ValueError("num_classes_list is required.")
+    if alts_col is None or cases_col is None or panels_col is None:
+        raise ValueError(
+            "alts_col, cases_col, and panels_col are required unless an "
+            "LCLSpec supplies them."
+        )
+
     if em_alg_config is None:
-        em_alg_config = EMAlgConfig()
+        em_alg_config = fit_options.to_em_config() if fit_options else EMAlgConfig()
     if mle_config is None:
-        mle_config = MleConfig()
+        mle_config = optimization_options if optimization_options else MleConfig()
     # Unify input into Polars for easy fold splitting, avoiding pandas coercion bugs
     if isinstance(data, pl.DataFrame):
         df = data

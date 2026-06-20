@@ -486,7 +486,7 @@ wheels = [
 
 [[package]]
 name = "lcl-choice"
-version = "0.1.21"
+version = "0.1.33"
 source = { editable = "." }
 dependencies = [
     { name = "beartype" },
@@ -519,7 +519,7 @@ requires-dist = [
     { name = "beartype", specifier = ">=0.17.0" },
     { name = "equinox", specifier = ">=0.13.6" },
     { name = "formulaic", specifier = ">=1.2.1" },
-    { name = "jax", specifier = ">=0.4.0" },
+    { name = "jax", specifier = ">=0.5.3" },
     { name = "jaxopt", specifier = ">=0.8.5" },
     { name = "jaxtyping", specifier = ">=0.2.25" },
     { name = "polars", specifier = ">=0.20.0" },

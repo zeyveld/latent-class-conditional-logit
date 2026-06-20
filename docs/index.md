@@ -15,11 +15,12 @@ Although I'm an economist by training, this package is intended for all social s
 
 ## Key features
 
+- **A declarative, high-level API.** Describe the model once with an `LCLSpec`—identifier columns, utility and class-membership variables, and the numeraire constraint—then hand it to `lcl.fit`. Estimation, optimizer, inference, and diagnostic behaviour are each tuned through a single grouped options object (`FitOptions`, `OptimizationOptions`, `InferenceOptions`, `DiagnosticsOptions`), so you rarely touch the lower-level machinery.
 - **`LatentClassConditionalLogit`**: finite-mixture conditional logit with a fractional-response multinomial logit regression of class membership on demographics.
 - **`ConditionalLogit`**: standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
-- **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Folds are split at the decision-maker level, so no individuals' choices appear in both training and hold-out data.
+- **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Pass the same `LCLSpec` you fit with. Folds are split at the decision-maker level, so no individuals' choices appear in both training and hold-out data.
 - **Counterfactual prediction**: out-of-sample choice probabilities, expected consumer surplus, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
-- **Inference**: clustered sandwich covariance at the panel level and the Delta method for non-linear functions of the parameters (such as the value of time).
+- **Inference & diagnostics**: clustered sandwich covariance at the panel level, the Delta method for non-linear functions of the parameters (such as the value of time), and one-call health checks—`results.diagnostics()`, `convergence_report()`, and a replication-ready `audit_report()`.
 
 Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped design matrix should raise a readable error at the call site rather than a cryptic XLA trace.
 
@@ -41,7 +42,7 @@ A two-class model on a small synthetic panel. The [estimation tutorial](tutorial
 import numpy as onp
 import polars as pl
 import lcl
-from lcl import EMAlgConfig, MleConfig
+from lcl import ChoiceIds, FitOptions, LCLSpec, NegativeCoefficient, OptimizationOptions
 
 rng = onp.random.default_rng(7)
 
@@ -74,45 +75,48 @@ for panel in range(n_panels):
 
 df = pl.DataFrame(rows)
 
-model = lcl.LatentClassConditionalLogit(num_classes=2, numeraire="price")
-results = model.fit(
-    data=df,
-    alts_col="alt",
-    cases_col="case",
-    panels_col="panel",
-    choice_col="choice",
-    case_varnames=["price", "quality"],
-    dem_varnames=["income"],
-    em_alg_config=EMAlgConfig(maxiter=50, num_devices=1),
-    mle_config=MleConfig(maxiter=40),
+# Describe the model once: identifier columns, the utility and class-membership
+# variables, and a strictly-negative price coefficient (the numeraire).
+spec = LCLSpec(
+    ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
+    utility=["price", "quality"],
+    membership=["income"],
+    classes=2,
+    constraints={"price": NegativeCoefficient()},
+)
+
+# Then fit it. Options are grouped, not scattered across keyword arguments.
+results = lcl.fit(
+    df,
+    spec,
+    fit_options=FitOptions(max_em_iter=50, num_devices=1),
+    optimization_options=OptimizationOptions(maxiter=40),
 )
 
 results.summarize_betas()
 print(results)
 ```
 
-A representative end-of-run printout:
+A representative end-of-run printout (`summarize_betas()` also emits a LaTeX version of the table, elided here):
 
 ```text
-Estimation time: 15.705 seconds
-Information criteria: CAIC=1233.4, BIC=1227.4, adjusted BIC=1197.4
+Estimation time: 15.344 seconds
 
 --- Table preview ---
 
-┌──────────┬─────────────┬───────────────────────────┐
-│ Variable │ Means (β's) │ Standard deviations (σ's) │
-├──────────┼─────────────┼───────────────────────────┤
-│ price    │ -1.124      │ 0.723                     │
-│          │ (0.114)     │ (0.128)                   │
-│ quality  │  0.905      │ 0.611                     │
-│          │ (0.097)     │ (0.130)                   │
-└──────────┴─────────────┴───────────────────────────┘
+┌────────────┬───────────────┬─────────────────────────────┐
+│ Variable   │ Means (β's)   │ Standard deviations (σ's)   │
+├────────────┼───────────────┼─────────────────────────────┤
+│ price      │ -1.124        │ 0.723                       │
+│            │ (0.114)       │ (0.128)                     │
+│ quality    │ 0.905         │ 0.611                       │
+│            │ (0.097)       │ (0.130)                     │
+└────────────┴───────────────┴─────────────────────────────┘
 
-<LCLResults: 2 Classes | Converged | Log likelihood: -597.8 |
- CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1197.4>
+<LCLResults: 2 Classes | Converged | Log likelihood: -597.8 | CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1197.4>
 ```
 
-The parentheses enclose Delta-method standard errors on the population moments. The class-specific β's themselves are available in `results.em_res.structural_betas`.
+The parentheses enclose Delta-method standard errors of the population moments. `summarize_betas()` also returns those moments as a tidy Polars frame; the class-specific β's are available with `results.class_coefficients()`.
 
 ## Roadmap
 
