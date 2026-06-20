@@ -5,8 +5,8 @@ from typing import cast
 import jax.numpy as jnp
 import pandas as pd  # type: ignore[import-untyped]
 import polars as pl
-from jax import Array
 from jax.typing import ArrayLike, DTypeLike
+from jaxtyping import Array
 
 
 def _as_array_or_none(

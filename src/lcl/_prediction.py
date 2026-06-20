@@ -2,13 +2,12 @@
 
 import logging
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, Literal
 
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import Array
-from jaxtyping import Float64, Int
+from jaxtyping import Array, Float64, Int
 from pylatexenc.latex2text import LatexNodes2Text
 from tabulate import tabulate
 
@@ -309,6 +308,7 @@ class LCLPrediction:
         predict_data: Data,
         results: Any,
         class_probs_by_panel: Float64[Array, "panels classes"] | None = None,
+        class_probabilities_source: str = "prior",
         partition_data_df: pl.DataFrame | None = None,
     ) -> None:
         """Store prediction outputs and references needed for post-processing.
@@ -328,6 +328,9 @@ class LCLPrediction:
             conditional-logit result containers without a circular import.
         class_probs_by_panel : Float64[Array, "panels classes"] | None, optional
             Class probabilities used to marginalize class-specific predictions.
+        class_probabilities_source : str, default="prior"
+            ``"posterior"`` when prediction used historical choices, otherwise
+            ``"prior"``.
         partition_data_df : pl.DataFrame | None, optional
             Panel-level raw prediction columns available for WTP partitions.
         """
@@ -337,6 +340,7 @@ class LCLPrediction:
         self.predict_data = predict_data
         self.results = results
         self.class_probs_by_panel = class_probs_by_panel
+        self.class_probabilities_source = class_probabilities_source
         self.partition_data = partition_data_df
 
     def elasticities(self, vars: str | Iterable[str]) -> pl.DataFrame:
@@ -487,6 +491,8 @@ class LCLPrediction:
         partition_data: object | None = None,
         panel_col: str = "panels",
         num_decimals: int = 4,
+        class_probabilities: Literal["stored", "prior", "posterior"] = "stored",
+        se: Literal["delta", "none"] = "delta",
     ) -> dict[str, pl.DataFrame]:
         """Compute the Marginal Willingness-to-Pay (WTP) across demographic partitions.
 
@@ -510,6 +516,18 @@ class LCLPrediction:
             Panel identifier column in ``partition_data``.
         num_decimals : int, default=4
             Number of decimal places used in printed WTP tables.
+        class_probabilities : {"stored", "prior", "posterior"}, default="stored"
+            Class-membership probabilities used for WTP/tradeoff point estimates.
+            ``"stored"`` uses the probabilities already attached to this
+            prediction object, including Bayesian posterior updates from
+            ``past_choices``. ``"prior"`` recomputes demographics-only class
+            probabilities. ``"posterior"`` requires that prediction was created
+            with ``past_choices``.
+        se : {"delta", "none"}, default="delta"
+            Standard-error method.  Delta-method standard errors are available for
+            prior class probabilities.  Posterior-updated WTP through
+            ``past_choices`` requires differentiating through the Bayesian class
+            update and is therefore refused unless ``se="none"``.
 
         Returns
         -------
@@ -521,6 +539,29 @@ class LCLPrediction:
         ValueError
             If the parent model was not estimated with a specified numeraire constraint.
         """
+        if se not in {"delta", "none"}:
+            raise ValueError("se must be either 'delta' or 'none'.")
+        if class_probabilities not in {"stored", "prior", "posterior"}:
+            raise ValueError(
+                "class_probabilities must be 'stored', 'prior', or 'posterior'."
+            )
+        if (
+            class_probabilities == "posterior"
+            and self.class_probabilities_source != "posterior"
+        ):
+            raise ValueError(
+                "class_probabilities='posterior' requires predict(..., past_choices=...)."
+            )
+        if (
+            se == "delta"
+            and class_probabilities in {"stored", "posterior"}
+            and self.class_probabilities_source == "posterior"
+        ):
+            raise NotImplementedError(
+                "Delta-method WTP after past_choices requires differentiating "
+                "through the posterior class update. Use se='none' or "
+                "class_probabilities='prior'."
+            )
 
         # We rely on the explicitly tracked numeraire index from _pre_fit
         if getattr(self.results.model, "numeraire_idx", None) is None:
@@ -595,6 +636,9 @@ class LCLPrediction:
                     f"Alternative-specific variable '{req.alt_var}' not found in "
                     "model specification."
                 )
+            selected_class_probs = None
+            if se == "none":
+                selected_class_probs = self._class_probs_for_wtp(class_probabilities)
             summary_rows = []
 
             for partition_name, subset_df in partitioned_df.group_by(
@@ -604,21 +648,35 @@ class LCLPrediction:
                     subset_df["panel_idx"].to_numpy(), dtype=jnp.int32
                 )
 
-                mean_wtp, se_val = self.results._apply_delta_method(
-                    self._compute_subset_mean_wtp,
-                    self.results.flat_params,
-                    target_idx=target_idx,
-                    cost_idx=cost_idx,
-                    subset_panel_indices=subset_panel_indices,
-                    dems=self.predict_data.dems,
-                    num_panels=self.predict_data.num_panels,
-                )
+                if se == "delta":
+                    mean_wtp, se_val = self.results._apply_delta_method(
+                        self._compute_subset_mean_wtp,
+                        self.results.flat_params,
+                        target_idx=target_idx,
+                        cost_idx=cost_idx,
+                        subset_panel_indices=subset_panel_indices,
+                        dems=self.predict_data.dems,
+                        num_panels=self.predict_data.num_panels,
+                    )
+                    se_float = float(se_val)
+                else:
+                    if selected_class_probs is None:
+                        raise ValueError("Class probabilities were not available.")
+                    mean_wtp = self._compute_subset_mean_wtp_from_class_probs(
+                        target_idx=target_idx,
+                        cost_idx=cost_idx,
+                        subset_panel_indices=subset_panel_indices,
+                        class_probs=selected_class_probs,
+                    )
+                    se_float = float("nan")
 
                 summary_rows.append(
                     {
                         req.demographic_var: str(_partition_label(partition_name)),
                         "Mean_Marginal_WTP": float(mean_wtp),
-                        "Standard_Error": float(se_val),
+                        "Standard_Error": se_float,
+                        "Class_Probabilities": class_probabilities,
+                        "SE_Method": se,
                     }
                 )
 
@@ -640,6 +698,122 @@ class LCLPrediction:
             )
 
         return summary_tables
+
+    def tradeoff(
+        self,
+        *wtp_requests: WTPRequest | Iterable[WTPRequest],
+        **kwargs: Any,
+    ) -> dict[str, pl.DataFrame]:
+        """Alias for :meth:`compute_wtp` with more neutral terminology."""
+        return self.compute_wtp(*wtp_requests, **kwargs)
+
+    def wtp_by_class(self, target: str | None = None) -> pl.DataFrame:
+        """Return class-specific WTP/tradeoff ratios.
+
+        Parameters
+        ----------
+        target : str | None, optional
+            Optional target variable to filter.  By default, all non-numeraire
+            alternative-specific variables are returned.
+
+        Returns
+        -------
+        pl.DataFrame
+            Class-specific ratios ``beta_target / -beta_numeraire`` and the
+            denominator used for each class.
+        """
+        numeraire_idx = getattr(self.results.model, "numeraire_idx", None)
+        if numeraire_idx is None:
+            raise ValueError("A numeraire must be defined to compute WTP.")
+        structural_betas = self.results.em_res.structural_betas
+        if structural_betas is None:
+            raise ValueError("Structural betas are required.")
+
+        denominator = -structural_betas[numeraire_idx, :]
+        rows = []
+        for var_idx, variable in enumerate(self.results.model.case_varnames):
+            if var_idx == numeraire_idx:
+                continue
+            if target is not None and variable != target:
+                continue
+            ratios = structural_betas[var_idx, :] / denominator
+            for class_idx in range(self.results.model.num_classes):
+                rows.append(
+                    {
+                        "variable": variable,
+                        "denominator": self.results.model.numeraire,
+                        "class": class_idx,
+                        "tradeoff": float(ratios[class_idx]),
+                        "denominator_value": float(denominator[class_idx]),
+                    }
+                )
+        return pl.DataFrame(rows)
+
+    def denominator_diagnostics(self) -> pl.DataFrame:
+        """Return denominator diagnostics for WTP/tradeoff ratios."""
+        numeraire_idx = getattr(self.results.model, "numeraire_idx", None)
+        if numeraire_idx is None:
+            raise ValueError("A numeraire must be defined to compute diagnostics.")
+        structural_betas = self.results.em_res.structural_betas
+        if structural_betas is None:
+            raise ValueError("Structural betas are required.")
+        denominator = -structural_betas[numeraire_idx, :]
+        return pl.DataFrame(
+            {
+                "class": list(range(self.results.model.num_classes)),
+                "denominator": [self.results.model.numeraire]
+                * self.results.model.num_classes,
+                "denominator_value": onp.asarray(denominator),
+                "abs_denominator": onp.asarray(jnp.abs(denominator)),
+                "min_abs_floor": [
+                    getattr(self.results.model, "numeraire_min_abs", 1e-5)
+                ]
+                * self.results.model.num_classes,
+            }
+        )
+
+    def _class_probs_for_wtp(
+        self,
+        class_probabilities: Literal["stored", "prior", "posterior"],
+    ) -> Float64[Array, "panels classes"]:
+        """Return class probabilities for WTP point estimates."""
+        if class_probabilities in {"stored", "posterior"}:
+            if self.class_probs_by_panel is None:
+                raise ValueError("Prediction does not contain class probabilities.")
+            return self.class_probs_by_panel
+
+        if self.predict_data.num_panels is None:
+            raise ValueError("Panel identifiers are required to compute WTP.")
+        if (
+            self.results.em_res.thetas is not None
+            and self.predict_data.dems is not None
+        ):
+            return self.results._get_class_probs(
+                self.results.em_res.thetas,
+                self.predict_data.dems,
+                self.predict_data.num_panels,
+            )
+        shares = self.results.em_res.shares
+        if shares is None:
+            raise ValueError("Class shares are required.")
+        return jnp.repeat(shares[None, :], self.predict_data.num_panels, axis=0)
+
+    def _compute_subset_mean_wtp_from_class_probs(
+        self,
+        target_idx: int,
+        cost_idx: int,
+        subset_panel_indices: Int[Array, "subset_panels"],
+        class_probs: Float64[Array, "panels classes"],
+    ) -> Float64[Array, ""]:
+        """Compute a subset mean WTP using fixed class probabilities."""
+        structural_betas = self.results.em_res.structural_betas
+        if structural_betas is None:
+            raise ValueError("Structural betas are required.")
+        subset_shares = jnp.mean(class_probs[subset_panel_indices], axis=0)
+        wtp_by_class = structural_betas[target_idx, :] / (
+            -structural_betas[cost_idx, :]
+        )
+        return jnp.sum(subset_shares * wtp_by_class)
 
     def _compute_subset_mean_wtp(
         self,
@@ -683,7 +857,9 @@ class LCLPrediction:
         subset_shares = jnp.mean(subset_class_probs, axis=0)
 
         structural_betas = _to_structural_betas(
-            latent_betas, self.results.model.numeraire_idx
+            latent_betas,
+            self.results.model.numeraire_idx,
+            getattr(self.results.model, "numeraire_min_abs", 1e-5),
         )
 
         # WTP = Beta_target / (-Beta_cost) ensures positive estimates

@@ -2,9 +2,12 @@
 
 import jax.numpy as jnp
 import numpy as onp
-from jax.nn import sigmoid
 from jaxtyping import Array, Float64
 
+from lcl.constraints import (
+    DEFAULT_NEGATIVE_MIN_ABS,
+    pullback_negative_derivatives,
+)
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._em_alg_steps import _compute_conditional_class_probs
 from lcl._optimize import exact_newton_minimize
@@ -18,6 +21,7 @@ def _get_starting_vals(
     em_alg_config: EMAlgConfig,
     mle_config: MleConfig,
     numeraire_idx: int | None = None,
+    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> EMVars:
     """Generate robust initial parameter estimates to seed the EM algorithm.
 
@@ -40,6 +44,8 @@ def _get_starting_vals(
         Optimization settings for the subset-level L-BFGS routines.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable, if applicable.
+    numeraire_min_abs : float, default=1e-5
+        Minimum absolute value imposed on the numeraire coefficient.
 
     Returns
     -------
@@ -62,7 +68,7 @@ def _get_starting_vals(
             p: Float64[Array, "alt_vars"],
         ) -> Float64[Array, ""]:
             """Evaluate the subset objective after applying the numeraire transform."""
-            p_struct = _to_structural_betas(p, numeraire_idx)
+            p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
             return _loglik_value(p_struct, class_diff_unchosen_chosen, w_ones)
 
         def _startup_loglik_closure(
@@ -73,24 +79,14 @@ def _get_starting_vals(
             Float64[Array, "alt_vars alt_vars"],
         ]:
             """Evaluate the subset objective, gradient, and Hessian for Newton steps."""
-            p_struct = _to_structural_betas(p, numeraire_idx)
+            p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
             (val, aux), grad, hessian = _loglik_gradient(
                 p_struct, class_diff_unchosen_chosen, w_ones
             )
 
-            if numeraire_idx is not None:
-                derivative = -sigmoid(p[numeraire_idx])
-                grad_struct = grad[numeraire_idx]
-
-                grad = grad.at[numeraire_idx].multiply(derivative)
-                aux = aux.at[:, numeraire_idx].multiply(derivative)
-
-                hessian = hessian.at[numeraire_idx, :].multiply(derivative)
-                hessian = hessian.at[:, numeraire_idx].multiply(derivative)
-                second_deriv = derivative * (1.0 + derivative)
-                hessian = hessian.at[numeraire_idx, numeraire_idx].add(
-                    grad_struct * second_deriv
-                )
+            grad, aux, hessian = pullback_negative_derivatives(
+                p, numeraire_idx, grad, aux, hessian
+            )
             return val, grad, hessian
 
         optim_res = exact_newton_minimize(
@@ -104,7 +100,9 @@ def _get_starting_vals(
 
     # Stack the independently estimated parameter vectors into a (K, C) matrix
     latent_betas = jnp.column_stack(latent_betas_list)
-    structural_betas = _to_structural_betas(latent_betas, numeraire_idx)
+    structural_betas = _to_structural_betas(
+        latent_betas, numeraire_idx, numeraire_min_abs
+    )
 
     thetas = None
     shares = jnp.repeat(1.0 / num_classes, num_classes)

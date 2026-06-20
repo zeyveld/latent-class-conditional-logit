@@ -6,10 +6,14 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 from equinox import combine, filter_jit, is_array, partition
-from jax import Array, lax
-from jax.nn import sigmoid, softmax
-from jaxtyping import Float64
+from jax import lax
+from jax.nn import softmax
+from jaxtyping import Array, Float64
 
+from lcl.constraints import (
+    DEFAULT_NEGATIVE_MIN_ABS,
+    pullback_negative_derivatives,
+)
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._demographics import _predict_class_membership_probs, _update_thetas
 from lcl._jax_compat import Mesh, NamedSharding, P, shard_map
@@ -26,6 +30,7 @@ def _em_alg(
     mle_config: MleConfig,
     em_alg_config: EMAlgConfig,
     numeraire_idx: int | None = None,
+    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> EMVars:
     """Execute a single step of the Expectation-Maximization (EM) algorithm.
 
@@ -50,6 +55,8 @@ def _em_alg(
         Configuration containing the JAX PRNG seed for reproducible partitioning.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable.
+    numeraire_min_abs : float, default=1e-5
+        Minimum absolute value imposed on the numeraire coefficient.
 
     Returns
     -------
@@ -87,6 +94,7 @@ def _em_alg(
         mle_config,
         em_alg_config,
         numeraire_idx,
+        numeraire_min_abs,
     )
 
     # 3. Update class membership model coefficients or class share vectors
@@ -122,7 +130,9 @@ def _em_alg(
 
     # 4. Compute unconditional log likelihood given taste coefficients and class membership
     # coefficients
-    updated_structural_betas = _to_structural_betas(updated_latent_betas, numeraire_idx)
+    updated_structural_betas = _to_structural_betas(
+        updated_latent_betas, numeraire_idx, numeraire_min_abs
+    )
     unconditional_loglik = _compute_unconditional_loglik(
         updated_structural_betas,
         unconditional_class_probs_by_panel,
@@ -201,6 +211,7 @@ def _update_betas(
     mle_config: MleConfig,
     em_alg_config: EMAlgConfig,
     numeraire_idx: int | None,
+    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> Float64[Array, "alt_vars classes"]:
     """Optimize taste parameters using strict SPMD multi-GPU parallelism.
 
@@ -218,6 +229,8 @@ def _update_betas(
         Configuration containing the JAX PRNG seed for reproducible partitioning.
     numeraire_idx : int | None
         Column index of the numeraire variable.
+    numeraire_min_abs : float, default=1e-5
+        Minimum absolute value imposed on the numeraire coefficient.
 
     Returns
     -------
@@ -263,6 +276,7 @@ def _update_betas(
                 device_weights,
                 combine(dynamic_diff, static_diff),
                 numeraire_idx,
+                numeraire_min_abs,
                 mle_config,
             ),
             mesh=mesh,
@@ -286,6 +300,7 @@ def _distributed_update(
     device_weights: Float64[Array, "... classes_per_device cases"],
     diff: DiffUnchosenChosen,
     numeraire_idx: int | None,
+    numeraire_min_abs: float,
     mle_config: MleConfig,
 ) -> Float64[Array, "... classes_per_device alt_vars"]:
     """Update class-specific betas on one shard.
@@ -301,6 +316,8 @@ def _distributed_update(
         Differenced design matrix shared by all class updates.
     numeraire_idx : int | None
         Optional column index constrained through the softplus transform.
+    numeraire_min_abs : float
+        Minimum absolute value imposed on the numeraire coefficient.
     mle_config : :class:`~lcl._struct.MleConfig`
         Newton optimization settings.
 
@@ -333,7 +350,7 @@ def _distributed_update(
         ) -> Float64[Array, ""]:
             """Evaluate the objective using the dynamic/static diff PyTree split."""
             full_diff = combine(d_diff, static_diff)
-            p_struct = _to_structural_betas(p, numeraire_idx)
+            p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
             return _loglik_value(p_struct, full_diff, w_inner)
 
         def _loglik_fn_closure(
@@ -347,23 +364,13 @@ def _distributed_update(
         ]:
             """Evaluate objective, gradient, and Hessian with numeraire chain rule."""
             full_diff = combine(d_diff, static_diff)
-            p_struct = _to_structural_betas(p, numeraire_idx)
+            p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
 
             (val, aux), grad, hessian = _loglik_gradient(p_struct, full_diff, w_inner)
 
-            if numeraire_idx is not None:
-                derivative = -sigmoid(p[numeraire_idx])
-                grad_struct = grad[numeraire_idx]
-
-                grad = grad.at[numeraire_idx].multiply(derivative)
-                aux = aux.at[:, numeraire_idx].multiply(derivative)
-
-                hessian = hessian.at[numeraire_idx, :].multiply(derivative)
-                hessian = hessian.at[:, numeraire_idx].multiply(derivative)
-                second_deriv = derivative * (1.0 + derivative)
-                hessian = hessian.at[numeraire_idx, numeraire_idx].add(
-                    grad_struct * second_deriv
-                )
+            grad, aux, hessian = pullback_negative_derivatives(
+                p, numeraire_idx, grad, aux, hessian
+            )
 
             return val, grad, hessian
 

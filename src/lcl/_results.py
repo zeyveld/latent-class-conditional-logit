@@ -8,25 +8,27 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import Array, hessian, jacfwd, jacrev
+from jax import hessian, jacfwd, jacrev
 from jax.tree_util import Partial
 from jax.typing import ArrayLike
-from jaxtyping import Float64
+from jaxtyping import Array, Float64
 from pylatexenc.latex2text import LatexNodes2Text
 from tabulate import tabulate
 
 from lcl._case_utils import _diff_unchosen_chosen, _to_structural_betas
-from lcl._encoding import _coerce_frame
+from lcl._diagnostics import LCLDiagnostics
 from lcl._em_alg_steps import (
     _compute_conditional_class_probs,
     _compute_panel_logliks,
 )
+from lcl._encoding import _coerce_frame
 from lcl._jax_compat import cpu_device, device_put_array_leaves
 from lcl._kernels import _choice_probabilities_and_logsum, _class_membership_probs
 from lcl._logging import log_or_print
 from lcl._prediction import LCLPrediction
 from lcl._struct import (
     Data,
+    DiagnosticsOptions,
     DiffUnchosenChosen,
     EMAlgConfig,
     EMVars,
@@ -43,6 +45,20 @@ def _symmetrize(
 ) -> Float64[Array, "all_params all_params"]:
     """Remove tiny numerical asymmetry from covariance-style matrices."""
     return 0.5 * (matrix + matrix.T)
+
+
+def _history_frame(rows: list[dict[str, Any]] | None) -> pl.DataFrame:
+    """Convert diagnostic history rows containing JAX scalars to Polars."""
+    if not rows:
+        return pl.DataFrame()
+    clean_rows: list[dict[str, object]] = []
+    for row in rows:
+        clean_row: dict[str, object] = {}
+        for key, value in row.items():
+            arr = onp.asarray(value)
+            clean_row[key] = arr.item() if arr.shape == () else arr.tolist()
+        clean_rows.append(clean_row)
+    return pl.DataFrame(clean_rows)
 
 
 def _panel_constant_columns(data: object, panel_col: str) -> pl.DataFrame:
@@ -64,8 +80,10 @@ def _panel_constant_columns(data: object, panel_col: str) -> pl.DataFrame:
     df = _coerce_frame(data)
     candidate_cols = [col for col in df.columns if col != panel_col]
     if not candidate_cols:
-        return df.select(panel_col).unique(maintain_order=True).rename(
-            {panel_col: "panels"}
+        return (
+            df.select(panel_col)
+            .unique(maintain_order=True)
+            .rename({panel_col: "panels"})
         )
 
     max_unique_by_col = (
@@ -154,6 +172,9 @@ class LCLResults:
         em_alg_config: EMAlgConfig,
         error_config: ErrorConfig | None,
         estim_time_sec: float,
+        diagnostics_config: DiagnosticsOptions | None = None,
+        em_history: list[dict[str, Any]] | None = None,
+        optimization_history: list[dict[str, Any]] | None = None,
     ) -> None:
         """Build a latent-class results object and compute inference artifacts.
 
@@ -174,6 +195,12 @@ class LCLResults:
             Covariance and standard-error configuration.
         estim_time_sec : float
             Wall-clock estimation time in seconds.
+        diagnostics_config : :class:`~lcl._struct.DiagnosticsOptions` | None
+            Thresholds and switches for public diagnostics.
+        em_history : list[dict[str, Any]] | None
+            EM log-likelihood and class-share history.
+        optimization_history : list[dict[str, Any]] | None
+            Final class-level M-step diagnostics.
         """
         self.model = model_spec
         self.em_res = em_vars
@@ -182,6 +209,13 @@ class LCLResults:
         self.converged = em_recursion < (em_alg_config.maxiter - 1)
         self.estim_time_sec = estim_time_sec
         self.error_config = error_config if error_config is not None else ErrorConfig()
+        self.diagnostics_config = (
+            diagnostics_config
+            if diagnostics_config is not None
+            else DiagnosticsOptions()
+        )
+        self.em_history_ = _history_frame(em_history)
+        self.optimization_history_ = _history_frame(optimization_history)
         if self.em_res.latent_betas is None:
             raise ValueError("Latent betas are required to construct LCL results.")
         if self.em_res.structural_betas is None:
@@ -344,7 +378,9 @@ class LCLResults:
         """Compute the log-likelihood for each panel (used to build the Jacobian)."""
         latent_betas, thetas = self._unpack_params(flat_params)
         structural_betas = _to_structural_betas(
-            latent_betas, getattr(self.model, "numeraire_idx", None)
+            latent_betas,
+            getattr(self.model, "numeraire_idx", None),
+            getattr(self.model, "numeraire_min_abs", 1e-5),
         )
         if data.num_panels is None:
             raise ValueError("Panel identifiers are required for LCL log-likelihoods.")
@@ -406,7 +442,9 @@ class LCLResults:
         avg_shares = jnp.mean(class_probs, axis=0)
 
         structural_betas = _to_structural_betas(
-            latent_betas, getattr(self.model, "numeraire_idx", None)
+            latent_betas,
+            getattr(self.model, "numeraire_idx", None),
+            getattr(self.model, "numeraire_min_abs", 1e-5),
         )
         return structural_betas @ avg_shares
 
@@ -424,7 +462,11 @@ class LCLResults:
         class_probs = self._get_class_probs(thetas, dems, num_panels)
         avg_shares = jnp.mean(class_probs, axis=0)
 
-        structural_betas = _to_structural_betas(latent_betas, numeraire_idx)
+        structural_betas = _to_structural_betas(
+            latent_betas,
+            numeraire_idx,
+            getattr(self.model, "numeraire_min_abs", 1e-5),
+        )
 
         mean_betas = structural_betas @ avg_shares
         diff_sq = (structural_betas - mean_betas[:, None]) ** 2
@@ -432,16 +474,62 @@ class LCLResults:
 
         return jnp.sqrt(jnp.maximum(var_betas, 1e-250))
 
-    def summarize_betas(
-        self,
-        header: tuple[str, str, str] = (
-            "Variable",
-            r"Means (\beta's)",
-            r"Standard deviations (\sigma's)",
-        ),
-        num_decimals: int = 3,
-    ) -> None:
-        """Output population-level moments with Delta Method standard errors to the console and LaTeX."""
+    def class_coefficients(self) -> pl.DataFrame:
+        """Return class-specific structural coefficients.
+
+        Returns
+        -------
+        pl.DataFrame
+            Long-format table with one row per variable and latent class.
+        """
+        structural_betas = self.em_res.structural_betas
+        if structural_betas is None:
+            raise ValueError("Structural betas are required.")
+        rows = []
+        beta_array = onp.asarray(structural_betas)
+        for var_idx, variable in enumerate(self.model.case_varnames):
+            for class_idx in range(self.model.num_classes):
+                rows.append(
+                    {
+                        "variable": variable,
+                        "class": class_idx,
+                        "coefficient": float(beta_array[var_idx, class_idx]),
+                        "constrained": variable == self.model.numeraire,
+                    }
+                )
+        return pl.DataFrame(rows)
+
+    def class_shares(self) -> pl.DataFrame:
+        """Return aggregate latent-class shares.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row per latent class with aggregate class share and effective
+            panel mass.
+        """
+        if self.em_res.shares is None:
+            raise ValueError("Class shares are required.")
+        shares = onp.asarray(self.em_res.shares)
+        rows = []
+        posterior = self.em_res.class_probs_by_panel
+        posterior_arr = onp.asarray(posterior) if posterior is not None else None
+        for class_idx, share in enumerate(shares):
+            row = {"class": class_idx, "share": float(share)}
+            if posterior_arr is not None:
+                row["effective_panels"] = float(posterior_arr[:, class_idx].sum())
+            rows.append(row)
+        return pl.DataFrame(rows)
+
+    def beta_summary(self) -> pl.DataFrame:
+        """Return population-level coefficient moments with Delta-method SEs.
+
+        Returns
+        -------
+        pl.DataFrame
+            Variables, mean coefficients, standard deviations across classes,
+            Delta-method standard errors, and class-specific extrema.
+        """
         if self.data.num_panels is None:
             raise ValueError("Panel identifiers are required to summarize LCL results.")
 
@@ -457,31 +545,58 @@ class LCLResults:
             dems=self.data.dems,
             num_panels=self.data.num_panels,
         )
+        structural = onp.asarray(self.em_res.structural_betas)
+        rows = []
+        for idx, variable in enumerate(self.model.case_varnames):
+            rows.append(
+                {
+                    "variable": variable,
+                    "mean": float(means[idx]),
+                    "mean_se": float(se_means[idx]),
+                    "sd": float(stds[idx]),
+                    "sd_se": float(se_stds[idx]),
+                    "min_class": float(onp.min(structural[idx, :])),
+                    "max_class": float(onp.max(structural[idx, :])),
+                }
+            )
+        return pl.DataFrame(rows)
 
+    def summarize_betas(
+        self,
+        header: tuple[str, str, str] = (
+            "Variable",
+            r"Means (\beta's)",
+            r"Standard deviations (\sigma's)",
+        ),
+        num_decimals: int = 3,
+    ) -> pl.DataFrame:
+        """Print and return population-level moments with Delta-method SEs."""
+        summary_df = self.beta_summary()
         body_rows, data_clean = [], []
         converter = LatexNodes2Text(math_mode="text")
         header_clean = [converter.latex_to_text(col) for col in header]
 
-        for coeff_idx, coeff_nm in enumerate(self.model.case_varnames):
+        for row in summary_df.iter_rows(named=True):
+            coeff_nm = str(row["variable"])
             body_rows.append(
-                f"{coeff_nm} & {means[coeff_idx]:.{num_decimals}f} & {stds[coeff_idx]:.{num_decimals}f} \\\\"
+                f"{coeff_nm} & {float(row['mean']):.{num_decimals}f} & {float(row['sd']):.{num_decimals}f} \\\\"
             )
             body_rows.append(
-                f" & ({se_means[coeff_idx]:.{num_decimals}f}) & ({se_stds[coeff_idx]:.{num_decimals}f}) \\\\"
+                f" & ({float(row['mean_se']):.{num_decimals}f}) & ({float(row['sd_se']):.{num_decimals}f}) \\\\"
             )
             var_clean = converter.latex_to_text(coeff_nm)
             data_clean.append(
                 (
                     var_clean,
-                    f"{means[coeff_idx]:.{num_decimals}f}",
-                    f"{stds[coeff_idx]:.{num_decimals}f}",
+                    f"{float(row['mean']):.{num_decimals}f}",
+                    f"{float(row['sd']):.{num_decimals}f}",
                 )
             )
             data_clean.append(
                 (
                     "",
-                    f"({se_means[coeff_idx]:.{num_decimals}f})",
-                    f"({se_stds[coeff_idx]:.{num_decimals}f})",
+                    f"({float(row['mean_se']):.{num_decimals}f})",
+                    f"({float(row['sd_se']):.{num_decimals}f})",
                 )
             )
 
@@ -502,10 +617,191 @@ class LCLResults:
             latex_string,
             table_preview,
         )
+        return summary_df
 
-    def summarize(self, num_decimals: int = 3) -> None:
+    def summarize(self, num_decimals: int = 3) -> pl.DataFrame:
         """Alias for :meth:`summarize_betas`."""
-        self.summarize_betas(num_decimals=num_decimals)
+        return self.summarize_betas(num_decimals=num_decimals)
+
+    def spec_summary(self) -> str:
+        """Return a human-readable model specification summary."""
+        spec = getattr(self.model, "spec", None)
+        if spec is not None:
+            return "\n".join(spec.summary_lines())
+
+        lines = [
+            "Latent-class conditional logit",
+            f"Classes: {self.model.num_classes}",
+            "",
+            "Utility variables:",
+        ]
+        for variable in self.model.case_varnames:
+            suffix = ""
+            if variable == self.model.numeraire:
+                suffix = (
+                    " [negative, "
+                    f"min_abs={getattr(self.model, 'numeraire_min_abs', 1e-5):g}]"
+                )
+            lines.append(f"  {variable}{suffix}")
+        lines.append("")
+        lines.append("Class-membership variables:")
+        if self.model.dem_varnames:
+            lines.extend(f"  {variable}" for variable in self.model.dem_varnames)
+        else:
+            lines.append("  none")
+        return "\n".join(lines)
+
+    def diagnostics(self) -> LCLDiagnostics:
+        """Return structured model diagnostics."""
+        rows: list[dict[str, object]] = [
+            {
+                "section": "fit",
+                "check": "converged",
+                "value": bool(self.converged),
+                "status": "ok" if self.converged else "warning",
+                "message": "EM convergence flag.",
+            },
+            {
+                "section": "fit",
+                "check": "log_likelihood",
+                "value": float(self.em_res.unconditional_loglik),
+                "status": "ok",
+                "message": "Final unconditional log likelihood.",
+            },
+            {
+                "section": "data",
+                "check": "panels",
+                "value": int(self.data.num_panels or 0),
+                "status": "ok",
+                "message": "Number of decision-maker panels.",
+            },
+            {
+                "section": "data",
+                "check": "cases",
+                "value": int(self.data.num_cases),
+                "status": "ok",
+                "message": "Number of choice situations.",
+            },
+        ]
+
+        if self.em_res.class_probs_by_panel is not None:
+            posterior = onp.asarray(self.em_res.class_probs_by_panel)
+            entropy = -onp.sum(
+                posterior * onp.log(onp.maximum(posterior, 1e-300)), axis=1
+            )
+            rows.append(
+                {
+                    "section": "latent_class",
+                    "check": "posterior_entropy_mean",
+                    "value": float(entropy.mean()),
+                    "status": "ok",
+                    "message": "Mean entropy of posterior class membership.",
+                }
+            )
+
+        shares_df = self.class_shares()
+        min_share = float(cast(float, shares_df["share"].min()))
+        rows.append(
+            {
+                "section": "latent_class",
+                "check": "min_class_share",
+                "value": min_share,
+                "status": "warning" if min_share < 0.01 else "ok",
+                "message": "Small classes can indicate weakly identified local optima.",
+            }
+        )
+        if "effective_panels" in shares_df.columns:
+            rows.append(
+                {
+                    "section": "latent_class",
+                    "check": "min_effective_panels",
+                    "value": float(cast(float, shares_df["effective_panels"].min())),
+                    "status": "ok",
+                    "message": "Smallest posterior panel mass across classes.",
+                }
+            )
+
+        structural = onp.asarray(self.em_res.structural_betas)
+        max_abs_beta = float(onp.max(onp.abs(structural)))
+        rows.append(
+            {
+                "section": "coefficients",
+                "check": "max_abs_beta",
+                "value": max_abs_beta,
+                "status": (
+                    "warning"
+                    if (
+                        self.diagnostics_config.warn_large_coefficients
+                        and max_abs_beta
+                        > self.diagnostics_config.large_coefficient_threshold
+                    )
+                    else "ok"
+                ),
+                "message": "Largest absolute structural coefficient.",
+            }
+        )
+        numeraire_idx = getattr(self.model, "numeraire_idx", None)
+        if numeraire_idx is not None:
+            min_abs_numeraire = float(onp.min(onp.abs(structural[numeraire_idx, :])))
+            threshold = self.diagnostics_config.near_zero_numeraire_threshold
+            rows.append(
+                {
+                    "section": "coefficients",
+                    "check": "min_abs_numeraire",
+                    "value": min_abs_numeraire,
+                    "status": (
+                        "warning"
+                        if (
+                            self.diagnostics_config.warn_near_zero_numeraire
+                            and min_abs_numeraire < threshold
+                        )
+                        else "ok"
+                    ),
+                    "message": "Small numeraires can dominate WTP/tradeoff ratios.",
+                }
+            )
+
+        return LCLDiagnostics(pl.DataFrame(rows))
+
+    def diagnose(self) -> LCLDiagnostics:
+        """Alias for :meth:`diagnostics`."""
+        return self.diagnostics()
+
+    def convergence_report(self) -> str:
+        """Return a compact convergence and diagnostic report."""
+        diagnostics = self.diagnostics().to_frame()
+        warnings = diagnostics.filter(pl.col("status") != "ok")
+        lines = [
+            f"Converged: {self.converged}",
+            f"EM recursions: {self.total_recursions}",
+            f"Final log likelihood: {float(self.em_res.unconditional_loglik):.6g}",
+            f"Warnings: {warnings.height}",
+        ]
+        if self.em_history_.height:
+            last = self.em_history_.tail(1).row(0, named=True)
+            lines.append(f"Last EM history row: {last}")
+        return "\n".join(lines)
+
+    def audit_report(self) -> str:
+        """Return a text audit report for replication materials."""
+        diagnostics_table = self.diagnostics().to_frame()
+        return "\n\n".join(
+            [
+                "1. Model Specification\n" + self.spec_summary(),
+                "2. Fit Statistics\n"
+                + "\n".join(
+                    [
+                        f"Log likelihood: {float(self.em_res.unconditional_loglik):.6g}",
+                        f"CAIC: {float(self.caic):.6g}",
+                        f"BIC: {float(self.bic):.6g}",
+                        f"Adjusted BIC: {float(self.adjusted_bic):.6g}",
+                        f"Estimation seconds: {self.estim_time_sec:.3f}",
+                    ]
+                ),
+                "3. Class Shares\n" + str(self.class_shares()),
+                "4. Diagnostics\n" + str(diagnostics_table),
+            ]
+        )
 
     def predict(
         self,
@@ -621,14 +917,17 @@ class LCLResults:
                 diff_unchosen_chosen=diff_unchosen_chosen_past,
                 data=data_past,
             )
+            class_probabilities_source = "posterior"
         elif self.em_res.thetas is not None and predict_data.dems is not None:
             class_probs_by_panel = self._get_class_probs(
                 self.em_res.thetas, predict_data.dems, predict_data.num_panels
             )
+            class_probabilities_source = "prior"
         else:
             class_probs_by_panel = jnp.repeat(
                 shares[None, :], predict_data.num_panels, axis=0
             )
+            class_probabilities_source = "prior"
 
         choice_probs_by_class, log_sum_exp_utility = _choice_probabilities_and_logsum(
             predict_data.X,
@@ -710,6 +1009,7 @@ class LCLResults:
             predict_data=predict_data,
             results=self,
             class_probs_by_panel=class_probs_by_panel,
+            class_probabilities_source=class_probabilities_source,
             partition_data_df=partition_data_df,
         )
 

@@ -4,8 +4,8 @@ from time import time
 from typing import Any
 
 import jax.numpy as jnp
-from jax import Array
 from jax.typing import ArrayLike
+from jaxtyping import Array
 
 from lcl._encoding import ChoiceDataEncoder
 from lcl._struct import Data, ParsedData

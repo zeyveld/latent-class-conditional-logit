@@ -2,10 +2,10 @@
 
 import jax.numpy as jnp
 from equinox import filter_jit
-from jax.nn import softplus
 from jax.ops import segment_sum
 from jaxtyping import Array, Float64
 
+from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS, transform_negative_coefficient
 from lcl._kernels import _diff_logit_components
 from lcl._struct import Data, DiffUnchosenChosen
 
@@ -111,7 +111,9 @@ def _loglik_value(
 
 
 def _to_structural_betas(
-    latent_betas: Float64[Array, "..."], numeraire_idx: int | None
+    latent_betas: Float64[Array, "..."],
+    numeraire_idx: int | None,
+    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> Float64[Array, "..."]:
     """Transform unconstrained optimization parameters into structural parameters.
 
@@ -124,17 +126,17 @@ def _to_structural_betas(
         Unconstrained parameters managed by the L-BFGS solver.
     numeraire_idx : int | None
         The column index of the numeraire variable, if applicable.
+    numeraire_min_abs : float, default=1e-5
+        Minimum absolute value imposed on the structural numeraire coefficient.
 
     Returns
     -------
     Float64[Array, "..."]
         Structural parameters suitable for utility calculation.
     """
-    if numeraire_idx is not None:
-        # Force the parameter to be strictly negative
-        transformed_col = -(softplus(latent_betas[numeraire_idx]) + 1e-5)
-        return latent_betas.at[numeraire_idx].set(transformed_col)
-    return latent_betas
+    return transform_negative_coefficient(
+        latent_betas, numeraire_idx, min_abs=numeraire_min_abs
+    )
 
 
 def _diff_unchosen_chosen(case_data: Data) -> DiffUnchosenChosen:

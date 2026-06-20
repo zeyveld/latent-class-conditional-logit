@@ -8,16 +8,17 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import Array, jacrev
+from jax import jacrev
 from jax.ops import segment_sum
 from jax.typing import ArrayLike
-from jaxtyping import Float64, install_import_hook
+from jaxtyping import Array, Float64, install_import_hook
 from pylatexenc.latex2text import LatexNodes2Text  # type: ignore
 from scipy.stats import t
 from tabulate import tabulate
 
 # Decorate `@jaxtyped(typechecker=beartype.beartype)`
 with install_import_hook("lcl", "beartype.beartype"):
+    from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS
     from lcl._case_utils import (
         _diff_unchosen_chosen,
         _loglik_gradient,
@@ -52,10 +53,15 @@ class ConditionalLogit(ChoiceModel):
         The column index of the numeraire variable in the expanded design matrix.
     """
 
-    def __init__(self, numeraire: str | None = None) -> None:
+    def __init__(
+        self,
+        numeraire: str | None = None,
+        numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
+    ) -> None:
         """Create an unfitted conditional-logit model specification."""
         super().__init__()
         self.numeraire = numeraire
+        self.numeraire_min_abs = numeraire_min_abs
         self.numeraire_idx: int | None = None
 
     def fit(
@@ -159,6 +165,7 @@ class ConditionalLogit(ChoiceModel):
             args=(diff_unchosen_chosen, weights_arr),
             mle_config=mle_config,
             numeraire_idx=self.numeraire_idx,
+            numeraire_min_abs=self.numeraire_min_abs,
         )
 
         # Build Results
@@ -214,7 +221,11 @@ class CLResults:
         self.latent_coeff_ = optim_res.params
 
         # Recover structural parameters if numeraire was applied
-        self.coeff_ = _to_structural_betas(self.latent_coeff_, self.model.numeraire_idx)
+        self.coeff_ = _to_structural_betas(
+            self.latent_coeff_,
+            self.model.numeraire_idx,
+            self.model.numeraire_min_abs,
+        )
         self.hess_inv = optim_res.hess_inv
 
         if error_config.skip_std_errs:
@@ -250,7 +261,9 @@ class CLResults:
                 p: Float64[Array, "alt_vars"],
             ) -> Float64[Array, "alt_vars"]:
                 """Map latent coefficients to structural coefficients."""
-                return _to_structural_betas(p, self.model.numeraire_idx)
+                return _to_structural_betas(
+                    p, self.model.numeraire_idx, self.model.numeraire_min_abs
+                )
 
             jac = jacrev(struct_fn)(self.latent_coeff_)
             struct_cov = jac @ self.covariance @ jac.T

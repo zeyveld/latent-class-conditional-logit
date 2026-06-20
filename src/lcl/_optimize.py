@@ -3,12 +3,17 @@ from typing import NamedTuple
 
 import jax.numpy as jnp
 from equinox import combine, is_array, partition
-from jax import Array, lax
-from jax.nn import sigmoid
+from jax import lax
 from jax.scipy.linalg import cho_factor, cho_solve
 from jaxopt import BFGS  # type: ignore[import-untyped]
-from jaxtyping import Float64
+from jaxtyping import Array, Float64
 
+from lcl.constraints import (
+    DEFAULT_NEGATIVE_MIN_ABS,
+    pullback_negative_derivatives,
+    pullback_negative_gradient,
+    pullback_negative_score_rows,
+)
 from lcl._case_utils import _to_structural_betas
 from lcl._struct import MleConfig, OptimizeResult
 
@@ -195,6 +200,7 @@ def _minimize(
     args: tuple[object, ...],
     mle_config: MleConfig | None = None,
     numeraire_idx: int | None = None,
+    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
     assert_converge: bool = False,
 ) -> OptimizeResult:
     """Execute the L-BFGS optimization routine for Maximum Likelihood Estimation.
@@ -217,6 +223,8 @@ def _minimize(
         Configuration holding tolerances and maximum iteration limits.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable, if bounded to be strictly negative.
+    numeraire_min_abs : float, default=1e-5
+        Minimum absolute value imposed on the numeraire coefficient.
     assert_converge : bool, default=False
         If True, throws an AssertionError if the solver fails to reach the
         specified tolerance.
@@ -236,7 +244,7 @@ def _minimize(
     # Evaluate the objective once to get a scaling factor.
     # This prevents BFGS from taking disastrously large initial steps
     # that push latent variables into the softplus vanishing gradient zone.
-    p_struct_init = _to_structural_betas(params, numeraire_idx)
+    p_struct_init = _to_structural_betas(params, numeraire_idx, numeraire_min_abs)
     init_eval = loglik_fn(p_struct_init, *args)
     init_res = init_eval[0]
     init_val = init_res[0] if isinstance(init_res, tuple) else init_res
@@ -246,19 +254,15 @@ def _minimize(
         p: Float64[Array, "params"], *dyn_args: object
     ) -> tuple[tuple[Array, Array], Array]:
         """Scale the objective and apply the numeraire chain rule for JAXopt."""
-        p_struct = _to_structural_betas(p, numeraire_idx)
+        p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
         all_args = combine(dyn_args, static_args)
 
         # Obtain the analytical gradient
         loglik_eval = loglik_fn(p_struct, *all_args)
         (val, aux), grad = loglik_eval[:2]
 
-        # Apply chain rule for numeraire
-        if numeraire_idx is not None:
-            # Derivative of -(softplus(x)) is -sigmoid(x)
-            derivative = -sigmoid(p[numeraire_idx])
-            grad = grad.at[numeraire_idx].multiply(derivative)
-            aux = aux.at[:, numeraire_idx].multiply(derivative)
+        grad = pullback_negative_gradient(p, numeraire_idx, grad)
+        aux = pullback_negative_score_rows(p, numeraire_idx, aux)
 
         # Normalize objective and gradient internally
         return (val / scale_factor, aux), grad / scale_factor
@@ -300,19 +304,15 @@ def _minimize(
 
     grad_n = state.aux
 
-    final_eval = loglik_fn(_to_structural_betas(params, numeraire_idx), *args)
+    final_eval = loglik_fn(
+        _to_structural_betas(params, numeraire_idx, numeraire_min_abs), *args
+    )
     if len(final_eval) == 3:
         (_, grad_n_unscaled), grad_struct, hessian = final_eval
         grad_n = grad_n_unscaled
-        if numeraire_idx is not None:
-            derivative = -sigmoid(params[numeraire_idx])
-            grad_n = grad_n.at[:, numeraire_idx].multiply(derivative)
-            hessian = hessian.at[numeraire_idx, :].multiply(derivative)
-            hessian = hessian.at[:, numeraire_idx].multiply(derivative)
-            second_deriv = derivative * (1.0 + derivative)
-            hessian = hessian.at[numeraire_idx, numeraire_idx].add(
-                grad_struct[numeraire_idx] * second_deriv
-            )
+        _, grad_n, hessian = pullback_negative_derivatives(
+            params, numeraire_idx, grad_struct, grad_n, hessian
+        )
         Hinv = jnp.linalg.pinv(0.5 * (hessian + hessian.T))
     else:
         Hinv = jnp.linalg.pinv(jnp.dot(grad_n.T, grad_n))

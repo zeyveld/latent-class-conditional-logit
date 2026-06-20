@@ -4,9 +4,9 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple, Optional, Union
 
-from jax import Array, device_count
+from jax import device_count
 from jax.typing import ArrayLike
-from jaxtyping import Bool, Float64, UInt
+from jaxtyping import Array, Bool, Float64, UInt
 
 
 @dataclass
@@ -131,6 +131,46 @@ class MleConfig:
 
 
 @dataclass
+class OptimizationOptions(MleConfig):
+    """User-facing optimizer settings.
+
+    Parameters
+    ----------
+    maxiter : int, default=75
+        Maximum Newton/BFGS iterations used inside each M-step.
+    ftol : float, default=1e-5
+        Gradient tolerance.  Kept for backward compatibility with
+        :class:`MleConfig`.
+    method : str, default="newton"
+        Optimizer family requested by the user.  The latent-class M-step currently
+        uses exact Newton updates.
+    gradient_tol : float | None, default=None
+        More descriptive alias for ``ftol``.  When supplied, it overrides
+        ``ftol``.
+    hessian_damping : float, default=1e-6
+        Reserved for explicit optimizer configuration in future releases.
+    max_step_norm : float, default=25.0
+        Reserved for explicit optimizer configuration in future releases.
+    line_search : str, default="armijo"
+        Name of the line-search strategy.
+    fallback : str, default="gradient"
+        Fallback direction when the Newton direction is not a descent direction.
+    """
+
+    method: str = "newton"
+    gradient_tol: float | None = None
+    hessian_damping: float = 1e-6
+    max_step_norm: float = 25.0
+    line_search: str = "armijo"
+    fallback: str = "gradient"
+
+    def __post_init__(self) -> None:
+        """Normalize aliases to the legacy fields consumed by internals."""
+        if self.gradient_tol is not None:
+            self.ftol = self.gradient_tol
+
+
+@dataclass
 class EMAlgConfig:
     """Container for Expectation-Maximization (EM) algorithm options."""
 
@@ -142,11 +182,110 @@ class EMAlgConfig:
 
 
 @dataclass
+class FitOptions:
+    """User-facing EM fit options.
+
+    Parameters
+    ----------
+    seed : int, default=0
+        Random seed used for panel-partition starts.
+    max_em_iter : int, default=2000
+        Maximum number of EM recursions.
+    em_tol : float, default=1e-6
+        Relative log-likelihood tolerance checked over the EM history.
+    num_devices : int, default=device_count()
+        Number of local JAX devices used for class-wise beta updates.
+    check_interval : int, default=10
+        Frequency of convergence checks.
+    starts : int, default=1
+        Reserved for future multi-start orchestration.
+    start_method : str, default="panel_partition"
+        Initialization method label.
+    refit_best_start : bool, default=True
+        Reserved for future multi-start orchestration.
+    """
+
+    seed: int = 0
+    max_em_iter: int = 2000
+    em_tol: float = 1e-6
+    num_devices: int = field(default_factory=device_count)
+    check_interval: int = 10
+    starts: int = 1
+    start_method: str = "panel_partition"
+    refit_best_start: bool = True
+
+    def to_em_config(self) -> EMAlgConfig:
+        """Convert to the internal EM configuration dataclass."""
+        return EMAlgConfig(
+            jax_prng_seed=self.seed,
+            loglik_tol=self.em_tol,
+            maxiter=self.max_em_iter,
+            num_devices=self.num_devices,
+            check_interval=self.check_interval,
+        )
+
+
+@dataclass
 class ErrorConfig:
     """Container for standard error and covariance matrix options."""
 
     robust: bool = True
     skip_std_errs: bool = False
+
+
+@dataclass
+class InferenceOptions(ErrorConfig):
+    """User-facing inference and covariance settings.
+
+    Parameters
+    ----------
+    robust : bool, default=True
+        Legacy flag controlling robust covariance calculation.
+    skip_std_errs : bool, default=False
+        Legacy flag to skip standard-error calculations.
+    covariance : str, default="clustered"
+        Covariance estimator label.  ``"none"``/``"unadjusted"`` disable the
+        sandwich correction; ``"clustered"`` and ``"robust"`` enable it.
+    cluster : str | None, default="panel"
+        Cluster level label for reports.  The current latent-class estimator
+        clusters at panel level.
+    finite_sample_correction : bool, default=True
+        Whether reports should describe the finite-sample correction.
+    skip : bool, default=False
+        Descriptive alias for ``skip_std_errs``.
+    """
+
+    covariance: str = "clustered"
+    cluster: str | None = "panel"
+    finite_sample_correction: bool = True
+    skip: bool = False
+
+    def __post_init__(self) -> None:
+        """Normalize user-facing covariance labels."""
+        covariance = self.covariance.lower()
+        if covariance in {"none", "unadjusted", "hessian"}:
+            self.robust = False
+        elif covariance in {"clustered", "robust", "sandwich"}:
+            self.robust = True
+        else:
+            raise ValueError(
+                "InferenceOptions.covariance must be one of 'clustered', "
+                "'robust', 'sandwich', 'unadjusted', or 'none'."
+            )
+        if self.skip:
+            self.skip_std_errs = True
+
+
+@dataclass
+class DiagnosticsOptions:
+    """Options controlling public diagnostic summaries."""
+
+    check_separation: bool = True
+    check_collinearity: bool = True
+    warn_near_zero_numeraire: bool = True
+    warn_large_coefficients: bool = True
+    near_zero_numeraire_threshold: float = 1e-3
+    large_coefficient_threshold: float = 25.0
 
 
 @dataclass

@@ -6,19 +6,29 @@ import pytest
 from jax.nn import softmax
 
 from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient
+from lcl.constraints import (
+    NegativeCoefficient,
+    pullback_negative_derivatives,
+    transform_negative_coefficient,
+)
 from lcl._demographics import _compute_grouped_data_loglik_grad_hess
 from lcl._em_alg_steps import _compute_panel_logliks
 from lcl._jax_compat import device_put_array_leaves
 from lcl._optimize import exact_newton_minimize
 from lcl._struct import (
     Data,
+    DiagnosticsOptions,
     EMAlgConfig,
     ErrorConfig,
+    FitOptions,
+    InferenceOptions,
     MleConfig,
+    OptimizationOptions,
     PartitionType,
     PastChoicesData,
     WTPRequest,
 )
+from lcl.spec import ChoiceIds, LCLSpec
 from lcl.conditional_logit import ConditionalLogit
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
@@ -83,6 +93,29 @@ def test_loglik_gradient_and_hessian_match_autodiff() -> None:
 
     assert jnp.allclose(grad, jax.grad(objective)(betas))
     assert jnp.allclose(hess, jax.hessian(objective)(betas))
+
+
+def test_negative_constraint_pullback_matches_autodiff() -> None:
+    raw = jnp.array([0.4, -0.2])
+    numeraire_idx = 0
+
+    def raw_objective(params):
+        structural = transform_negative_coefficient(params, numeraire_idx, min_abs=1e-3)
+        return 0.5 * structural @ jnp.array([[2.0, 0.3], [0.3, 1.5]]) @ structural
+
+    structural = transform_negative_coefficient(raw, numeraire_idx, min_abs=1e-3)
+    grad_struct = jnp.array([[2.0, 0.3], [0.3, 1.5]]) @ structural
+    hess_struct = jnp.array([[2.0, 0.3], [0.3, 1.5]])
+    score_rows = jnp.stack([grad_struct, grad_struct * 0.5])
+
+    grad_raw, score_raw, hess_raw = pullback_negative_derivatives(
+        raw, numeraire_idx, grad_struct, score_rows, hess_struct
+    )
+
+    assert jnp.allclose(grad_raw, jax.grad(raw_objective)(raw))
+    assert jnp.allclose(hess_raw, jax.hessian(raw_objective)(raw))
+    assert score_raw.shape == score_rows.shape
+    assert score_raw[0, 0] != score_rows[0, 0]
 
 
 def _demographic_data_from_dems(dems) -> Data:
@@ -301,6 +334,38 @@ def test_prediction_uses_demographics_when_no_past_choices() -> None:
     )
 
 
+def test_lcl_spec_api_custom_negative_constraint_floor() -> None:
+    df = _small_wtp_df()
+    spec = LCLSpec(
+        ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
+        utility=["cost", "time"],
+        membership=None,
+        classes=2,
+        constraints={"cost": NegativeCoefficient(min_abs=1e-3, units="dollars")},
+    )
+
+    model = LatentClassConditionalLogit(spec)
+    results = model.fit(
+        data=df,
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
+        diagnostics=DiagnosticsOptions(near_zero_numeraire_threshold=1e-3),
+    )
+
+    assert model.numeraire == "cost"
+    assert model.numeraire_min_abs == 1e-3
+    assert results.em_res.structural_betas is not None
+    assert jnp.all(results.em_res.structural_betas[model.numeraire_idx, :] <= -1e-3)
+    assert "cost [negative, min_abs=0.001]" in results.spec_summary()
+    assert results.em_history_.height >= 1
+    assert set(results.optimization_history_.columns) >= {
+        "class",
+        "grad_norm",
+        "effective_panels",
+    }
+
+
 def test_lcl_robust_covariance_and_delta_method_outputs_are_on_cpu() -> None:
     df = _small_lcl_df()
     model = LatentClassConditionalLogit(num_classes=2)
@@ -458,6 +523,72 @@ def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data(
     assert "shape:" not in captured.out
 
 
+def test_wtp_uses_stored_posterior_class_probs_with_past_choices() -> None:
+    df = _small_wtp_df()
+    model = LatentClassConditionalLogit(num_classes=2, numeraire="cost")
+    results = model.fit(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["cost", "time"],
+        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
+        mle_config=MleConfig(maxiter=2),
+        error_config=ErrorConfig(skip_std_errs=True),
+    )
+    results.em_res = results.em_res._replace(
+        structural_betas=jnp.array([[-1.0, -1.0], [2.0, 10.0]]),
+        latent_betas=jnp.array([[0.0, 0.0], [2.0, 10.0]]),
+        thetas=None,
+        shares=jnp.array([0.5, 0.5]),
+    )
+
+    prediction = results.predict(data=df, past_choices=df)
+    assert prediction.class_probabilities_source == "posterior"
+    with pytest.raises(NotImplementedError, match="posterior class update"):
+        prediction.compute_wtp(
+            WTPRequest(
+                alt_var="time",
+                demographic_var="income_quintile",
+                partition_type=PartitionType.CATEGORICAL,
+            )
+        )
+
+    tables = prediction.compute_wtp(
+        WTPRequest(
+            alt_var="time",
+            demographic_var="income_quintile",
+            partition_type=PartitionType.CATEGORICAL,
+        ),
+        se="none",
+    )
+    result_df = next(iter(tables.values())).sort("income_quintile")
+
+    posterior = onp.asarray(prediction.class_probs_by_panel)
+    ratios = onp.array([2.0, 10.0])
+    panels = prediction.wtp_alt_vars_by_panel.select(["panels"]).with_row_index(
+        "panel_idx"
+    )
+    assert prediction.partition_data is not None
+    partitions = prediction.partition_data.select(["panels", "income_quintile"])
+    manual_df = panels.join(partitions, on="panels").with_columns(
+        pl.Series("manual", posterior @ ratios)
+    )
+    manual_summary = (
+        manual_df.group_by("income_quintile", maintain_order=True)
+        .agg(pl.col("manual").mean().alias("manual"))
+        .sort("income_quintile")
+    )
+
+    assert onp.allclose(
+        result_df["Mean_Marginal_WTP"].to_numpy(),
+        manual_summary["manual"].to_numpy(),
+    )
+    assert result_df["SE_Method"].unique().to_list() == ["none"]
+    assert result_df["Standard_Error"].is_nan().all()
+
+
 def test_formula_encoder_drops_unidentified_intercepts() -> None:
     df = _small_lcl_df()
     model = LatentClassConditionalLogit(num_classes=2)
@@ -479,6 +610,92 @@ def test_formula_encoder_drops_unidentified_intercepts() -> None:
     assert parsed.X.shape == (df.height, 1)
     assert parsed.dems is not None
     assert parsed.dems.shape == (2, 1)
+
+
+def test_formula_string_categorical_base_reused_in_prediction() -> None:
+    rows = []
+    for panel, segment in [(10, "low"), (20, "high"), (30, "middle")]:
+        for case in [1, 2]:
+            chosen = "rail" if (panel + case) % 2 else "bus"
+            for alt, mode in enumerate(["bus", "car", "rail"]):
+                rows.append(
+                    {
+                        "panel": panel,
+                        "case": case,
+                        "alt": alt,
+                        "choice": mode == chosen,
+                        "cost": float(alt + case),
+                        "mode": mode,
+                        "segment": segment,
+                    }
+                )
+    df = pl.DataFrame(rows)
+    model = LatentClassConditionalLogit(num_classes=2)
+
+    parsed_fit = model._ingest_data(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        formula="choice ~ cost + mode | segment",
+        choice_col=None,
+        case_varnames=None,
+        dem_varnames=None,
+        dems_data=None,
+    )
+    parsed_pred = model._transform_data(df)
+
+    assert parsed_fit.case_varnames == parsed_pred.case_varnames
+    assert parsed_fit.dem_varnames == parsed_pred.dem_varnames
+    assert jnp.allclose(parsed_fit.X, parsed_pred.X)
+    assert parsed_fit.dems is not None
+    assert parsed_pred.dems is not None
+    assert jnp.allclose(parsed_fit.dems, parsed_pred.dems)
+
+    mode_cols = [
+        idx for idx, name in enumerate(parsed_fit.case_varnames) if "mode" in name
+    ]
+    segment_cols = [
+        idx
+        for idx, name in enumerate(parsed_fit.dem_varnames or [])
+        if "segment" in name
+    ]
+    assert mode_cols
+    assert segment_cols
+
+    sorted_modes = df.sort(["panel", "case", "alt"])["mode"].to_numpy()
+    fit_modes = (
+        pl.DataFrame(
+            {
+                "mode": sorted_modes,
+                "pattern": [
+                    tuple(row)
+                    for row in onp.asarray(parsed_fit.X[:, mode_cols], dtype=float)
+                ],
+            }
+        )
+        .group_by("mode")
+        .agg(pl.col("pattern").first())
+    )
+    pred_modes = (
+        pl.DataFrame(
+            {
+                "mode": sorted_modes,
+                "pattern": [
+                    tuple(row)
+                    for row in onp.asarray(parsed_pred.X[:, mode_cols], dtype=float)
+                ],
+            }
+        )
+        .group_by("mode")
+        .agg(pl.col("pattern").first())
+    )
+    fit_patterns = dict(fit_modes.iter_rows())
+    pred_patterns = dict(pred_modes.iter_rows())
+    assert fit_patterns == pred_patterns
+    assert any(
+        all(value == 0.0 for value in pattern) for pattern in fit_patterns.values()
+    )
 
 
 def test_demographic_formula_intercept_only_means_no_demographics() -> None:
