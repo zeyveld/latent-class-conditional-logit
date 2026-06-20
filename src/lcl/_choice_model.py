@@ -56,6 +56,8 @@ class ChoiceModel(ABC):
         case_varnames: Sequence[str] | None,
         dem_varnames: Sequence[str] | None,
         dems_data: Any | None,
+        utility_formula: str | None = None,
+        membership_formula: str | None = None,
     ) -> ParsedData:
         """The core ingestion layer: Converts flexible user inputs into strict matrices.
 
@@ -74,7 +76,15 @@ class ChoiceModel(ABC):
         panels_col : str
             Name of the column mapping observations to specific decision-makers.
         formula : str | None
-            R-style formula string (e.g., "choice ~ price + C(brand) | income").
+            Backward-compatible combined Formulaic string such as
+            ``"choice ~ price + C(brand) | income"``.
+        utility_formula : str | None, optional
+            Formulaic string for the alternative-specific utility specification,
+            such as ``"choice ~ price + C(brand)"``.  A right-hand-side-only
+            formula may be used when ``choice_col`` is supplied.
+        membership_formula : str | None, optional
+            Right-hand-side Formulaic string for class membership demographics,
+            such as ``"~ income + C(segment)"``.
         choice_col : str | None
             Name of the boolean/binary column indicating chosen alternatives.
         case_varnames : Sequence[str] | None
@@ -94,6 +104,8 @@ class ChoiceModel(ABC):
             cases_col=cases_col,
             panels_col=panels_col,
             formula=formula,
+            utility_formula=utility_formula,
+            membership_formula=membership_formula,
             choice_col=choice_col,
             explicit_case_varnames=case_varnames,
             explicit_dem_varnames=dem_varnames,

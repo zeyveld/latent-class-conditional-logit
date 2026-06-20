@@ -115,6 +115,8 @@ class LatentClassConditionalLogit(ChoiceModel):
         cases_col: str | None = None,
         panels_col: str | None = None,
         formula: str | None = None,
+        utility_formula: str | None = None,
+        membership_formula: str | None = None,
         choice_col: str | None = None,
         case_varnames: Sequence[str] | None = None,
         dem_varnames: Sequence[str] | None = None,
@@ -149,8 +151,17 @@ class LatentClassConditionalLogit(ChoiceModel):
             The name of the column mapping choice situations to specific
             decision-makers (panels).
         formula : str | None, default=None
-            An R-style formula string (e.g., "choice ~ price + time | income").
-            If provided, overrides `choice_col`, `case_varnames`, and `dem_varnames`.
+            Backward-compatible combined Formulaic string, for example
+            ``"choice ~ price + time | income + C(segment)"``.  Prefer
+            ``utility_formula`` and ``membership_formula`` in new code.
+        utility_formula : str | None, default=None
+            Formulaic string for the alternative-specific utility specification.
+            Examples include ``"choice ~ cost + time + C(mode)"`` or, when
+            ``choice_col`` supplies the outcome, ``"~ cost + time + C(mode)"``.
+        membership_formula : str | None, default=None
+            Right-hand-side Formulaic string for class-membership demographics,
+            for example ``"~ income + C(segment)"``.  A left-hand side is not
+            accepted because latent class labels are unobserved.
         choice_col : str | None, default=None
             The name of the boolean or binary column indicating chosen alternatives.
             Required if `formula` is not provided.
@@ -188,10 +199,21 @@ class LatentClassConditionalLogit(ChoiceModel):
             panels_col = panels_col or self.spec.ids.panel
             choice_col = choice_col or self.spec.ids.choice
             formula = formula if formula is not None else self.spec.formula
-            if formula is None:
+            utility_formula = (
+                utility_formula
+                if utility_formula is not None
+                else self.spec.utility_formula
+            )
+            membership_formula = (
+                membership_formula
+                if membership_formula is not None
+                else self.spec.membership_formula
+            )
+            if formula is None and utility_formula is None:
                 case_varnames = (
                     case_varnames if case_varnames is not None else self.spec.utility
                 )
+            if formula is None and membership_formula is None:
                 dem_varnames = (
                     dem_varnames if dem_varnames is not None else self.spec.membership
                 )
@@ -223,6 +245,8 @@ class LatentClassConditionalLogit(ChoiceModel):
             cases_col=cases_col,
             panels_col=panels_col,
             formula=formula,
+            utility_formula=utility_formula,
+            membership_formula=membership_formula,
             choice_col=choice_col,
             case_varnames=case_varnames,
             dem_varnames=dem_varnames,

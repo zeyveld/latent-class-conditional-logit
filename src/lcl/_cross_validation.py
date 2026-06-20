@@ -22,6 +22,8 @@ def cv_optimal_classes(
     panels_col: str | None = None,
     num_classes_list: Sequence[int] | None = None,
     formula: Optional[str] = None,
+    utility_formula: str | None = None,
+    membership_formula: str | None = None,
     choice_col: Optional[str] = None,
     case_varnames: Optional[Sequence[str]] = None,
     dem_varnames: Optional[Sequence[str]] = None,
@@ -67,7 +69,14 @@ def cv_optimal_classes(
         A sequence of integers specifying the numbers of latent classes to evaluate
         (e.g., [2, 3, 4, 5, 10, 15, 20]).
     formula : str | None, optional
-        R-style formula string (e.g., "choice ~ price + C(brand) | income").
+        Backward-compatible combined Formulaic string, for example
+        ``"choice ~ price + C(brand) | income"``.
+    utility_formula : str | None, optional
+        Formulaic string for the utility design, such as
+        ``"choice ~ price + C(brand)"``.
+    membership_formula : str | None, optional
+        Right-hand-side Formulaic string for class-membership demographics, such
+        as ``"~ income + C(segment)"``.
     choice_col : str | None, optional
         Name of the boolean/binary column indicating chosen alternatives.
     case_varnames : Sequence[str] | None, optional
@@ -107,7 +116,9 @@ def cv_optimal_classes(
     """
     if isinstance(alts_col, LCLSpec):
         if spec is not None:
-            raise ValueError("Pass an LCLSpec either positionally or via spec=, not both.")
+            raise ValueError(
+                "Pass an LCLSpec either positionally or via spec=, not both."
+            )
         spec = alts_col
         alts_col = None
 
@@ -117,8 +128,17 @@ def cv_optimal_classes(
         panels_col = panels_col or spec.ids.panel
         choice_col = choice_col or spec.ids.choice
         formula = formula if formula is not None else spec.formula
-        if formula is None:
+        utility_formula = (
+            utility_formula if utility_formula is not None else spec.utility_formula
+        )
+        membership_formula = (
+            membership_formula
+            if membership_formula is not None
+            else spec.membership_formula
+        )
+        if formula is None and utility_formula is None:
             case_varnames = case_varnames if case_varnames is not None else spec.utility
+        if formula is None and membership_formula is None:
             dem_varnames = dem_varnames if dem_varnames is not None else spec.membership
         numeraire = numeraire or spec.numeraire
 
@@ -180,6 +200,8 @@ def cv_optimal_classes(
                     cases_col=cases_col,
                     panels_col=panels_col,
                     formula=formula,
+                    utility_formula=utility_formula,
+                    membership_formula=membership_formula,
                     choice_col=choice_col,
                     case_varnames=case_varnames,
                     dem_varnames=dem_varnames,
@@ -196,6 +218,8 @@ def cv_optimal_classes(
                     cases_col=cases_col,
                     panels_col=panels_col,
                     formula=formula,
+                    utility_formula=utility_formula,
+                    membership_formula=membership_formula,
                     choice_col=choice_col,
                     case_varnames=case_varnames,
                     dem_varnames=dem_varnames,

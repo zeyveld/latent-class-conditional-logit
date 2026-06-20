@@ -71,6 +71,7 @@ class ConditionalLogit(ChoiceModel):
         cases_col: str,
         panels_col: str | None = None,
         formula: str | None = None,
+        utility_formula: str | None = None,
         choice_col: str | None = None,
         case_varnames: Sequence[str] | None = None,
         weights: ArrayLike | None = None,
@@ -95,8 +96,12 @@ class ConditionalLogit(ChoiceModel):
             the covariance matrix is automatically clustered at the panel level. If omitted,
             standard Huber-White robust standard errors are computed.
         formula : str | None, optional
-            R-style formula string (e.g., "choice ~ price + C(brand)").
-            If provided, `choice_col` and `case_varnames` are ignored.
+            Backward-compatible Formulaic string, for example
+            ``"choice ~ price + C(brand)"``.
+        utility_formula : str | None, optional
+            Preferred Formulaic string for the alternative-specific utility
+            specification.  If it includes a left-hand side, that outcome is used
+            as the choice indicator; otherwise ``choice_col`` must be provided.
         choice_col : str | None, optional
             Name of the boolean/binary column indicating chosen alternatives.
         case_varnames : Sequence[str] | None, optional
@@ -130,6 +135,8 @@ class ConditionalLogit(ChoiceModel):
             cases_col=cases_col,
             panels_col=_internal_panels_col,
             formula=formula,
+            utility_formula=utility_formula,
+            membership_formula=None,
             choice_col=choice_col,
             case_varnames=case_varnames,
             dem_varnames=None,  # Standard CL does not take demographics

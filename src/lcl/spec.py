@@ -45,17 +45,27 @@ class LCLSpec:
         Identifier and choice columns for the long-format dataset.
     utility : Sequence[str] | None, default=None
         Alternative-specific variables in the utility specification.  Omit when
-        ``formula`` provides the complete patsy-style specification.
+        ``utility_formula`` or legacy ``formula`` provides the utility design.
     membership : Sequence[str] | None, default=None
-        Panel-level variables for class-membership probabilities.
+        Panel-level variables for class-membership probabilities.  Omit when
+        ``membership_formula`` or legacy ``formula`` provides the demographic
+        design.
     classes : int, default=2
         Number of latent classes.
     constraints : mapping or sequence, optional
         Coefficient constraints.  The current estimation engine supports one
         negative coefficient, typically a price, cost, or travel-time numeraire.
     formula : str | None, default=None
-        Patsy-style formula parsed by Formulaic.  When supplied, it overrides
-        ``utility`` and ``membership`` during data ingestion.
+        Backward-compatible combined Formulaic string such as
+        ``"choice ~ cost + time | income + C(segment)"``.  Prefer
+        ``utility_formula`` and ``membership_formula`` in new code.
+    utility_formula : str | None, default=None
+        Formulaic string for the alternative-specific utility specification, such
+        as ``"choice ~ cost + C(mode)"``.  A right-hand-side-only utility formula
+        is permitted when the choice column is supplied by :class:`ChoiceIds`.
+    membership_formula : str | None, default=None
+        Right-hand-side Formulaic string for the class-membership demographic
+        regression, such as ``"~ income + C(segment)"``.
     """
 
     ids: ChoiceIds
@@ -66,12 +76,21 @@ class LCLSpec:
         Mapping[str, NegativeCoefficient] | Sequence[NegativeCoefficient] | None
     ) = None
     formula: str | None = None
+    utility_formula: str | None = None
+    membership_formula: str | None = None
 
     def __post_init__(self) -> None:
         """Validate internal consistency."""
         if self.classes < 2:
             raise ValueError("LCLSpec.classes must be at least 2.")
-        if self.formula is None and not self.utility:
+        if self.formula is not None and (
+            self.utility_formula is not None or self.membership_formula is not None
+        ):
+            raise ValueError(
+                "Use either legacy formula=... or utility_formula=.../"
+                "membership_formula=..., not both."
+            )
+        if self.formula is None and self.utility_formula is None and not self.utility:
             raise ValueError("LCLSpec requires either utility variables or a formula.")
         if len(self.negative_constraints) > 1:
             raise NotImplementedError(
@@ -119,6 +138,8 @@ class LCLSpec:
         ]
         if self.formula is not None:
             lines.append(f"  formula: {self.formula}")
+        elif self.utility_formula is not None:
+            lines.append(f"  formula: {self.utility_formula}")
         else:
             for variable in self.utility or []:
                 suffix = ""
@@ -130,6 +151,8 @@ class LCLSpec:
         lines.append("Class-membership variables:")
         if self.membership:
             lines.extend(f"  {variable}" for variable in self.membership)
+        elif self.membership_formula is not None:
+            lines.append(f"  formula: {self.membership_formula}")
         elif self.formula is not None:
             lines.append("  from formula")
         else:

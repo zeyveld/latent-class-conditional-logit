@@ -5,6 +5,7 @@ import polars as pl
 import pytest
 from jax.nn import softmax
 
+import lcl
 from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient
 from lcl.constraints import (
     NegativeCoefficient,
@@ -366,6 +367,32 @@ def test_lcl_spec_api_custom_negative_constraint_floor() -> None:
     }
 
 
+def test_lcl_spec_accepts_separate_formula_fields() -> None:
+    df = _small_lcl_df().with_columns(
+        pl.when(pl.col("dem") > 0)
+        .then(pl.lit("treated"))
+        .otherwise(pl.lit("control"))
+        .alias("segment")
+    )
+    spec = LCLSpec(
+        ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
+        utility_formula="choice ~ x",
+        membership_formula="~ C(segment)",
+        classes=2,
+    )
+
+    results = lcl.fit(
+        df,
+        spec,
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
+    )
+
+    assert results.model.case_varnames == ["x"]
+    assert results.model.dem_varnames == ["C(segment)[T.treated]"]
+
+
 def test_lcl_robust_covariance_and_delta_method_outputs_are_on_cpu() -> None:
     df = _small_lcl_df()
     model = LatentClassConditionalLogit(num_classes=2)
@@ -696,6 +723,118 @@ def test_formula_string_categorical_base_reused_in_prediction() -> None:
     assert any(
         all(value == 0.0 for value in pattern) for pattern in fit_patterns.values()
     )
+
+
+def test_separate_utility_and_membership_formulas_reuse_categorical_bases() -> None:
+    rows = []
+    for panel, segment in [(10, "low"), (20, "high"), (30, "middle")]:
+        for case in [1, 2]:
+            chosen = "rail" if (panel + case) % 2 else "bus"
+            for alt, mode in enumerate(["bus", "car", "rail"]):
+                rows.append(
+                    {
+                        "panel": panel,
+                        "case": case,
+                        "alt": alt,
+                        "choice": mode == chosen,
+                        "cost": float(alt + case),
+                        "mode": mode,
+                        "segment": segment,
+                    }
+                )
+    df = pl.DataFrame(rows)
+    model = LatentClassConditionalLogit(num_classes=2)
+
+    parsed_fit = model._ingest_data(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        formula=None,
+        utility_formula="choice ~ cost + mode",
+        membership_formula="~ segment",
+        choice_col=None,
+        case_varnames=None,
+        dem_varnames=None,
+        dems_data=None,
+    )
+    parsed_pred = model._transform_data(df)
+
+    assert parsed_fit.case_varnames == parsed_pred.case_varnames
+    assert parsed_fit.dem_varnames == parsed_pred.dem_varnames
+    assert jnp.allclose(parsed_fit.X, parsed_pred.X)
+    assert parsed_fit.dems is not None
+    assert parsed_pred.dems is not None
+    assert jnp.allclose(parsed_fit.dems, parsed_pred.dems)
+    assert any("mode" in name for name in parsed_fit.case_varnames)
+    assert any("segment" in name for name in parsed_fit.dem_varnames or [])
+    assert any(
+        all(value == 0.0 for value in row)
+        for row in onp.asarray(parsed_fit.dems, dtype=float)
+    )
+
+
+def test_membership_formula_accepts_external_demographics() -> None:
+    rows = []
+    for panel, segment in [(10, "low"), (20, "high"), (30, "middle")]:
+        for case in [1, 2]:
+            for alt, mode in enumerate(["bus", "rail"]):
+                rows.append(
+                    {
+                        "panel": panel,
+                        "case": case,
+                        "alt": alt,
+                        "choice": mode == ("rail" if case == 1 else "bus"),
+                        "cost": float(alt + case),
+                        "mode": mode,
+                    }
+                )
+    df = pl.DataFrame(rows)
+    dems = pl.DataFrame(
+        {
+            "panel": [10, 20, 30],
+            "segment": ["low", "high", "middle"],
+        }
+    )
+    model = LatentClassConditionalLogit(num_classes=2)
+
+    parsed = model._ingest_data(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        formula=None,
+        utility_formula="choice ~ cost + mode",
+        membership_formula="~ segment",
+        choice_col=None,
+        case_varnames=None,
+        dem_varnames=None,
+        dems_data=dems,
+    )
+
+    assert parsed.dems is not None
+    assert parsed.dems.shape[0] == 3
+    assert any("segment" in name for name in parsed.dem_varnames or [])
+
+
+def test_membership_formula_rejects_left_hand_side() -> None:
+    df = _small_lcl_df()
+    model = LatentClassConditionalLogit(num_classes=2)
+
+    with pytest.raises(ValueError, match="membership_formula must be"):
+        model._ingest_data(
+            data=df,
+            alts_col="alt",
+            cases_col="case",
+            panels_col="panel",
+            formula=None,
+            utility_formula="choice ~ x",
+            membership_formula="segment ~ dem",
+            choice_col=None,
+            case_varnames=None,
+            dem_varnames=None,
+            dems_data=None,
+        )
 
 
 def test_demographic_formula_intercept_only_means_no_demographics() -> None:
