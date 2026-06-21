@@ -15,7 +15,7 @@ Although I'm an economist by training, this package is intended for all social s
 
 ## Key features
 
-- **A declarative, high-level API.** Describe the model once with an `LCLSpec`—identifier columns, utility and class-membership variables, and the numeraire constraint—then hand it to `lcl.fit`. Estimation, optimizer, inference, and diagnostic behaviour are each tuned through a single grouped options object (`FitOptions`, `OptimizationOptions`, `InferenceOptions`, `DiagnosticsOptions`), so you rarely touch the lower-level machinery.
+- **A declarative, high-level API.** Describe the model once with an `LCLSpec`—identifier columns, patsy-style utility and class-membership formulas (or plain column lists), and the numeraire constraint—then hand it to `lcl.fit`. Estimation, optimizer, inference, and diagnostic behaviour are each tuned through a single grouped options object (`FitOptions`, `OptimizationOptions`, `InferenceOptions`, `DiagnosticsOptions`), so you rarely touch the lower-level machinery.
 - **`LatentClassConditionalLogit`**: finite-mixture conditional logit with a fractional-response multinomial logit regression of class membership on demographics.
 - **`ConditionalLogit`**: standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
 - **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Pass the same `LCLSpec` you fit with. Folds are split at the decision-maker level, so no individuals' choices appear in both training and hold-out data.
@@ -75,12 +75,13 @@ for panel in range(n_panels):
 
 df = pl.DataFrame(rows)
 
-# Describe the model once: identifier columns, the utility and class-membership
-# variables, and a strictly-negative price coefficient (the numeraire).
+# Describe the model once: identifier columns, patsy-style utility and
+# class-membership formulas, and a strictly-negative price coefficient (the
+# numeraire). Use C(col) to expand a categorical; here every term is continuous.
 spec = LCLSpec(
     ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
-    utility=["price", "quality"],
-    membership=["income"],
+    utility_formula="choice ~ price + quality",
+    membership_formula="~ income",
     classes=2,
     constraints={"price": NegativeCoefficient()},
 )

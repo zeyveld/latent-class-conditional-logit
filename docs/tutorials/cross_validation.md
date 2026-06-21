@@ -9,7 +9,7 @@ Choosing the number of latent classes is an important modelling decision for any
 
 ## Running the sweep
 
-Let's re-use the long-format Apollo frame *and the `LCLSpec`* from the [estimation tutorial](estimation.md). Passing the same spec keeps the column mapping and the `cost` numeraire in one place; `num_classes_list` then sweeps the class count, overriding `spec.classes`. The search below evaluates two, three, four, and five classes with three-fold CV. To keep the example speedy on a single device, we trim the inner EM loop to twenty-five iterations; in practice you'd loosen this when the optimum is already obvious from a coarse sweep.
+Let's re-use the long-format Apollo frame (with the `income_band` column) *and the formula-based `LCLSpec`* from the [estimation tutorial](estimation.md). Passing the same spec keeps the column mapping, the `C(alt)` constants, the `C(income_band)` membership terms, and the `cost` numeraire in one place; `num_classes_list` then sweeps the class count, overriding `spec.classes`. Each fold re-fits the formula from scratch, so the categorical base levels are learned per training fold. The search below evaluates two, three, four, and five classes with three-fold CV. To keep the example speedy on a single device, we trim the inner EM loop to twenty-five iterations; in practice you'd loosen this when the optimum is already obvious from a coarse sweep.
 
 ```python
 import lcl
@@ -23,8 +23,8 @@ from lcl import (
 
 spec = LCLSpec(
     ids=ChoiceIds(alt="alt", case="qID", panel="ID", choice="choice"),
-    utility=["cost", "time"],
-    membership=["income", "female"],
+    utility_formula="choice ~ cost + time + C(alt)",
+    membership_formula="~ C(income_band) + female",
     constraints={"cost": NegativeCoefficient()},
 )
 
@@ -47,14 +47,14 @@ shape: (4, 2)
 │ ---         ┆ ---          │
 │ i64         ┆ f64          │
 ╞═════════════╪══════════════╡
-│ 2           ┆ -2554.779595 │
-│ 3           ┆ -2544.394819 │
-│ 4           ┆ -2543.20671  │
-│ 5           ┆ -2543.117616 │
+│ 2           ┆ -2178.832849 │
+│ 3           ┆ -2148.768403 │
+│ 4           ┆ -2147.733992 │
+│ 5           ┆ -2148.063559 │
 └─────────────┴──────────────┘
 ```
 
-The out-of-sample log-likelihood rises sharply from two to three classes, increases marginally at four, and remains essentially flat at five. On Apollo, three or four classes are defensible choices; the diminishing returns past four suggest that a fifth component is fitting noise.
+The out-of-sample log-likelihood rises sharply from two to three classes, edges up to a peak at four, and then slips back at five. On this richer specification four classes is the clear choice; the decline past four is the telltale sign of a fifth component fitting noise rather than signal.
 
 ## Plotting the curve
 

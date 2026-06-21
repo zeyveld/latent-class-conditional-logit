@@ -74,12 +74,13 @@ for panel in range(n_panels):
 
 df = pl.DataFrame(rows)
 
-# Describe the model once, then fit it. The numeraire (price) is declared as a
-# strictly-negative coefficient; options are grouped, not scattered keywords.
+# Describe the model once with patsy-style formulas, then fit it. The numeraire
+# (price) is declared as a strictly-negative coefficient; options are grouped, not
+# scattered keywords. Use C(col) to expand a categorical (every term here is continuous).
 spec = LCLSpec(
     ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
-    utility=["price", "quality"],
-    membership=["income"],
+    utility_formula="choice ~ price + quality",
+    membership_formula="~ income",
     classes=2,
     constraints={"price": NegativeCoefficient()},
 )

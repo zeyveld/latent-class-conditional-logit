@@ -1,6 +1,6 @@
 # Estimation & counterfactuals
 
-This tutorial fits a three-class latent-class conditional logit on the Apollo `modeChoice` dataset, then uses the estimated model to evaluate a counterfactual fare increase and compute the value of time across income quintiles. The goal is to illustrate a standard end-to-end workflow.
+This tutorial fits a three-class latent-class conditional logit on the Apollo `modeChoice` dataset using patsy-style formulas (with `C(...)` categoricals), then uses the estimated model to evaluate a counterfactual fare increase and compute the value of time across income bands. The goal is to illustrate a standard end-to-end workflow.
 
 ## 1. Reshape the data
 
@@ -62,9 +62,12 @@ shape: (8, 9)
 
 ## 2. Estimate the model
 
-Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparameterization). We'll model class membership as a function of two demographic variables: income and an indicator for being female.
+Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparameterization). Rather than enumerate the design columns by hand, we describe the utility and class-membership equations with **Formulaic (patsy-style) formula strings**, which buys us two things at once:
 
-The whole model lives in one `LCLSpec`. The numeraire is declared as a `NegativeCoefficient` constraint—optionally annotated with its units and a warning threshold—and the grouped options objects replace the scattered `em_alg_config`/`mle_config`/`error_config` keywords.
+- `C(alt)` expands the string mode column (`car`, `bus`, `air`, `rail`) into a set of **alternative-specific constants**. Formulaic builds the dummies—and reuses the same base level at prediction time—so we never one-hot encode the categorical by hand.
+- the class-membership equation is just a right-hand-side formula, and `C(income_band)` brings a categorical demographic into the membership design the same way.
+
+So we first bin household income into a string `income_band` (a panel-level categorical), then declare the model. The numeraire is a `NegativeCoefficient` constraint, and the grouped options objects replace the scattered `em_alg_config`/`mle_config`/`error_config` keywords.
 
 ```python
 import lcl
@@ -77,10 +80,18 @@ from lcl import (
     OptimizationOptions,
 )
 
+# A string categorical demographic; income is constant within a decision-maker.
+df_long = df_long.with_columns(
+    pl.col("income")
+      .qcut(3, labels=["low", "mid", "high"])
+      .cast(pl.String)
+      .alias("income_band")
+)
+
 spec = LCLSpec(
     ids=ChoiceIds(alt="alt", case="qID", panel="ID", choice="choice"),
-    utility=["cost", "time"],
-    membership=["income", "female"],
+    utility_formula="choice ~ cost + time + C(alt)",
+    membership_formula="~ C(income_band) + female",
     classes=3,
     constraints={"cost": NegativeCoefficient(units="dollars")},
 )
@@ -98,7 +109,7 @@ print(results)
 ```
 
 ```text
-Estimation time: 16.586 seconds
+Estimation time: 14.165 seconds
 
 --- LaTeX Output ---
 
@@ -106,31 +117,46 @@ Estimation time: 16.586 seconds
 Variable & Means (\beta's) & Standard deviations (\sigma's) \\
 \midrule
 %
-cost & -0.046 & 0.010 \\
- & (0.001) & (0.002) \\
-time & -0.011 & 0.003 \\
- & (0.000) & (0.000) \\
+cost & -0.061 & 0.024 \\
+ & (0.002) & (0.002) \\
+time & -0.011 & 0.001 \\
+ & (0.001) & (0.001) \\
+C(alt)[T.bus] & -1.750 & 1.371 \\
+ & (0.230) & (0.313) \\
+C(alt)[T.car] & 1.085 & 0.742 \\
+ & (0.130) & (0.150) \\
+C(alt)[T.rail] & 0.418 & 0.321 \\
+ & (0.057) & (0.066) \\
 %
 \bottomrule
 
 --- Table preview ---
 
-┌────────────┬───────────────┬─────────────────────────────┐
-│ Variable   │ Means (β's)   │ Standard deviations (σ's)   │
-├────────────┼───────────────┼─────────────────────────────┤
-│ cost       │ -0.046        │ 0.010                       │
-│            │ (0.001)       │ (0.002)                     │
-│ time       │ -0.011        │ 0.003                       │
-│            │ (0.000)       │ (0.000)                     │
-└────────────┴───────────────┴─────────────────────────────┘
+┌────────────────┬───────────────┬─────────────────────────────┐
+│ Variable       │ Means (β's)   │ Standard deviations (σ's)   │
+├────────────────┼───────────────┼─────────────────────────────┤
+│ cost           │ -0.061        │ 0.024                       │
+│                │ (0.002)       │ (0.002)                     │
+│ time           │ -0.011        │ 0.001                       │
+│                │ (0.001)       │ (0.001)                     │
+│ C(alt)[T.bus]  │ -1.750        │ 1.371                       │
+│                │ (0.230)       │ (0.313)                     │
+│ C(alt)[T.car]  │ 1.085         │ 0.742                       │
+│                │ (0.130)       │ (0.150)                     │
+│ C(alt)[T.rail] │ 0.418         │ 0.321                       │
+│                │ (0.057)       │ (0.066)                     │
+└────────────────┴───────────────┴─────────────────────────────┘
 
-<LCLResults: 3 Classes | Converged | Log likelihood: -7618.6 | CAIC: 15323.8 | BIC: 15311.8 | Adj. BIC: 15240.9>
+<LCLResults: 3 Classes | Converged | Log likelihood: -6413.8 | CAIC: 12993.6 | BIC: 12970.6 | Adj. BIC: 12834.2>
 ```
+
+!!! note "Formulas or explicit lists?"
+    `LCLSpec` also accepts plain `utility=[...]` / `membership=[...]` column lists in place of the formula strings; the two interfaces are interchangeable. Reach for formulas when you want `C(...)` categoricals, interactions, or transformations; reach for the lists when your columns are already model-ready. (A combined `formula="choice ~ cost + time + C(alt) | C(income_band) + female"` is also accepted, but the split `utility_formula`/`membership_formula` pair reads more clearly.)
 
 !!! tip "Watching the EM iterations"
     By default LCL prints only the final summary. It routes per-iteration progress (`EM recursion: …`, `Computing LCL covariance matrix`, the information criteria) through the standard library `logging` module, so a one-liner—`import logging; logging.basicConfig(level=logging.INFO)`—surfaces the full trace when you want it.
 
-The table reports population-level moments of the structural β's—that is, the share-weighted mean and standard deviation across latent classes—with Delta-method standard errors in parentheses. The class-specific coefficients are available with `results.class_coefficients()` and the latent-class composition with `results.class_shares()`; both feature in the diagnostics below.
+`summarize_betas()` reports population-level moments of the structural β's—the share-weighted mean and standard deviation across latent classes—with Delta-method standard errors in parentheses. Formulaic named the expanded columns for us: `C(alt)[T.bus]`, `C(alt)[T.car]`, and `C(alt)[T.rail]` are the alternative-specific constants relative to the omitted base (air), so on average travellers favour car and rail over air and shun the bus, holding cost and time fixed. The class-specific coefficients—including how each class weights those constants—are available with `results.class_coefficients()` and the latent-class composition with `results.class_shares()`; both feature in the diagnostics below.
 
 ## 3. Inspect the fit with the diagnostic tools
 
@@ -141,17 +167,17 @@ results.diagnostics().print()
 ```
 
 ```text
-section       check                   status            value  message
-------------  ----------------------  --------  -------------  ----------------------------------------------------------
-fit           converged               ok            1          EM convergence flag.
-fit           log_likelihood          ok        -7618.63       Final unconditional log likelihood.
-data          panels                  ok          500          Number of decision-maker panels.
-data          cases                   ok         8000          Number of choice situations.
-latent_class  posterior_entropy_mean  ok            0.370441   Mean entropy of posterior class membership.
-latent_class  min_class_share         ok            0.193648   Small classes can indicate weakly identified local optima.
-latent_class  min_effective_panels    ok           96.8239     Smallest posterior panel mass across classes.
-coefficients  max_abs_beta            ok            0.0637565  Largest absolute structural coefficient.
-coefficients  min_abs_numeraire       ok            0.03708    Small numeraires can dominate WTP/tradeoff ratios.
+section       check                   status           value  message
+------------  ----------------------  --------  ------------  ----------------------------------------------------------
+fit           converged               ok            1         EM convergence flag.
+fit           log_likelihood          ok        -6413.84      Final unconditional log likelihood.
+data          panels                  ok          500         Number of decision-maker panels.
+data          cases                   ok         8000         Number of choice situations.
+latent_class  posterior_entropy_mean  ok            0.278251  Mean entropy of posterior class membership.
+latent_class  min_class_share         ok            0.241837  Small classes can indicate weakly identified local optima.
+latent_class  min_effective_panels    ok          120.919     Smallest posterior panel mass across classes.
+coefficients  max_abs_beta            ok            3.74922   Largest absolute structural coefficient.
+coefficients  min_abs_numeraire       ok            0.035543  Small numeraires can dominate WTP/tradeoff ratios.
 ```
 
 The thresholds behind the `warning` flags are tunable through `DiagnosticsOptions` at fit time (for example, `DiagnosticsOptions(large_coefficient_threshold=10.0)`). For a one-glance convergence summary, call `convergence_report()`:
@@ -162,10 +188,10 @@ print(results.convergence_report())
 
 ```text
 Converged: True
-EM recursions: 40
-Final log likelihood: -7618.63
+EM recursions: 30
+Final log likelihood: -6413.84
 Warnings: 0
-Last EM history row: {'em_iter': 40, 'loglik': -7618.634492495526, 'class_0_share': 0.4367277421868584, 'class_1_share': 0.19364779816101987, 'class_2_share': 0.36962445965212176}
+Last EM history row: {'em_iter': 30, 'loglik': -6413.840653814358, 'class_0_share': 0.24183714729667438, 'class_1_share': 0.305060238815295, 'class_2_share': 0.45310261388803075}
 ```
 
 The latent-class composition deserves a look as well. `class_shares()` reports each class's aggregate share alongside its posterior ("effective") panel mass, and `class_coefficients()` returns the class-specific structural β's that the population moments above average over.
@@ -182,26 +208,35 @@ shape: (3, 3)
 │ ---   ┆ ---      ┆ ---              │
 │ i64   ┆ f64      ┆ f64              │
 ╞═══════╪══════════╪══════════════════╡
-│ 0     ┆ 0.436728 ┆ 218.363871       │
-│ 1     ┆ 0.193648 ┆ 96.823899        │
-│ 2     ┆ 0.369624 ┆ 184.81223        │
+│ 0     ┆ 0.241837 ┆ 120.918571       │
+│ 1     ┆ 0.30506  ┆ 152.530121       │
+│ 2     ┆ 0.453103 ┆ 226.551308       │
 └───────┴──────────┴──────────────────┘
-shape: (6, 4)
-┌──────────┬───────┬─────────────┬─────────────┐
-│ variable ┆ class ┆ coefficient ┆ constrained │
-│ ---      ┆ ---   ┆ ---         ┆ ---         │
-│ str      ┆ i64   ┆ f64         ┆ bool        │
-╞══════════╪═══════╪═════════════╪═════════════╡
-│ cost     ┆ 0     ┆ -0.046454   ┆ true        │
-│ cost     ┆ 1     ┆ -0.063756   ┆ true        │
-│ cost     ┆ 2     ┆ -0.03708    ┆ true        │
-│ time     ┆ 0     ┆ -0.009385   ┆ false       │
-│ time     ┆ 1     ┆ -0.007646   ┆ false       │
-│ time     ┆ 2     ┆ -0.014458   ┆ false       │
-└──────────┴───────┴─────────────┴─────────────┘
+shape: (15, 4)
+┌────────────────┬───────┬─────────────┬─────────────┐
+│ variable       ┆ class ┆ coefficient ┆ constrained │
+│ ---            ┆ ---   ┆ ---         ┆ ---         │
+│ str            ┆ i64   ┆ f64         ┆ bool        │
+╞════════════════╪═══════╪═════════════╪═════════════╡
+│ cost           ┆ 0     ┆ -0.100253   ┆ true        │
+│ cost           ┆ 1     ┆ -0.035543   ┆ true        │
+│ cost           ┆ 2     ┆ -0.056122   ┆ true        │
+│ time           ┆ 0     ┆ -0.01306    ┆ false       │
+│ time           ┆ 1     ┆ -0.010947   ┆ false       │
+│ time           ┆ 2     ┆ -0.010986   ┆ false       │
+│ C(alt)[T.bus]  ┆ 0     ┆ -0.290531   ┆ false       │
+│ C(alt)[T.bus]  ┆ 1     ┆ -3.749216   ┆ false       │
+│ C(alt)[T.bus]  ┆ 2     ┆ -1.182399   ┆ false       │
+│ C(alt)[T.car]  ┆ 0     ┆ 2.062043    ┆ false       │
+│ C(alt)[T.car]  ┆ 1     ┆ 0.078436    ┆ false       │
+│ C(alt)[T.car]  ┆ 2     ┆ 1.240218    ┆ false       │
+│ C(alt)[T.rail] ┆ 0     ┆ 0.904492    ┆ false       │
+│ C(alt)[T.rail] ┆ 1     ┆ 0.031566    ┆ false       │
+│ C(alt)[T.rail] ┆ 2     ┆ 0.418674    ┆ false       │
+└────────────────┴───────┴─────────────┴─────────────┘
 ```
 
-Class 1 is the most cost-sensitive ($\beta_{\text{cost}} = -0.064$) but the smallest, carrying just under 97 panels of effective mass; class 2 is the most time-sensitive. For a replication appendix, `results.audit_report()` bundles the specification, fit statistics, class shares, and the diagnostics table into a single text block, while `results.em_history_` and `results.optimization_history_` expose the per-iteration log-likelihood path and the final M-step gradient norms as Polars frames.
+Class 0 is the most cost-sensitive ($\beta_{\text{cost}} = -0.100$) and the smallest, carrying about 121 panels of effective mass; it also shows the sharpest car preference (`C(alt)[T.car] = 2.06`). Class 1, by contrast, has a near-flat cost coefficient but a strong bus aversion (`C(alt)[T.bus] = -3.75`). Because `class_coefficients()` returns the expanded `C(alt)` constants per class, you can read the taste heterogeneity in the mode constants directly. For a replication appendix, `results.audit_report()` bundles the specification, fit statistics, class shares, and the diagnostics table into a single text block, while `results.em_history_` and `results.optimization_history_` expose the per-iteration log-likelihood path and the final M-step gradient norms as Polars frames.
 
 ## 4. A counterfactual fare increase, conditioned on observed choices
 
@@ -226,18 +261,18 @@ shape: (8, 4)
 │ ---    ┆ ---   ┆ ---  ┆ ---          │
 │ i64    ┆ u32   ┆ str  ┆ f64          │
 ╞════════╪═══════╪══════╪══════════════╡
-│ 1      ┆ 0     ┆ air  ┆ 0.541747     │
-│ 1      ┆ 0     ┆ rail ┆ 0.458253     │
-│ 1      ┆ 1     ┆ air  ┆ 0.39825      │
-│ 1      ┆ 1     ┆ rail ┆ 0.60175      │
-│ 1      ┆ 2     ┆ air  ┆ 0.666931     │
-│ 1      ┆ 2     ┆ rail ┆ 0.333069     │
-│ 1      ┆ 3     ┆ air  ┆ 0.858308     │
-│ 1      ┆ 3     ┆ rail ┆ 0.141692     │
+│ 1      ┆ 0     ┆ air  ┆ 0.369361     │
+│ 1      ┆ 0     ┆ rail ┆ 0.630639     │
+│ 1      ┆ 1     ┆ air  ┆ 0.206001     │
+│ 1      ┆ 1     ┆ rail ┆ 0.793999     │
+│ 1      ┆ 2     ┆ air  ┆ 0.556804     │
+│ 1      ┆ 2     ┆ rail ┆ 0.443196     │
+│ 1      ┆ 3     ┆ air  ┆ 0.879005     │
+│ 1      ┆ 3     ┆ rail ┆ 0.120995     │
 └────────┴───────┴──────┴──────────────┘
 ```
 
-Panel 1 chose rail in every observed situation, so the posterior tends towards rail-leaning classes. So, after the 25% fare increase, they're more likely to stick with rail travel than would be suggested by the demographic prior alone. The same posterior `class_probs_by_panel` is stored on `prediction` and informs the elasticity and welfare calculations below. Pass `past_choices` as a `PastChoicesData` instance instead of a DataFrame when you already manage design matrices and ID arrays directly.
+Panel 1 chose rail throughout the observed sample, so conditioning on those choices tilts its class posterior toward rail-friendly classes—lifting its rail probabilities above what the demographic prior alone would imply (cases 0 and 1), even though the 25% fare hike still hands air the more attractive option where the rail-cost penalty bites hardest (cases 2 and 3). The same posterior `class_probs_by_panel` is stored on `prediction` and informs the elasticity and welfare calculations below. Pass `past_choices` as a `PastChoicesData` instance instead of a DataFrame when you already manage design matrices and ID arrays directly.
 
 The `LCLPrediction` object also reports expected consumer surplus by choice situation (the log-sum-exp inclusive value rescaled by marginal utility of income) and a per-panel willingness-to-pay frame. Both are useful as inputs to welfare analysis.
 
@@ -257,14 +292,14 @@ shape: (8, 6)
 │ ---    ┆ ---   ┆ ---  ┆ ---         ┆ ---             ┆ ---             │
 │ u32    ┆ u32   ┆ u32  ┆ u32         ┆ f64             ┆ f64             │
 ╞════════╪═══════╪══════╪═════════════╪═════════════════╪═════════════════╡
-│ 0      ┆ 0     ┆ 0    ┆ 0           ┆ -1.975733       ┆ -0.196076       │
-│ 0      ┆ 0     ┆ 0    ┆ 1           ┆ 1.697896        ┆ 0.549013        │
-│ 0      ┆ 0     ┆ 1    ┆ 0           ┆ 2.335712        ┆ 0.231801        │
-│ 0      ┆ 0     ┆ 1    ┆ 1           ┆ -2.007252       ┆ -0.649043       │
-│ 0      ┆ 1     ┆ 0    ┆ 0           ┆ -2.525647       ┆ -0.358665       │
-│ 0      ┆ 1     ┆ 0    ┆ 1           ┆ 1.775845        ┆ 0.871044        │
-│ 0      ┆ 1     ┆ 1    ┆ 0           ┆ 1.67152         ┆ 0.237371        │
-│ 0      ┆ 1     ┆ 1    ┆ 1           ┆ -1.175287       ┆ -0.576473       │
+│ 0      ┆ 0     ┆ 0    ┆ 0           ┆ -3.966251       ┆ -0.370317       │
+│ 0      ┆ 0     ┆ 0    ┆ 1           ┆ 3.408497        ┆ 1.036888        │
+│ 0      ┆ 0     ┆ 1    ┆ 0           ┆ 2.323006        ┆ 0.216892        │
+│ 0      ┆ 0     ┆ 1    ┆ 1           ┆ -1.996333       ┆ -0.607298       │
+│ 0      ┆ 1     ┆ 0    ┆ 0           ┆ -4.431006       ┆ -0.612664       │
+│ 0      ┆ 1     ┆ 0    ┆ 1           ┆ 3.115551        ┆ 1.487898        │
+│ 0      ┆ 1     ┆ 1    ┆ 0           ┆ 1.149616        ┆ 0.158954        │
+│ 0      ┆ 1     ┆ 1    ┆ 1           ┆ -0.808324       ┆ -0.386032       │
 └────────┴───────┴──────┴─────────────┴─────────────────┴─────────────────┘
 ```
 
@@ -272,7 +307,7 @@ shape: (8, 6)
 
 ## 6. Marginal willingness-to-pay
 
-Because `cost` is the declared numeraire, LCL computes the value of time analytically as the ratio $-\beta_{\text{time}}/\beta_{\text{cost}}$, quantifying uncertainty using the Delta method. Partitions are evaluated lazily; when you ask for income quintiles, the encoder bins the panel-level demographics, and you receive one row per bin.
+Because `cost` is the declared numeraire, LCL computes the value of time analytically as the ratio $-\beta_{\text{time}}/\beta_{\text{cost}}$, quantifying uncertainty using the Delta method. We'll break it down by the very `income_band` we fed to `C(...)` in the membership formula, and by gender. Since `income_band` is a plain string column riding along in the prediction data (constant within panel), we partition on it directly—the `C(income_band)` expansion in the model and the raw column in the partition are two views of the same variable, and no `income_q2`/`income_q3`/… dummy bundle is built anywhere.
 
 We built `prediction` with `past_choices`, so the probabilities it stores are Bayesian *posteriors*. Marginal WTP, by contrast, is a population summary whose Delta-method standard errors are propagated through the demographic *prior*—so we ask for `class_probabilities="prior"` explicitly. (To weight by the stored posteriors instead, pass `se="none"`; differentiating the standard errors through the posterior update is not supported.)
 
@@ -280,8 +315,8 @@ We built `prediction` with `past_choices`, so the probabilities it stores are Ba
 from lcl import PartitionType, WTPRequest
 
 prediction.compute_wtp(
-    WTPRequest(alt_var="time", demographic_var="income",
-               partition_type=PartitionType.QUINTILES),
+    WTPRequest(alt_var="time", demographic_var="income_band",
+               partition_type=PartitionType.CATEGORICAL),
     WTPRequest(alt_var="time", demographic_var="female",
                partition_type=PartitionType.CATEGORICAL),
     class_probabilities="prior",
@@ -289,36 +324,32 @@ prediction.compute_wtp(
 ```
 
 ```text
-Marginal WTP for time by income (quintiles)
+Marginal WTP for time by income_band (categorical)
 
 --- LaTeX Output ---
 
 \toprule
-income & Mean marginal WTP \\
+income\_band & Mean marginal WTP \\
 \midrule
 %
-Q3 & -0.2706 \\
- & (0.0086) \\
+mid & -0.2173 \\
+ & (0.0124) \\
 ...
 %
 \bottomrule
 
 --- Table preview ---
 
-┌──────────┬─────────────────────┐
-│ income   │ Mean marginal WTP   │
-├──────────┼─────────────────────┤
-│ Q3       │ -0.2706             │
-│          │ (0.0086)            │
-│ Q5       │ -0.2946             │
-│          │ (0.0154)            │
-│ Q1       │ -0.1891             │
-│          │ (0.0095)            │
-│ Q2       │ -0.2377             │
-│          │ (0.0083)            │
-│ Q4       │ -0.2859             │
-│          │ (0.0109)            │
-└──────────┴─────────────────────┘
+┌───────────────┬─────────────────────┐
+│ income_band   │ Mean marginal WTP   │
+├───────────────┼─────────────────────┤
+│ mid           │ -0.2173             │
+│               │ (0.0124)            │
+│ high          │ -0.2421             │
+│               │ (0.0158)            │
+│ low           │ -0.1818             │
+│               │ (0.0114)            │
+└───────────────┴─────────────────────┘
 
 Marginal WTP for time by female (categorical)
 
@@ -328,10 +359,10 @@ Marginal WTP for time by female (categorical)
 female & Mean marginal WTP \\
 \midrule
 %
-0.0 & -0.2554 \\
- & (0.0089) \\
-1.0 & -0.2558 \\
- & (0.0097) \\
+0.0 & -0.2120 \\
+ & (0.0118) \\
+1.0 & -0.2165 \\
+ & (0.0122) \\
 %
 \bottomrule
 
@@ -340,16 +371,19 @@ female & Mean marginal WTP \\
 ┌──────────┬─────────────────────┐
 │   female │ Mean marginal WTP   │
 ├──────────┼─────────────────────┤
-│   0.0000 │ -0.2554             │
-│          │ (0.0089)            │
-│   1.0000 │ -0.2558             │
-│          │ (0.0097)            │
+│   0.0000 │ -0.2120             │
+│          │ (0.0118)            │
+│   1.0000 │ -0.2165             │
+│          │ (0.0122)            │
 └──────────┴─────────────────────┘
 ```
 
-(Quintile rows appear in the order each bin first occurs in the panel-sorted data; sort the returned frame if you want a strict Q1–Q5 ordering.)
+(Bands appear in the order they first occur in the panel-sorted data; sort the returned frame if you want a strict low–mid–high ordering.)
 
-The value of time rises with income: the lowest quintile will pay roughly 0.19 cost units to shave a minute off the trip, the highest about 0.29. It proves essentially flat across gender once income is accounted for. The signs are negative because `time` enters utility as a disamenity—flip the convention if you prefer a marginal-cost framing.
+The value of time rises with income: the low band will pay roughly 0.18 cost units to shave a minute off the trip, the high band about 0.24. It proves essentially flat across gender once the income band is accounted for. The signs are negative because `time` enters utility as a disamenity—flip the convention if you prefer a marginal-cost framing.
+
+!!! note "No manual one-hot encoding"
+    We never built `income_q2`/`income_q3`/… indicators. `C(income_band)` handled the encoding inside the membership regression, and the partition above reused the raw string column. The `dummy_vars=` argument of `WTPRequest` is still there for partitions you one-hot encoded *outside* the model, but with the formula API you rarely need it.
 
 To inspect the class-level building blocks behind those averages, `wtp_by_class` returns the ratio for each latent class, and `denominator_diagnostics` reports the numeraire coefficient sitting in every denominator—an easy way to catch a near-zero $\beta_{\text{cost}}$ that would blow up a tradeoff ratio.
 
@@ -365,9 +399,9 @@ shape: (3, 5)
 │ ---      ┆ ---         ┆ ---   ┆ ---       ┆ ---               │
 │ str      ┆ str         ┆ i64   ┆ f64       ┆ f64               │
 ╞══════════╪═════════════╪═══════╪═══════════╪═══════════════════╡
-│ time     ┆ cost        ┆ 0     ┆ -0.202024 ┆ 0.046454          │
-│ time     ┆ cost        ┆ 1     ┆ -0.119925 ┆ 0.063756          │
-│ time     ┆ cost        ┆ 2     ┆ -0.3899   ┆ 0.03708           │
+│ time     ┆ cost        ┆ 0     ┆ -0.130275 ┆ 0.100253          │
+│ time     ┆ cost        ┆ 1     ┆ -0.308002 ┆ 0.035543          │
+│ time     ┆ cost        ┆ 2     ┆ -0.195745 ┆ 0.056122          │
 └──────────┴─────────────┴───────┴───────────┴───────────────────┘
 shape: (3, 5)
 ┌───────┬─────────────┬───────────────────┬─────────────────┬───────────────┐
@@ -375,45 +409,20 @@ shape: (3, 5)
 │ ---   ┆ ---         ┆ ---               ┆ ---             ┆ ---           │
 │ i64   ┆ str         ┆ f64               ┆ f64             ┆ f64           │
 ╞═══════╪═════════════╪═══════════════════╪═════════════════╪═══════════════╡
-│ 0     ┆ cost        ┆ 0.046454          ┆ 0.046454        ┆ 0.00001       │
-│ 1     ┆ cost        ┆ 0.063756          ┆ 0.063756        ┆ 0.00001       │
-│ 2     ┆ cost        ┆ 0.03708           ┆ 0.03708         ┆ 0.00001       │
+│ 0     ┆ cost        ┆ 0.100253          ┆ 0.100253        ┆ 0.00001       │
+│ 1     ┆ cost        ┆ 0.035543          ┆ 0.035543        ┆ 0.00001       │
+│ 2     ┆ cost        ┆ 0.056122          ┆ 0.056122        ┆ 0.00001       │
 └───────┴─────────────┴───────────────────┴─────────────────┴───────────────┘
 ```
 
-If you discretized a continuous demographic variable before estimation, pass the dummy bundle as a single categorical factor. For example, a five-level income quintile factor with `income_q1` as the omitted base could be summarized in one request:
+Class 1 has the smallest cost coefficient ($\beta_{\text{cost}} = -0.036$), so it shows the largest value of time (−0.31) and the smallest denominator—well above the `min_abs_floor`, so no tradeoff blows up here.
+
+You are not limited to the partitions used during estimation. Any panel-constant column carried through `predict(data=...)`—say a finer raw-`income` quintile cut that never entered the membership formula—can be summarized on the fly; pass `partition_data=...` when the grouping lives in a separate table.
 
 ```python
-wtp_tables = prediction.compute_wtp(
-    WTPRequest(
-        alt_var="time",
-        demographic_var="income_quintile",
-        partition_type=PartitionType.CATEGORICAL,
-        dummy_vars=["income_q2", "income_q3", "income_q4", "income_q5"],
-        dummy_labels=["Q2", "Q3", "Q4", "Q5"],
-        base_category="Q1",
-    ),
-    class_probabilities="prior",
-)
-```
-
-You can also summarize WTP using a panel-level partition that was not included in the class-membership regression. Raw categorical or binned columns passed through `predict(data=...)` are available automatically when they are constant within panel. If the partition lives in a separate table, provide it through `partition_data`.
-
-```python
-income_partitions = (
-    df_long
-    .select(["ID", "income_quintile"])
-    .unique(subset=["ID"], maintain_order=True)
-)
-
-wtp_tables = prediction.compute_wtp(
-    WTPRequest(
-        alt_var="time",
-        demographic_var="income_quintile",
-        partition_type=PartitionType.CATEGORICAL,
-    ),
-    partition_data=income_partitions,
-    panel_col="ID",
+prediction.compute_wtp(
+    WTPRequest(alt_var="time", demographic_var="income",
+               partition_type=PartitionType.QUINTILES),
     class_probabilities="prior",
 )
 ```
