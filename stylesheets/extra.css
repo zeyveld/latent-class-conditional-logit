@@ -1,0 +1,194 @@
+/* =========================================================================
+ * LCL docs — palette and typography
+ * Palette references: aubergine #3F2B47, persimmon #E37449, sage #8FAD8A,
+ * saffron #E3B53A, cream #F4ECDC, slate #4A4456, inkwell #1A1622.
+ * ========================================================================= */
+
+/* --- Luciole webfont -----------------------------------------------------
+ * Luciole © Laurent Bourcellier & Jonathan Perez — CC-BY 4.0
+ * https://luciole-vision.com/
+ * -------------------------------------------------------------------------- */
+@font-face {
+  font-family: "Luciole";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/Luciole-Regular.woff2") format("woff2"),
+       url("fonts/Luciole-Regular.woff")  format("woff");
+}
+@font-face {
+  font-family: "Luciole";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("fonts/Luciole-Italic.woff2") format("woff2"),
+       url("fonts/Luciole-Italic.woff")  format("woff");
+}
+@font-face {
+  font-family: "Luciole";
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/Luciole-Bold.woff2") format("woff2"),
+       url("fonts/Luciole-Bold.woff")  format("woff");
+}
+@font-face {
+  font-family: "Luciole";
+  font-style: italic;
+  font-weight: 700;
+  font-display: swap;
+  src: url("fonts/Luciole-BoldItalic.woff2") format("woff2"),
+       url("fonts/Luciole-BoldItalic.woff")  format("woff");
+}
+
+/* --- Palette (light) ----------------------------------------------------- */
+:root,
+[data-md-color-scheme="default"] {
+  /* Brand */
+  --lcl-aubergine: #3F2B47;
+  --lcl-aubergine-dark: #2A1B33;
+  --lcl-persimmon: #E37449;
+  --lcl-sage: #8FAD8A;
+  --lcl-saffron: #E3B53A;
+  --lcl-cream: #F4ECDC;
+  --lcl-ink: #1A1622;
+  --lcl-slate: #4A4456;
+
+  /* Material maps */
+  --md-primary-fg-color: var(--lcl-aubergine);
+  --md-primary-fg-color--light: #5A4361;
+  --md-primary-fg-color--dark: var(--lcl-aubergine-dark);
+  --md-primary-bg-color: var(--lcl-cream);
+  --md-primary-bg-color--light: rgba(244, 236, 220, 0.78);
+
+  --md-accent-fg-color: var(--lcl-persimmon);
+  --md-accent-fg-color--transparent: rgba(227, 116, 73, 0.12);
+  --md-accent-bg-color: var(--lcl-cream);
+
+  --md-default-fg-color: var(--lcl-ink);
+  --md-default-fg-color--light: #4A4456;
+  --md-default-fg-color--lighter: #8A8395;
+  --md-default-fg-color--lightest: #DCD5C7;
+  --md-default-bg-color: #FBF7EE;
+  --md-default-bg-color--light: rgba(251, 247, 238, 0.85);
+
+  --md-typeset-color: var(--lcl-ink);
+  --md-typeset-a-color: var(--lcl-persimmon);
+
+  --md-code-fg-color: #2A1B33;
+  --md-code-bg-color: #F0E8D6;
+  --md-code-hl-color: rgba(227, 181, 58, 0.35);
+
+  --md-admonition-bg-color: #F6EFE0;
+  --md-footer-bg-color: var(--lcl-aubergine-dark);
+  --md-footer-bg-color--dark: #1F1426;
+}
+
+/* --- Palette (dark) ------------------------------------------------------ */
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--lcl-aubergine);
+  --md-primary-fg-color--light: #6B4F73;
+  --md-primary-fg-color--dark: #2A1B33;
+
+  --md-accent-fg-color: var(--lcl-saffron);
+  --md-accent-fg-color--transparent: rgba(227, 181, 58, 0.18);
+
+  --md-default-fg-color: #F2E9D9;
+  --md-default-fg-color--light: #D6CCBA;
+  --md-default-fg-color--lighter: #9E94A6;
+  --md-default-fg-color--lightest: #4A4456;
+  --md-default-bg-color: #1A1622;
+  --md-default-bg-color--light: #251E30;
+
+  --md-typeset-color: #F2E9D9;
+  --md-typeset-a-color: var(--lcl-persimmon);
+
+  --md-code-fg-color: #F2E9D9;
+  --md-code-bg-color: #2A2238;
+  --md-code-hl-color: rgba(227, 181, 58, 0.28);
+
+  --md-admonition-bg-color: #251E30;
+  --md-footer-bg-color: #14101B;
+  --md-footer-bg-color--dark: #0F0C17;
+}
+
+/* --- Typography ---------------------------------------------------------- */
+:root {
+  --md-text-font: "Luciole", "Lucida Grande", "Segoe UI", system-ui, sans-serif;
+  --md-code-font: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+body,
+.md-typeset {
+  font-family: var(--md-text-font);
+  font-feature-settings: "kern", "liga";
+  letter-spacing: 0;
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  font-family: var(--md-text-font);
+  font-weight: 700;
+  letter-spacing: -0.005em;
+}
+
+.md-typeset h1 {
+  color: var(--lcl-aubergine);
+}
+[data-md-color-scheme="slate"] .md-typeset h1 {
+  color: var(--lcl-saffron);
+}
+
+.md-typeset h2 {
+  margin-top: 2.2em;
+  padding-bottom: 0.3rem;
+  border-bottom: 1px solid var(--md-default-fg-color--lightest);
+}
+
+.md-typeset code,
+.md-typeset pre {
+  font-family: var(--md-code-font);
+}
+
+/* --- Accents ------------------------------------------------------------- */
+.md-typeset a {
+  text-underline-offset: 0.15em;
+  text-decoration-thickness: 0.06em;
+}
+
+.md-typeset blockquote {
+  border-left: 3px solid var(--lcl-persimmon);
+  color: var(--md-default-fg-color--light);
+}
+
+.md-typeset .admonition,
+.md-typeset details {
+  border-left-color: var(--lcl-saffron);
+}
+
+.md-header__title {
+  font-weight: 700;
+  letter-spacing: 0.01em;
+}
+
+.md-tabs {
+  background-color: var(--lcl-aubergine-dark);
+}
+
+/* Logo spacing in the header */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+  height: 1.6rem;
+  width: 1.6rem;
+}
+
+/* Table rendering — keep numerics tight */
+.md-typeset table:not([class]) {
+  font-variant-numeric: tabular-nums;
+}
+
+/* EOF */
