@@ -62,12 +62,12 @@ shape: (8, 9)
 
 ## 2. Estimate the model
 
-Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparameterization). Rather than enumerate the design columns by hand, we describe the utility and class-membership equations with **Formulaic (patsy-style) formula strings**, which buys us two things at once:
+Let's estimate three latent classes, treating cost as the numeraire (so its coefficient is constrained strictly negative through a softplus reparameterization). Rather than enumerate the design columns by hand, we describe the utility and class-membership equations with **Formulaic (patsy-style) formula strings**, which affords two key advantages:
 
-- `C(alt)` expands the string mode column (`car`, `bus`, `air`, `rail`) into a set of **alternative-specific constants**. Formulaic builds the dummies—and reuses the same base level at prediction time—so we never one-hot encode the categorical by hand.
-- the class-membership equation is just a right-hand-side formula, and `C(income_band)` brings a categorical demographic into the membership design the same way.
+- `C(alt)` expands the string mode column (`car`, `bus`, `air`, `rail`) into a set of **alternative-specific constants**. Formulaic builds the dummies—and reuses the same base level at prediction time—so we never one-hot encode the categorical variable by hand; and
+- The class-membership equation is just a right-hand-side formula, and `C(income_band)` incorporates a categorical demographic variable into the membership design.
 
-So we first bin household income into a string `income_band` (a panel-level categorical), then declare the model. The numeraire is a `NegativeCoefficient` constraint, and the grouped options objects replace the scattered `em_alg_config`/`mle_config`/`error_config` keywords.
+Having binned household income into a string `income_band` (a panel-level categorical), we declare the model. The numeraire is a `NegativeCoefficient` constraint, and the grouped options objects replace the scattered `em_alg_config`/`mle_config`/`error_config` keywords.
 
 ```python
 import lcl

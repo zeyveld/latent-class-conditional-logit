@@ -1,5 +1,6 @@
 """Data encoding layer shared by fit and predict APIs."""
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -8,6 +9,7 @@ import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from formulaic import Formula  # type: ignore
+from formulaic.errors import FormulaicError  # type: ignore
 
 from lcl._struct import ParsedData
 
@@ -347,20 +349,40 @@ class ChoiceDataEncoder:
     ) -> tuple[Any, Any | None, pl.DataFrame]:
         """Encode the backward-compatible ``choice ~ utility | membership`` formula."""
         if fit:
-            f = Formula(self.formula)
-            y_df = f.lhs.get_model_matrix(pandas_df)
+            f = _parse_formula(self.formula, "formula")
+            y_df = _get_model_matrix(
+                f.lhs,
+                pandas_df,
+                formula=self.formula,
+                label="formula left-hand side",
+            )
             self.y_model_spec = y_df.model_spec
 
             if isinstance(f.rhs, tuple):
-                raw_X_df = f.rhs[0].get_model_matrix(pandas_df)
-                raw_dems_df = f.rhs[1].get_model_matrix(pandas_df)
+                raw_X_df = _get_model_matrix(
+                    f.rhs[0],
+                    pandas_df,
+                    formula=self.formula,
+                    label="formula utility design",
+                )
+                raw_dems_df = _get_model_matrix(
+                    f.rhs[1],
+                    pandas_df,
+                    formula=self.formula,
+                    label="formula membership design",
+                )
                 dems_df = _drop_formula_intercepts(raw_dems_df)
                 self.dem_model_spec = raw_dems_df.model_spec
                 self.dem_varnames = list(dems_df.columns) or None
                 if self.dem_varnames:
                     df = df.with_columns(pl.from_pandas(dems_df))
             else:
-                raw_X_df = f.rhs.get_model_matrix(pandas_df)
+                raw_X_df = _get_model_matrix(
+                    f.rhs,
+                    pandas_df,
+                    formula=self.formula,
+                    label="formula utility design",
+                )
                 self.dem_model_spec = None
                 self.dem_varnames = None
 
@@ -372,15 +394,32 @@ class ChoiceDataEncoder:
 
         if self.x_model_spec is None:
             raise ValueError("Formula encoder has not been fitted.")
-        X_df = _drop_formula_intercepts(self.x_model_spec.get_model_matrix(pandas_df))
+        X_df = _drop_formula_intercepts(
+            _get_model_matrix(
+                self.x_model_spec,
+                pandas_df,
+                formula=self.formula,
+                label="formula utility design",
+            )
+        )
         if self.dem_model_spec is not None:
             dems_df = _drop_formula_intercepts(
-                self.dem_model_spec.get_model_matrix(pandas_df)
+                _get_model_matrix(
+                    self.dem_model_spec,
+                    pandas_df,
+                    formula=self.formula,
+                    label="formula membership design",
+                )
             )
             if self.dem_varnames:
                 df = df.with_columns(pl.from_pandas(dems_df))
         if require_choice and self.y_model_spec is not None:
-            y_df = self.y_model_spec.get_model_matrix(pandas_df)
+            y_df = _get_model_matrix(
+                self.y_model_spec,
+                pandas_df,
+                formula=self.formula,
+                label="formula left-hand side",
+            )
         else:
             y_df = None
         return X_df, y_df, df
@@ -395,9 +434,14 @@ class ChoiceDataEncoder:
     ) -> tuple[Any, Any | None]:
         """Encode the alternative-specific utility formula."""
         if fit:
-            f = Formula(self.utility_formula)
+            f = _parse_formula(self.utility_formula, "utility_formula")
             if _formula_object_has_lhs(f):
-                y_df = f.lhs.get_model_matrix(pandas_df)
+                y_df = _get_model_matrix(
+                    f.lhs,
+                    pandas_df,
+                    formula=self.utility_formula,
+                    label="utility_formula left-hand side",
+                )
                 self.y_model_spec = y_df.model_spec
                 if isinstance(f.rhs, tuple):
                     raise ValueError(
@@ -405,10 +449,20 @@ class ChoiceDataEncoder:
                         "Move class-membership terms after '|' into "
                         "membership_formula."
                     )
-                raw_X_df = f.rhs.get_model_matrix(pandas_df)
+                raw_X_df = _get_model_matrix(
+                    f.rhs,
+                    pandas_df,
+                    formula=self.utility_formula,
+                    label="utility_formula right-hand side",
+                )
             else:
                 y_df = None
-                raw_X_df = f.get_model_matrix(pandas_df)
+                raw_X_df = _get_model_matrix(
+                    f,
+                    pandas_df,
+                    formula=self.utility_formula,
+                    label="utility_formula",
+                )
                 if not self.choice_col:
                     raise ValueError(
                         "choice_col is required when utility_formula has no "
@@ -424,9 +478,21 @@ class ChoiceDataEncoder:
 
         if self.x_model_spec is None:
             raise ValueError("Utility formula encoder has not been fitted.")
-        X_df = _drop_formula_intercepts(self.x_model_spec.get_model_matrix(pandas_df))
+        X_df = _drop_formula_intercepts(
+            _get_model_matrix(
+                self.x_model_spec,
+                pandas_df,
+                formula=self.utility_formula,
+                label="utility_formula right-hand side",
+            )
+        )
         if require_choice and self.y_model_spec is not None:
-            y_df = self.y_model_spec.get_model_matrix(pandas_df)
+            y_df = _get_model_matrix(
+                self.y_model_spec,
+                pandas_df,
+                formula=self.utility_formula,
+                label="utility_formula left-hand side",
+            )
         else:
             y_df = None
         return X_df, y_df
@@ -440,13 +506,18 @@ class ChoiceDataEncoder:
     ) -> pl.DataFrame:
         """Encode the class-membership demographic formula."""
         if fit:
-            f = Formula(self.membership_formula)
+            f = _parse_formula(self.membership_formula, "membership_formula")
             if not hasattr(f, "get_model_matrix"):
                 raise ValueError(
                     "membership_formula must be a right-hand-side formula such "
                     "as '~ income + C(segment)'."
                 )
-            raw_dems_df = f.get_model_matrix(pandas_df)
+            raw_dems_df = _get_model_matrix(
+                f,
+                pandas_df,
+                formula=self.membership_formula,
+                label="membership_formula",
+            )
             dems_df = _drop_formula_intercepts(raw_dems_df)
             self.dem_model_spec = raw_dems_df.model_spec
             self.dem_varnames = list(dems_df.columns) or None
@@ -454,7 +525,12 @@ class ChoiceDataEncoder:
             if self.dem_model_spec is None:
                 raise ValueError("Membership formula encoder has not been fitted.")
             dems_df = _drop_formula_intercepts(
-                self.dem_model_spec.get_model_matrix(pandas_df)
+                _get_model_matrix(
+                    self.dem_model_spec,
+                    pandas_df,
+                    formula=self.membership_formula,
+                    label="membership_formula",
+                )
             )
 
         _validate_matrix_height(dems_df, df.height, "membership formula")
@@ -680,6 +756,53 @@ def _validate_matrix_height(matrix: Any, expected_height: int, label: str) -> No
             f"{label} produced {len(matrix)} rows for {expected_height} input rows. "
             "Check missing values in formula variables."
         )
+
+
+def _parse_formula(formula: str | None, label: str) -> Any:
+    """Parse a Formulaic formula and raise a contextual validation error."""
+    if formula is None:
+        raise ValueError(f"{label} is required.")
+    try:
+        return Formula(formula)
+    except FormulaicError as exc:
+        raise _formulaic_value_error(label, formula, exc) from exc
+
+
+def _get_model_matrix(
+    model_spec: Any, data: Any, *, formula: str | None, label: str
+) -> Any:
+    """Materialize a Formulaic model matrix with contextual errors."""
+    try:
+        return model_spec.get_model_matrix(data)
+    except FormulaicError as exc:
+        raise _formulaic_value_error(label, formula, exc) from exc
+
+
+def _formulaic_value_error(
+    label: str, formula: str | None, exc: Exception
+) -> ValueError:
+    """Build a user-facing formula evaluation error."""
+    message = f"Unable to evaluate {label}."
+    if formula is not None:
+        message += f" Formula: {formula!r}."
+    hint = _formula_operator_hint(formula)
+    if hint:
+        message += f" {hint}"
+    message += f" Formulaic reported: {exc}"
+    return ValueError(message)
+
+
+def _formula_operator_hint(formula: str | None) -> str:
+    """Return a hint for adjacent variable/function tokens in formulas."""
+    if formula is None:
+        return ""
+    if re.search(r"[A-Za-z0-9_]\s*C\(", formula):
+        return (
+            "The formula contains a token like 'xC(group)', which usually means "
+            "terms were concatenated without an operator; insert ' + ' before "
+            "C(...)."
+        )
+    return ""
 
 
 def _drop_formula_intercepts(matrix: Any) -> Any:

@@ -837,6 +837,26 @@ def test_membership_formula_rejects_left_hand_side() -> None:
         )
 
 
+def test_utility_formula_reports_concatenated_categorical_term() -> None:
+    df = _small_lcl_df().with_columns(pl.lit("A").alias("group"))
+    model = LatentClassConditionalLogit(num_classes=2)
+
+    with pytest.raises(ValueError, match="terms were concatenated without an operator"):
+        model._ingest_data(
+            data=df,
+            alts_col="alt",
+            cases_col="case",
+            panels_col="panel",
+            formula=None,
+            utility_formula="choice ~ xC(group)",
+            membership_formula=None,
+            choice_col=None,
+            case_varnames=None,
+            dem_varnames=None,
+            dems_data=None,
+        )
+
+
 def test_demographic_formula_intercept_only_means_no_demographics() -> None:
     df = _small_lcl_df()
     model = LatentClassConditionalLogit(num_classes=2)
