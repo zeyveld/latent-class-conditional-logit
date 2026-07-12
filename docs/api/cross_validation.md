@@ -1,8 +1,10 @@
 # Cross-validation
 
-Blocked K-fold cross-validation for choosing the number of latent classes. Folds are drawn at the decision-maker level so that an individual's entire choice history sits in exactly one fold.
+Blocked K-fold cross-validation for choosing a class count. Each decision-maker's
+complete choice history remains within one fold.
 
 !!! warning "Experimental"
-    The cross-validation utility is functional but still under active refinement. See the [model-selection tutorial](../tutorials/cross_validation.md) for a worked example. And please feel free to suggest improvements or extensions; I've never done any scholarship on hyperparameter tuning, so I'd be excited to hear about recent developments in this area!
+    The API remains experimental and may change between minor releases. See the
+    [model-selection tutorial](../tutorials/cross_validation.md) for a complete example.
 
 ::: lcl._cross_validation.cv_optimal_classes

@@ -104,8 +104,6 @@ print(results)
 A representative end-of-run printout (`summarize_betas()` also emits a LaTeX version of the table, elided here):
 
 ```text
-Estimation time: 15.344 seconds
-
 --- Table preview ---
 
 ┌─────────────────┬───────────────┬─────────────────────────────┐
@@ -117,7 +115,7 @@ Estimation time: 15.344 seconds
 │                 │ (0.097)       │ (0.130)                     │
 └─────────────────┴───────────────┴─────────────────────────────┘
 
-<LCLResults: 2 Classes | Converged | Log likelihood: -597.8 | CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1197.4>
+<LCLResults: 2 Classes | Converged | Log likelihood: -597.8 | CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1208.4>
 ```
 
 The parentheses enclose Delta-method standard errors of the population moments. `summarize_betas()` also returns those moments as a tidy Polars frame; the class-specific β's are available with `results.class_coefficients()`. Both frames preserve raw variable names and include a `label` column for publication-ready tables.

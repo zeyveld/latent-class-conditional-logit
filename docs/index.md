@@ -1,85 +1,89 @@
 ---
 hide:
   - navigation
+  - toc
 ---
 
-# LCL
+<div class="lcl-hero" markdown>
 
-[![PyPI version](https://badge.fury.io/py/lcl-choice.svg)](https://badge.fury.io/py/lcl-choice)
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/release/python-3100/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+<span class="lcl-kicker">Discrete choice models in Python</span>
 
-LCL is a Python package for estimating latent-class conditional logit models. It runs an expectation-maximization (EM) algorithm on JAX, sharding the per-class M-steps across available accelerators. After estimation, the results object supports counterfactual predictions and consumer welfare analysis.
+# Latent classes, clear inference
 
-Although I'm an economist by training, this package is intended for all social scientists who study household-level panel data: marketers, transportation researchers, operations researchers, political scientists, and public policy researchers, among others. 
+LCL estimates conditional-logit and latent-class conditional-logit models with
+JAX. It combines a declarative model specification, safeguarded Newton updates,
+panel-clustered inference, and practical tools for counterfactual analysis.
 
-## Key features
+[Start the tutorial](tutorials/estimation.md){ .md-button .md-button--primary }
+[Browse the API](api/specification.md){ .md-button }
 
-- **A declarative, high-level API.** Describe the model once with an `LCLSpec`—identifier columns, patsy-style utility and class-membership formulas (or plain column lists), and the numeraire constraint—then hand it to `lcl.fit`. Estimation, optimizer, inference, and diagnostic behaviour are each tuned through a single grouped options object (`FitOptions`, `OptimizationOptions`, `InferenceOptions`, `DiagnosticsOptions`), so you rarely touch the lower-level machinery.
-- **`LatentClassConditionalLogit`**: finite-mixture conditional logit with a fractional-response multinomial logit regression of class membership on demographics.
-- **`ConditionalLogit`**: standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
-- **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Pass the same `LCLSpec` you fit with. Folds are split at the decision-maker level, so no individuals' choices appear in both training and hold-out data.
-- **Counterfactual prediction**: out-of-sample choice probabilities, expected consumer surplus, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
-- **Inference & diagnostics**: clustered sandwich covariance at the panel level, the Delta method for non-linear functions of the parameters (such as the value of time), and one-call health checks—`results.diagnostics()`, `convergence_report()`, and a replication-ready `audit_report()`.
+</div>
 
-Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped design matrix should raise a readable error at the call site rather than a cryptic XLA trace.
+<div class="lcl-feature-grid" markdown>
 
-## Installation
+<div class="lcl-feature-card" markdown>
 
-The wheel is published on PyPI as `lcl-choice` (it imports as `lcl`):
+### Specify once
+
+Define identifiers, utility and membership formulas, constraints, and
+publication labels in one `LCLSpec`.
+
+</div>
+
+<div class="lcl-feature-card" markdown>
+
+### Estimate efficiently
+
+JAX compiles the numerical kernels and shards independent class updates across
+available accelerators.
+
+</div>
+
+<div class="lcl-feature-card" markdown>
+
+### Analyze behavior
+
+Compute choice probabilities, consumer surplus, elasticities, class shares, and
+marginal willingness-to-pay from the fitted result.
+
+</div>
+
+</div>
+
+## Install
+
+The distribution is named `lcl-choice`; the import is `lcl`.
 
 ```bash
 pip install lcl-choice
 ```
 
-If you plan to use a GPU, install the CUDA-matched JAX build first; see the [JAX installation notes](https://github.com/jax-ml/jax#installation).
+For GPU use, install the JAX build that matches your CUDA environment before
+installing LCL. See the [JAX installation guide](https://docs.jax.dev/en/latest/installation.html).
 
-## Quickstart
+## A compact model
 
-A two-class model on a small synthetic panel. The [estimation tutorial](tutorials/estimation.md) provides a full example, including counterfactual fares and value-of-time partitions.
+This example estimates two latent classes and assigns readable labels to raw
+variables. Labels affect presentation only: formulas, constraints, prediction
+inputs, and returned `variable` columns continue to use the original names.
 
 ```python
-import numpy as onp
-import polars as pl
 import lcl
-from lcl import ChoiceIds, FitOptions, LCLSpec, NegativeCoefficient, OptimizationOptions
+from lcl import (
+    ChoiceIds,
+    FitOptions,
+    LCLSpec,
+    NegativeCoefficient,
+    OptimizationOptions,
+)
 
-rng = onp.random.default_rng(7)
-
-# Two latent classes: one is price-sensitive, the other prefers quality.
-n_panels, n_choices, n_alts = 200, 4, 3
-true_class = rng.choice(2, size=n_panels, p=[0.55, 0.45])
-beta_price   = onp.array([-1.8, -0.3])
-beta_quality = onp.array([ 0.4,  1.6])
-
-rows = []
-for panel in range(n_panels):
-    income = rng.normal()
-    for case in range(n_choices):
-        prices  = rng.uniform(0.5, 3.0, size=n_alts)
-        quality = rng.uniform(0.0, 5.0, size=n_alts)
-        u = (beta_price[true_class[panel]]   * prices
-           + beta_quality[true_class[panel]] * quality
-           + rng.gumbel(size=n_alts))
-        chosen = int(onp.argmax(u))
-        for alt in range(n_alts):
-            rows.append({
-                "panel": panel,
-                "case":  panel * n_choices + case,
-                "alt":   alt,
-                "choice":  alt == chosen,
-                "price":   float(prices[alt]),
-                "quality": float(quality[alt]),
-                "income":  float(income),
-            })
-
-df = pl.DataFrame(rows)
-
-# Describe the model once: identifier columns, patsy-style utility and
-# class-membership formulas, and a strictly-negative price coefficient (the
-# numeraire). Use C(col) to expand a categorical; here every term is continuous.
 spec = LCLSpec(
-    ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
+    ids=ChoiceIds(
+        alt="alt",
+        case="case",
+        panel="panel",
+        choice="choice",
+    ),
     utility_formula="choice ~ price + quality",
     membership_formula="~ income",
     classes=2,
@@ -91,72 +95,76 @@ spec = LCLSpec(
     },
 )
 
-# Then fit it. Options are grouped, not scattered across keyword arguments.
 results = lcl.fit(
-    df,
+    data,
     spec,
     fit_options=FitOptions(max_em_iter=50, num_devices=1),
     optimization_options=OptimizationOptions(maxiter=40),
 )
 
-results.summarize_betas()
-print(results)
+coefficient_table = results.summarize_betas()
+print(coefficient_table.select("variable", "label", "mean", "mean_se"))
 ```
 
-A representative end-of-run printout (`summarize_betas()` also emits a LaTeX version of the table, elided here):
+The printed coefficient table uses the labels:
 
 ```text
-Estimation time: 15.344 seconds
-
---- Table preview ---
-
 ┌─────────────────┬───────────────┬─────────────────────────────┐
-│ Variable        │ Means (β's)   │ Standard deviations (σ's)   │
+│ Variable        │ Means (β's)   │ Standard deviations (σ's)  │
 ├─────────────────┼───────────────┼─────────────────────────────┤
 │ Price           │ -1.124        │ 0.723                       │
 │                 │ (0.114)       │ (0.128)                     │
 │ Product quality │ 0.905         │ 0.611                       │
 │                 │ (0.097)       │ (0.130)                     │
 └─────────────────┴───────────────┴─────────────────────────────┘
-
-<LCLResults: 2 Classes | Converged | Log likelihood: -597.8 | CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1197.4>
 ```
 
-The parentheses enclose Delta-method standard errors of the population moments. `summarize_betas()` also returns those moments as a tidy Polars frame; the class-specific β's are available with `results.class_coefficients()`. Both frames preserve raw variable names and include a `label` column for publication-ready tables.
+The returned frame keeps both identities:
 
-## Roadmap
-
-The estimator is fairly stable and the results object covers the cases I routinely encounter in my own work. I'm hoping to make at least two extensions:
-
-- **Model selection.** Blocked K-fold cross-validation is included but still marked experimental; expect refinements as I use this utility in my research.
-- **Documentation.** A mathematical appendix and additional worked examples beyond Apollo's mode-choice data.
-
-If there is a constraint, optimization routine, or post-estimation tool you'd like to see, please [open an issue](https://github.com/zeyveld/latent-class-conditional-logit/issues).
-
-## Contributing
-
-The project uses `uv` for dependency management:
-
-```bash
-git clone https://github.com/zeyveld/latent-class-conditional-logit.git
-cd latent-class-conditional-logit
-uv sync --all-extras --dev
-uv run pytest tests/
+```text
+┌──────────┬─────────────────┬────────┬─────────┐
+│ variable ┆ label           ┆ mean   ┆ mean_se │
+╞══════════╪═════════════════╪════════╪═════════╡
+│ price    ┆ Price           ┆ -1.124 ┆ 0.114   │
+│ quality  ┆ Product quality ┆ 0.905  ┆ 0.097   │
+└──────────┴─────────────────┴────────┴─────────┘
 ```
 
-## Acknowledgments
+## What the package covers
 
-LCL is built on JAX, Polars, equinox, jaxopt, jaxtyping, beartype, and formulaic. The differenced-design-matrix kernel at the heart of the conditional logit likelihood evaluation owes a particular debt to the [xlogit](https://github.com/arteagac/xlogit/) package by Cristian Arteaga, JeeWoong Park, Prithvi Bhat Beeramoole, and Alexander Paz.
+- **Latent-class conditional logit.** Estimate a finite mixture of conditional
+  logits, with optional demographic predictors of class membership.
+- **Standard conditional logit.** Fit a homogeneous benchmark with the same
+  data-ingestion and inference conventions.
+- **Inference and diagnostics.** Request panel-clustered sandwich covariance,
+  delta-method standard errors, convergence summaries, and structured audit
+  output.
+- **Counterfactuals.** Reuse the fitted encoder for new choice sets and, when
+  useful, update class probabilities with observed choice histories.
+- **Model selection.** Compare class counts using blocked cross-validation that
+  keeps each decision-maker entirely within one fold.
 
-The documentation site is set in [Luciole](https://luciole-vision.com/), a typeface designed for visually impaired readers by Laurent Bourcellier and Jonathan Perez in collaboration with the Centre Technique Régional pour la Déficience Visuelle and typographies.fr, released under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+## Who it is for
 
-## Citation
+LCL is intended for researchers who work with repeated-choice data, including
+transportation, marketing, operations research, political science, economics,
+and public policy. Runtime shape checking catches many specification errors
+before they become opaque compiled-kernel failures.
 
-```bibtex
-@software{lcl_2026,
-  author = {Zeyveld, Andrew},
-  title  = {LCL: Latent-Class Conditional Logit Estimation in Python},
-  year   = {2026},
-  url    = {https://github.com/zeyveld/latent-class-conditional-logit}
-}
-```
+## Next steps
+
+- Follow the [estimation and counterfactual tutorial](tutorials/estimation.md).
+- Compare class counts with [panel-blocked cross-validation](tutorials/cross_validation.md).
+- Review the [`LCLSpec` and options API](api/specification.md).
+
+The project is open source under the MIT license. Bug reports, focused feature
+requests, and reproducible examples are welcome on
+[GitHub](https://github.com/zeyveld/latent-class-conditional-logit/issues).
+
+<div class="lcl-font-note" markdown>
+
+This site uses [Luciole](https://luciole-vision.com/), designed by Laurent
+Bourcellier and Jonathan Perez for readers with low vision and released under
+[CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
+
+</div>

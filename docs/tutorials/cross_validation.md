@@ -1,15 +1,23 @@
 # Cross-validation & model selection
 
-Choosing the number of latent classes is an important modelling decision for any finite mixture. Information criteria (BIC, CAIC, adjusted BIC) are useful, and LCL reports all three. But these criteria can disagree, and can prove unstable over repeated sampling (see Preacher and Merkle [2012, Psychological Methods]). Out-of-sample log-likelihood under a panel-respecting split is preferable when you can spare the time (and shoulder the GPU expense).
+The class count controls both fit and interpretability. LCL reports BIC, CAIC, and
+adjusted BIC; panel-blocked cross-validation supplies a complementary measure of
+out-of-sample performance.
 
-`cv_optimal_classes` automates that procedure. Folds are drawn at the decision-maker level: an individual's entire choice history sits in exactly one fold so that a panel cannot leak between training and hold-out data.
+`cv_optimal_classes` assigns each decision-maker's complete choice history to one
+fold, preventing leakage between training and validation data.
 
 !!! warning "Experimental"
-    The cross-validation utility is functional but still labelled experimental. Expect occasional refinements as I use this functionality in my own work.
+    The cross-validation API remains experimental and may change between minor
+    releases.
 
 ## Running the sweep
 
-Let's re-use the long-format Apollo frame (with the `income_band` column) *and the formula-based `LCLSpec`* from the [estimation tutorial](estimation.md). Passing the same spec keeps the column mapping, the `C(alt)` constants, the `C(income_band)` membership terms, and the `cost` numeraire in one place; `num_classes_list` then sweeps the class count, overriding `spec.classes`. Each fold re-fits the formula from scratch, so the categorical base levels are learned per training fold. The search below evaluates two, three, four, and five classes with three-fold CV. To keep the example speedy on a single device, we trim the inner EM loop to twenty-five iterations; in practice you'd loosen this when the optimum is already obvious from a coarse sweep.
+We reuse the long-format Apollo data and labeled `LCLSpec` from the
+[estimation tutorial](estimation.md). `num_classes_list` overrides `spec.classes` for
+each candidate. Every fold fits its formula encoder on the training data. The shorter
+shorter budget below keeps the example practical, but it is not suitable for a final
+model-selection decision.
 
 ```python
 import lcl
@@ -26,6 +34,13 @@ spec = LCLSpec(
     utility_formula="choice ~ cost + time + C(alt)",
     membership_formula="~ C(income_band) + female",
     constraints={"cost": NegativeCoefficient()},
+    variable_labels={
+        "cost": "Fare",
+        "time": "Travel time",
+        "alt": "Travel mode",
+        "income_band": "Household income band",
+        "female": "Female traveler",
+    },
 )
 
 cv_results = lcl.cv_optimal_classes(
@@ -47,18 +62,28 @@ shape: (4, 2)
 │ ---         ┆ ---          │
 │ i64         ┆ f64          │
 ╞═════════════╪══════════════╡
-│ 2           ┆ -2178.832849 │
-│ 3           ┆ -2148.768403 │
-│ 4           ┆ -2147.733992 │
-│ 5           ┆ -2148.063559 │
+│ 2           ┆ -2178.832838 │
+│ 3           ┆ -2148.768534 │
+│ 4           ┆ -2147.732898 │
+│ 5           ┆ -2148.065152 │
 └─────────────┴──────────────┘
 ```
 
-The out-of-sample log-likelihood rises sharply from two to three classes, edges up to a peak at four, and then slips back at five. On this richer specification four classes is the clear choice; the decline past four is the telltale sign of a fifth component fitting noise rather than signal.
+!!! warning "Illustrative iteration budget"
+    These transcript values use 25 EM iterations, and the fold fits reached that
+    cap. They verify the documented workflow but are not publication-ready model
+    comparisons. Increase `max_em_iter` until every candidate fit satisfies the
+    convergence checks before selecting a class count.
+
+The held-out log likelihood improves substantially from two to three classes. The
+differences among three, four, and five classes are much smaller, so the result should
+be read alongside convergence diagnostics and information criteria rather than as a
+decisive ranking.
 
 ## Plotting the curve
 
-Eye-balling a table of likelihoods is easy when there are four rows, but tougher when you're comparing a dozen candidate Ks. Vega-Altair generates a tidy interactive curve:
+An interactive curve is easier to scan when the candidate set grows. Altair can
+render the result directly:
 
 ```python
 import altair as alt
@@ -101,11 +126,11 @@ def plot_cv(cv_df: pl.DataFrame) -> alt.LayerChart:
 plot_cv(cv_results).save("cv_plot.html")
 ```
 
-Open `cv_plot.html` and you have an interactive plot of the curve with the peak highlighted. For a paper figure, swap `.save("cv_plot.html")` for `.save("cv_plot.svg")`.
+Open `cv_plot.html` for the interactive chart. Save as SVG for a static figure.
 
 ## Practical notes
 
-- **Stick with a small number of folds for initial screening.** Three folds is plenty to see the qualitative shape of the curve. Bump to five or ten once you've narrowed the range.
+- **Use a small fold count for initial screening.** Increase it after narrowing the candidate range.
 - **Use the same `FitOptions` across folds.** Differing iteration budgets across folds confound the comparison.
-- **Inspect a fold that fails to converge.** `cv_optimal_classes` swallows individual fold failures and records `NaN`; if you see one, refit that fold with `lcl.fit` (or `results.diagnostics()` on the refit) to see what went wrong.
-- **Pair CV with the information criteria.** When CV picks $K^*$ and BIC picks $K^* - 1$, the latter is often the right call for inference; the smaller model trades a small amount of fit for tighter standard errors.
+- **Investigate failed folds.** A `NaN` indicates a failed fold. Refit it directly and inspect the diagnostics.
+- **Compare several criteria.** Prefer a simpler model when held-out performance is effectively tied and its classes are better identified.

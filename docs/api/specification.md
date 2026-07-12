@@ -1,6 +1,8 @@
 # Specification & options
 
-The high-level entry point. Describe the model declaratively with an [`LCLSpec`][lcl.spec.LCLSpec], then estimate it with [`lcl.fit`][lcl.fit]. Behaviour is tuned through four grouped options objects rather than a long keyword list: `FitOptions` (the EM loop), `OptimizationOptions` (the M-step optimizer), `InferenceOptions` (covariance and standard errors), and `DiagnosticsOptions` (the post-fit health checks).
+Define a model with [`LCLSpec`][lcl.spec.LCLSpec], then estimate it with
+[`lcl.fit`][lcl.fit]. Four option objects configure the EM loop, Newton optimizer,
+inference, and diagnostics without expanding the fitting signature.
 
 ## Fitting
 

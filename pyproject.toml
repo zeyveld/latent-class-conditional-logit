@@ -37,6 +37,7 @@ dev = [
     "ruff>=0.15.8",
 ]
 docs = [
+    "altair>=5.0",
     "mkdocs-autorefs>=1.4.4",
     "mkdocs-material>=9.7.6",
     "mkdocstrings[python]>=1.0.3",

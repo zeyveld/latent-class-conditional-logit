@@ -9,6 +9,7 @@ theme:
   favicon: assets/favicon.svg
   features:
     - navigation.tabs
+    - navigation.sections
     - navigation.indexes
     - navigation.top
     - content.code.copy
@@ -53,6 +54,9 @@ markdown_extensions:
   - pymdownx.inlinehilite
   - pymdownx.snippets
   - pymdownx.superfences
+  - attr_list
+  - md_in_html
+  - tables
   - admonition
   - pymdownx.details
   - pymdownx.arithmatex:
@@ -70,5 +74,4 @@ nav:
       - Cross-validation: api/cross_validation.md
 
 extra_javascript:
-  - https://cdnjs.cloudflare.com/polyfill/v3/polyfill.min.js?version=4.8.0&features=es6
   - https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js

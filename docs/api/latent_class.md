@@ -1,8 +1,11 @@
 # Latent-class conditional logit
 
-The headline estimator: a finite mixture of conditional logits, fit by expectation-maximization, with optional class-membership demographic regression. Class-specific taste vectors are recovered via maximum likelihood at each M-step; class probabilities are updated either as aggregate shares or, when demographics are present, using a fractional-response multinomial logit model.
+The latent-class estimator fits a finite mixture of conditional logits by
+expectation-maximization. Class membership may be represented by aggregate shares or
+modeled as a function of panel characteristics with fractional multinomial logit.
 
-Most users reach this estimator through the declarative [`LCLSpec` + `lcl.fit`](specification.md) workflow; the class below is what `lcl.fit` constructs and fits under the hood, and it can also be driven directly.
+Most users should start with [`LCLSpec` and `lcl.fit`](specification.md). The lower-level
+class remains available for direct use.
 
 ## Model
 

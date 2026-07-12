@@ -1,6 +1,7 @@
 # Conditional logit
 
-The standard McFadden conditional logit, which estimates single vector of taste parameters across the entire sample. Useful both as a baseline against richer models and as the inner kernel of the latent-class M-step.
+The McFadden conditional logit estimates one taste vector for the full sample. It
+provides a useful homogeneous benchmark for latent-class specifications.
 
 ## Model
 
