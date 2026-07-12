@@ -50,7 +50,7 @@ def _em_alg(
     num_classes : int
         Number of latent classes.
     mle_config : :class:`~lcl._struct.MleConfig`
-        Optimization settings for the MLE solver (L-BFGS).
+        Optimization settings for the exact-Newton MLE solver.
     em_alg_config : :class:`~lcl._struct.EMAlgConfig`
         Configuration containing the JAX PRNG seed for reproducible partitioning.
     numeraire_idx : int | None, optional
@@ -74,7 +74,7 @@ def _em_alg(
     latent_betas = em_vars.latent_betas
     shares = em_vars.shares
 
-    # 1. Compute conditional class membership probabilities given choices and demographics
+    # Update posterior class-membership probabilities from choices and demographics.
     updated_class_probs_by_panel, updated_class_probs_by_choice = (
         _compute_conditional_class_probs(
             structural_betas,
@@ -85,8 +85,7 @@ def _em_alg(
         )
     )
 
-    # 2. Update classes' respective taste coefficients based on conditional
-    # class membership probabilities
+    # Update class-specific taste coefficients using posterior case weights.
     updated_latent_betas = _update_betas(
         latent_betas,
         updated_class_probs_by_choice,
@@ -97,9 +96,7 @@ def _em_alg(
         numeraire_min_abs,
     )
 
-    # 3. Update class membership model coefficients or class share vectors
-
-    # 3.1 If demographics omitted, update class share vectors
+    # Without demographics, update the aggregate class-share vector directly.
     if data.dems is None:
         updated_shares = (
             updated_class_probs_by_panel.sum(axis=0)
@@ -112,7 +109,7 @@ def _em_alg(
         )  # (Np, C)
         updated_thetas = None  # Not applicable
 
-    # 3.2 Otherwise, update class membership model coefficients
+    # With demographics, update the class-membership regression.
     else:
         # Initialize class membership model coefficients if not provided
         if em_vars.thetas is None:
@@ -128,8 +125,7 @@ def _em_alg(
         )
         updated_shares = unconditional_class_probs_by_panel.mean(axis=0)
 
-    # 4. Compute unconditional log likelihood given taste coefficients and class membership
-    # coefficients
+    # Evaluate the observed-data likelihood at the completed EM update.
     updated_structural_betas = _to_structural_betas(
         updated_latent_betas, numeraire_idx, numeraire_min_abs
     )
@@ -187,7 +183,7 @@ def _compute_conditional_class_probs(
         log_class_probs = jnp.log(jnp.maximum(shares, 1e-300))[None, :]
 
     else:
-        class_probs_given_dems, *_ = _predict_class_membership_probs(thetas, data)
+        class_probs_given_dems = _predict_class_membership_probs(thetas, data)
         log_class_probs = jnp.log(jnp.maximum(class_probs_given_dems, 1e-300))
 
     log_kernels = _compute_log_kernels(structural_betas, diff_unchosen_chosen, data)
@@ -237,11 +233,10 @@ def _update_betas(
     Float64[Array, "alt_vars classes"]
         Updated taste parameters optimized for the current EM step.
     """
-
     num_classes = betas.shape[1]
     num_devices = em_alg_config.num_devices
 
-    # 1. Padding to ensure perfectly balanced workload across GPUs
+    # Pad classes so every selected accelerator receives the same workload.
     classes_per_device = math.ceil(num_classes / num_devices)
     padded_num_classes = classes_per_device * num_devices
     pad_size = padded_num_classes - num_classes
@@ -257,7 +252,7 @@ def _update_betas(
         betas_padded = betas
         weights_padded = class_probs_by_choice
 
-    # 2. Reshape for sharded execution: (devices, classes_per_device, features/cases)
+    # Reshape to (devices, classes_per_device, features/cases) for sharding.
     betas_reshaped = betas_padded.T.reshape(num_devices, classes_per_device, -1)
     weights_reshaped = weights_padded.T.reshape(num_devices, classes_per_device, -1)
 
@@ -382,6 +377,10 @@ def _distributed_update(
             w,
             maxiter=mle_config.maxiter,
             tol=mle_config.ftol,
+            damping=mle_config.hessian_damping,
+            max_step_norm=mle_config.max_step_norm,
+            line_search_maxiter=mle_config.line_search_maxiter,
+            accept_any_decrease=mle_config.accept_any_decrease,
         )
         return optim_res.params
 
@@ -431,39 +430,11 @@ def _compute_unconditional_loglik(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
 ) -> Float64[Array, ""]:
-    """Wrapper to aggregate panel log-likelihoods to a scalar for convergence checking."""
-
-    # Call the array function and sum it to a scalar
+    """Aggregate panel log likelihoods to a scalar for convergence checking."""
     panel_logliks = _compute_panel_logliks(
         structural_betas, class_probs_by_panel, diff_unchosen_chosen, data
     )
     return jnp.sum(panel_logliks)
-
-
-@filter_jit
-def _compute_kernels(
-    betas: Float64[Array, "alt_vars classes"],
-    diff_unchosen_chosen: DiffUnchosenChosen,
-    data: Data,
-) -> Float64[Array, "panels classes"]:
-    """Compute the probability of observing a decision-maker's entire sequence of choices.
-
-    Parameters
-    ----------
-    betas : Float64[Array, "alt_vars classes"]
-        Taste parameters for each latent class.
-    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
-        Differenced design matrix.
-    data : :class:`~lcl._struct.Data`
-        Core choice data and metadata.
-
-    Returns
-    -------
-    Float64[Array, "panels classes"]
-        Matrix mapping the joint probability of each decision-maker's sequence
-        conditional on membership in each latent class.
-    """
-    return jnp.exp(_compute_log_kernels(betas, diff_unchosen_chosen, data))
 
 
 @filter_jit
@@ -484,32 +455,3 @@ def _compute_log_kernels(
         data.panels_of_cases,
         data.num_panels,
     )
-
-
-def _compute_probs_and_exp_utility(
-    latent_betas: Float64[Array, "alt_vars"], data: Data
-) -> tuple[Float64[Array, "alts_by_case"], Float64[Array, "alts_by_case"]]:
-    """Compute conditional choice probabilities for an individual latent class.
-
-    Parameters
-    ----------
-    latent_betas : Float64[Array, "alt_vars"]
-        Vector of taste parameters for a specific latent class.
-    data : :class:`~lcl._struct.Data`
-        Core choice data and metadata.
-
-    Returns
-    -------
-    probs : Float64[Array, "alts_by_case"]
-        Vector of conditional choice probabilities across all alternatives.
-    eV : Float64[Array, "alts_by_case"]
-        Exponentiated representative utility across all alternatives.
-    """
-    from lcl._kernels import _choice_probabilities_and_logsum
-
-    probs, logsum = _choice_probabilities_and_logsum(
-        data.X, latent_betas[:, None], data.cases, data.num_cases
-    )
-    eV = jnp.exp(data.X.dot(latent_betas.T) - logsum[data.cases, 0])
-    probs = probs[:, 0]
-    return probs, eV

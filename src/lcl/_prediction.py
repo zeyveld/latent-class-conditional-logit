@@ -210,6 +210,7 @@ def _format_wtp_table(
     title: str,
     res_df: pl.DataFrame,
     demographic_var: str,
+    demographic_label: str,
     num_decimals: int,
 ) -> str:
     """Format a WTP summary as LaTeX plus a terminal preview.
@@ -223,6 +224,8 @@ def _format_wtp_table(
         ``Standard_Error``.
     demographic_var : str
         Name of the partitioning variable column in ``res_df``.
+    demographic_label : str
+        Human-readable label for the partitioning variable.
     num_decimals : int
         Number of decimal places for estimates and standard errors.
 
@@ -232,7 +235,7 @@ def _format_wtp_table(
         A formatted string containing the title, LaTeX table, and terminal preview.
     """
     converter = LatexNodes2Text(math_mode="text")
-    header = (demographic_var, "Mean marginal WTP")
+    header = (demographic_label, "Mean marginal WTP")
     header_clean = [converter.latex_to_text(col) for col in header]
     latex_header = [_escape_latex(col) for col in header]
 
@@ -532,7 +535,9 @@ class LCLPrediction:
         Returns
         -------
         dict[str, pl.DataFrame]
-            Summary tables keyed by their printed titles.
+            Summary tables keyed by their printed titles.  Each table preserves
+            raw variable names in ``variable`` and ``partition_variable`` and
+            includes presentation labels in ``label`` and ``partition_label``.
 
         Raises
         ------
@@ -636,6 +641,8 @@ class LCLPrediction:
                     f"Alternative-specific variable '{req.alt_var}' not found in "
                     "model specification."
                 )
+            target_label = self.results.model.variable_label(req.alt_var)
+            partition_label = self.results.model.variable_label(req.demographic_var)
             selected_class_probs = None
             if se == "none":
                 selected_class_probs = self._class_probs_for_wtp(class_probabilities)
@@ -672,6 +679,10 @@ class LCLPrediction:
 
                 summary_rows.append(
                     {
+                        "variable": req.alt_var,
+                        "label": target_label,
+                        "partition_variable": req.demographic_var,
+                        "partition_label": partition_label,
                         req.demographic_var: str(_partition_label(partition_name)),
                         "Mean_Marginal_WTP": float(mean_wtp),
                         "Standard_Error": se_float,
@@ -687,14 +698,20 @@ class LCLPrediction:
                 else partition_type.value
             )
             title = (
-                f"Marginal WTP for {req.alt_var} by "
-                f"{req.demographic_var} ({partition_desc})"
+                f"Marginal WTP for {target_label} by "
+                f"{partition_label} ({partition_desc})"
             )
             summary_tables[title] = res_df
             log_or_print(
                 logger,
                 "%s",
-                _format_wtp_table(title, res_df, req.demographic_var, num_decimals),
+                _format_wtp_table(
+                    title,
+                    res_df,
+                    req.demographic_var,
+                    partition_label,
+                    num_decimals,
+                ),
             )
 
         return summary_tables
@@ -719,8 +736,8 @@ class LCLPrediction:
         Returns
         -------
         pl.DataFrame
-            Class-specific ratios ``beta_target / -beta_numeraire`` and the
-            denominator used for each class.
+            Class-specific ratios ``beta_target / -beta_numeraire`` with raw
+            variable names, display labels, and denominator diagnostics.
         """
         numeraire_idx = getattr(self.results.model, "numeraire_idx", None)
         if numeraire_idx is None:
@@ -741,7 +758,11 @@ class LCLPrediction:
                 rows.append(
                     {
                         "variable": variable,
+                        "label": self.results.model.variable_label(variable),
                         "denominator": self.results.model.numeraire,
+                        "denominator_label": self.results.model.variable_label(
+                            str(self.results.model.numeraire)
+                        ),
                         "class": class_idx,
                         "tradeoff": float(ratios[class_idx]),
                         "denominator_value": float(denominator[class_idx]),
@@ -762,6 +783,10 @@ class LCLPrediction:
             {
                 "class": list(range(self.results.model.num_classes)),
                 "denominator": [self.results.model.numeraire]
+                * self.results.model.num_classes,
+                "denominator_label": [
+                    self.results.model.variable_label(str(self.results.model.numeraire))
+                ]
                 * self.results.model.num_classes,
                 "denominator_value": onp.asarray(denominator),
                 "abs_denominator": onp.asarray(jnp.abs(denominator)),
@@ -824,7 +849,7 @@ class LCLPrediction:
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
     ) -> Float64[Array, ""]:
-        """Internal objective function for Delta Method variance evaluation.
+        """Evaluate the subset WTP objective used by the delta method.
 
         Computes the expected WTP for a specific demographic subset by weighting the
         class-specific WTP ratios by the subset's average posterior class membership
@@ -862,8 +887,8 @@ class LCLPrediction:
             getattr(self.results.model, "numeraire_min_abs", 1e-5),
         )
 
-        # WTP = Beta_target / (-Beta_cost) ensures positive estimates
-        # given that Beta_cost is mathematically constrained to be negative.
+        # Express the target coefficient in units of positive marginal utility of
+        # income, -beta_cost. The target coefficient determines the resulting sign.
         wtp_by_class = structural_betas[target_idx, :] / (
             -structural_betas[cost_idx, :]
         )

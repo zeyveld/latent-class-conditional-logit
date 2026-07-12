@@ -1,7 +1,7 @@
 """Estimation and prediction for conditional logit."""
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from time import time
 from typing import Any
 
@@ -13,7 +13,7 @@ from jax.ops import segment_sum
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float64, install_import_hook
 from pylatexenc.latex2text import LatexNodes2Text  # type: ignore
-from scipy.stats import t
+from scipy.stats import norm
 from tabulate import tabulate
 
 # Decorate `@jaxtyped(typechecker=beartype.beartype)`
@@ -22,6 +22,7 @@ with install_import_hook("lcl", "beartype.beartype"):
     from lcl._case_utils import (
         _diff_unchosen_chosen,
         _loglik_gradient,
+        _loglik_value,
         _to_structural_betas,
     )
     from lcl._choice_model import ChoiceModel
@@ -74,6 +75,7 @@ class ConditionalLogit(ChoiceModel):
         utility_formula: str | None = None,
         choice_col: str | None = None,
         case_varnames: Sequence[str] | None = None,
+        variable_labels: Mapping[str, str] | None = None,
         weights: ArrayLike | None = None,
         init_beta: ArrayLike | None = None,
         mle_config: MleConfig | None = None,
@@ -106,12 +108,15 @@ class ConditionalLogit(ChoiceModel):
             Name of the boolean/binary column indicating chosen alternatives.
         case_varnames : Sequence[str] | None, optional
             List of alternative-specific variables.
+        variable_labels : Mapping[str, str] | None, optional
+            Optional mapping from raw DataFrame/model variable names to
+            human-readable labels used in printed coefficient tables.
         weights : ArrayLike | None, optional
             ``(Nc,)`` vector of choice situation importance weights.
         init_beta : ArrayLike | None, optional
             ``(K,)`` vector of initial taste parameters.
         mle_config : :class:`~lcl._struct.MleConfig`, optional
-            Configuration for the L-BFGS optimization routine.
+            Configuration for safeguarded exact-Newton optimization.
         error_config : :class:`~lcl._struct.ErrorConfig`, optional
             Configuration determining the robust covariance estimation strategy.
 
@@ -139,11 +144,16 @@ class ConditionalLogit(ChoiceModel):
             membership_formula=None,
             choice_col=choice_col,
             case_varnames=case_varnames,
-            dem_varnames=None,  # Standard CL does not take demographics
+            dem_varnames=None,
             dems_data=None,
         )
 
-        self._pre_fit(parsed_data.case_varnames, None, self.numeraire)
+        self._pre_fit(
+            parsed_data.case_varnames,
+            None,
+            self.numeraire,
+            variable_labels=variable_labels,
+        )
         self.num_vars = len(self.case_varnames)
 
         if self.numeraire:
@@ -167,6 +177,7 @@ class ConditionalLogit(ChoiceModel):
 
         # Estimate the conditional logit model
         optim_res = _minimize(
+            _loglik_value,
             _loglik_gradient,
             init_beta_arr,
             args=(diff_unchosen_chosen, weights_arr),
@@ -236,10 +247,9 @@ class CLResults:
         self.hess_inv = optim_res.hess_inv
 
         if error_config.skip_std_errs:
-            self.hess_inv = jnp.eye(len(optim_res.params))
-
-        # Covariance Calculation (Cluster-Robust, Standard Robust, or Unadjusted)
-        if error_config.robust:
+            self.hess_inv = jnp.full_like(self.hess_inv, jnp.nan)
+            self.covariance = self.hess_inv
+        elif error_config.robust:
             if (
                 has_panels
                 and data_struct.panels_of_cases is not None
@@ -254,6 +264,10 @@ class CLResults:
                 B = grad_g.T @ grad_g
                 robust_cov = self.hess_inv @ B @ self.hess_inv
                 G = data_struct.num_panels
+                if G < 2:
+                    raise ValueError(
+                        "Cluster-robust covariance requires at least two panels."
+                    )
                 self.covariance = robust_cov * (G / (G - 1))
             else:
                 # Standard Huber-White Robust Standard Errors
@@ -279,7 +293,7 @@ class CLResults:
             self.stderr = jnp.sqrt(jnp.diag(self.covariance))
 
         self.zvalues = self.coeff_ / self.stderr
-        self.pvalues = 2 * t.cdf(-onp.abs(self.zvalues), df=data_struct.num_cases)
+        self.pvalues = 2 * norm.cdf(-onp.abs(self.zvalues))
         self.loglikelihood = -optim_res.neg_loglik
         self.estimation_message = optim_res.message
         self.total_iter = optim_res.nit
@@ -309,26 +323,65 @@ class CLResults:
                 optim_res.message,
             )
 
+    def coefficient_table(self) -> pl.DataFrame:
+        """Return conditional-logit coefficients with presentation labels.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row per alternative-specific variable with raw variable names,
+            display labels, estimates, standard errors, z-values, and p-values.
+        """
+        rows = []
+        for coeff_idx, variable in enumerate(self.model.case_varnames):
+            rows.append(
+                {
+                    "variable": variable,
+                    "label": self.model.variable_label(variable),
+                    "estimate": float(self.coeff_[coeff_idx]),
+                    "std_error": float(self.stderr[coeff_idx]),
+                    "z_value": float(self.zvalues[coeff_idx]),
+                    "p_value": float(self.pvalues[coeff_idx]),
+                }
+            )
+        return pl.DataFrame(rows)
+
     def summarize_betas(
         self,
         header: tuple[str, str, str] = ("Variable", "Estimate", "Std. Error"),
         num_decimals: int = 3,
-    ) -> None:
-        """Print LaTeX and plain-text tables summarizing parameter estimates and standard errors."""
+    ) -> pl.DataFrame:
+        """Print and return a table of parameter estimates and standard errors.
+
+        Parameters
+        ----------
+        header : tuple[str, str, str], default=("Variable", "Estimate", "Std. Error")
+            Column labels used for printed LaTeX and terminal tables.
+        num_decimals : int, default=3
+            Number of decimal places used in printed tables.
+
+        Returns
+        -------
+        pl.DataFrame
+            Tidy coefficient table.  The ``variable`` column preserves raw model
+            names, while ``label`` contains presentation labels.
+        """
+        table_df = self.coefficient_table()
         body_rows, data_clean = [], []
         converter = LatexNodes2Text(math_mode="text")
         header_clean = [converter.latex_to_text(col) for col in header]
 
-        for coeff_idx, coeff_nm in enumerate(self.model.case_varnames):
+        for row in table_df.iter_rows(named=True):
+            coeff_nm = str(row["label"])
             body_rows.append(
-                f"{coeff_nm} & {self.coeff_[coeff_idx]:.{num_decimals}f} & {self.stderr[coeff_idx]:.{num_decimals}f} \\\\"
+                f"{coeff_nm} & {float(row['estimate']):.{num_decimals}f} & {float(row['std_error']):.{num_decimals}f} \\\\"
             )
             var_clean = converter.latex_to_text(coeff_nm)
             data_clean.append(
                 (
                     var_clean,
-                    f"{self.coeff_[coeff_idx]:.{num_decimals}f}",
-                    f"{self.stderr[coeff_idx]:.{num_decimals}f}",
+                    f"{float(row['estimate']):.{num_decimals}f}",
+                    f"{float(row['std_error']):.{num_decimals}f}",
                 )
             )
 
@@ -349,10 +402,11 @@ class CLResults:
             latex_string,
             table_preview,
         )
+        return table_df
 
-    def summarize(self, num_decimals: int = 3) -> None:
+    def summarize(self, num_decimals: int = 3) -> pl.DataFrame:
         """Alias for :meth:`summarize_betas`."""
-        self.summarize_betas(num_decimals=num_decimals)
+        return self.summarize_betas(num_decimals=num_decimals)
 
     def predict(
         self,

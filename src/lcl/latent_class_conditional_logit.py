@@ -1,7 +1,7 @@
 """Estimation for latent-class conditional logit."""
 
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from time import time
 from typing import Any
@@ -21,6 +21,7 @@ from lcl._case_utils import (
 from lcl._choice_model import ChoiceModel
 from lcl._em_alg_startup import _get_starting_vals
 from lcl._em_alg_steps import _em_alg
+from lcl._labels import merge_variable_labels
 from lcl._logging import log_or_print
 from lcl._results import LCLResults
 from lcl._struct import (
@@ -120,6 +121,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         choice_col: str | None = None,
         case_varnames: Sequence[str] | None = None,
         dem_varnames: Sequence[str] | None = None,
+        variable_labels: Mapping[str, str] | None = None,
         dems_data: Any | None = None,
         em_alg_config: EMAlgConfig | None = None,
         mle_config: MleConfig | None = None,
@@ -170,6 +172,11 @@ class LatentClassConditionalLogit(ChoiceModel):
             specification. Required if `formula` is not provided.
         dem_varnames : Sequence[str] | None, default=None
             A list of demographic variables used to predict latent class membership.
+        variable_labels : Mapping[str, str] | None, default=None
+            Optional mapping from raw DataFrame/model variable names to
+            human-readable labels used in presentation tables.  Labels do not
+            change model specification, constraints, prediction inputs, or WTP
+            request names.
         dems_data : Any | None, default=None
             An optional, separate panel-level dataset containing demographics. If
             provided, it will be merged with the main `data` on `panels_col`.
@@ -178,7 +185,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             algorithm (e.g., maximum iterations, tolerance, hardware distribution).
         mle_config : :class:`~lcl._struct.MleConfig`, default=MleConfig()
             A dataclass (PyTree) containing optimization settings for the M-step's
-            internal L-BFGS solver.
+            internal exact-Newton solver.
 
         Returns
         -------
@@ -221,6 +228,10 @@ class LatentClassConditionalLogit(ChoiceModel):
             if self.spec.numeraire is not None:
                 self.numeraire = self.spec.numeraire
                 self.numeraire_min_abs = self.spec.numeraire_min_abs
+            variable_labels = merge_variable_labels(
+                self.spec.variable_labels, variable_labels
+            )
+            self.spec = replace(self.spec, variable_labels=variable_labels)
 
         if alts_col is None or cases_col is None or panels_col is None:
             raise ValueError(
@@ -254,7 +265,10 @@ class LatentClassConditionalLogit(ChoiceModel):
         )
 
         self._pre_fit(
-            parsed_data.case_varnames, parsed_data.dem_varnames, self.numeraire
+            parsed_data.case_varnames,
+            parsed_data.dem_varnames,
+            self.numeraire,
+            variable_labels=variable_labels,
         )
         self.num_vars = len(self.case_varnames)
         self.num_dem_vars = len(self.dem_varnames) if self.dem_varnames else 0
@@ -299,6 +313,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             progress_callback({"event": "hardware", "message": message})
 
         logliks_list, em_recursion = [], 0
+        converged = False
         em_history_rows: list[dict[str, Any]] = []
         while em_recursion < em_alg_config.maxiter:
             logger.info("EM recursion: %s", em_recursion)
@@ -320,17 +335,24 @@ class LatentClassConditionalLogit(ChoiceModel):
             em_history_rows.append(self._em_history_row(em_recursion, em_vars))
             em_recursion += 1
 
-            # Only force a host sync every `check_interval` steps
+            # Force a host synchronization only at configured convergence checks.
             if em_recursion >= 5 and (em_recursion % em_alg_config.check_interval == 0):
-                # jax.block_until_ready() forces the sync explicitly here
                 current_ll = float(em_vars.unconditional_loglik)
                 past_ll = float(logliks_list[-5])
 
-                rel_change = abs(current_ll - past_ll) / abs(past_ll)
+                rel_change = abs(current_ll - past_ll) / max(abs(past_ll), 1.0)
                 if rel_change <= em_alg_config.loglik_tol:
+                    converged = True
                     break
 
-        strict_mle_config = replace(mle_config, ftol=1e-8, maxiter=500)
+        strict_mle_config = MleConfig(
+            ftol=1e-8,
+            maxiter=500,
+            hessian_damping=mle_config.hessian_damping,
+            max_step_norm=mle_config.max_step_norm,
+            line_search_maxiter=mle_config.line_search_maxiter,
+            accept_any_decrease=mle_config.accept_any_decrease,
+        )
         em_vars = _em_alg(
             em_vars,
             diff_unchosen_chosen,
@@ -359,6 +381,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             em_vars=em_vars,
             estimation_data=data_struct,
             em_recursion=em_recursion,
+            converged=converged,
             em_alg_config=em_alg_config,
             error_config=error_config,
             diagnostics_config=diagnostics,

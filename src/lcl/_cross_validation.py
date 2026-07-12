@@ -188,7 +188,7 @@ def cv_optimal_classes(
             test_df = df.filter(pl.col(panels_col).is_in(test_panels))
             train_df = df.filter(~pl.col(panels_col).is_in(test_panels))
 
-            # 1. Instantiate and Fit Model on Training Fold
+            # Fit the requested model on the training panels.
             model = LatentClassConditionalLogit(
                 num_classes=num_classes, numeraire=numeraire
             )
@@ -210,8 +210,7 @@ def cv_optimal_classes(
                     mle_config=mle_config,
                 )
 
-                # 2. Package Test Data using the ingestion engine
-                # This guarantees that the test fold gets properly ranked contiguous IDs
+                # Reuse ingestion so test identifiers are contiguous and aligned.
                 parsed_test = model._ingest_data(
                     data=test_df,
                     alts_col=alts_col,
@@ -229,7 +228,7 @@ def cv_optimal_classes(
                 test_data, *_ = model._setup_data(parsed_test)
                 test_diff = _diff_unchosen_chosen(test_data)
 
-                # 3. Evaluate Out-of-Sample Log Likelihood
+                # Evaluate the held-out panel log likelihood.
                 oos_ll = res._full_loglik_fn(res.flat_params, test_diff, test_data)
                 fold_lls.append(float(oos_ll))
 

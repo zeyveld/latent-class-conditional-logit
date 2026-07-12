@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from time import time
 from typing import Any
 
@@ -8,6 +8,7 @@ from jax.typing import ArrayLike
 from jaxtyping import Array
 
 from lcl._encoding import ChoiceDataEncoder
+from lcl._labels import label_for_variable, normalize_variable_labels
 from lcl._struct import Data, ParsedData
 
 
@@ -22,6 +23,8 @@ class ChoiceModel(ABC):
         The name of the numeraire variable, if specified.
     dem_varnames : list[str] | None
         Names of the demographic variables, if any.
+    variable_labels : dict[str, str]
+        Optional mapping from raw variable names to presentation labels.
     convergence : bool
         Indicates whether the optimization routine converged successfully.
     """
@@ -29,6 +32,7 @@ class ChoiceModel(ABC):
     case_varnames: list[str]
     numeraire: str | None
     dem_varnames: list[str] | None
+    variable_labels: dict[str, str]
     convergence: bool
     _fit_start_time: float
 
@@ -36,6 +40,7 @@ class ChoiceModel(ABC):
         """Initialize shared model metadata before fitting."""
         self.case_varnames, self.dem_varnames = [], []
         self.numeraire = None
+        self.variable_labels = {}
         self.convergence = False
         self._fit_start_time = 0.0
         self._encoder: ChoiceDataEncoder | None = None
@@ -59,7 +64,7 @@ class ChoiceModel(ABC):
         utility_formula: str | None = None,
         membership_formula: str | None = None,
     ) -> ParsedData:
-        """The core ingestion layer: Converts flexible user inputs into strict matrices.
+        """Convert flexible user inputs into strictly aligned model matrices.
 
         This method centralizes the data wrangling process. It handles sorting,
         merging separate demographic datasets, generating zero-indexed sequential IDs
@@ -217,10 +222,27 @@ class ChoiceModel(ABC):
         case_varnames: Sequence[str],
         dem_varnames: Sequence[str] | None,
         numeraire: str | None,
+        variable_labels: Mapping[str, str] | None = None,
     ) -> None:
         """Initialize metadata tracking prior to estimation loop."""
         self._fit_start_time = time()
         self.case_varnames = list(case_varnames)
         self.dem_varnames = list(dem_varnames) if dem_varnames is not None else None
         self.numeraire = numeraire
+        self.variable_labels = normalize_variable_labels(variable_labels)
         self.numeraire_idx = case_varnames.index(numeraire) if numeraire else None
+
+    def variable_label(self, variable: str) -> str:
+        """Return the human-readable label for a fitted model variable.
+
+        Parameters
+        ----------
+        variable : str
+            Raw model variable name or Formulaic-expanded coefficient name.
+
+        Returns
+        -------
+        str
+            Display label when available; otherwise ``variable`` unchanged.
+        """
+        return label_for_variable(variable, self.variable_labels)

@@ -41,7 +41,7 @@ def _get_starting_vals(
     em_alg_config : :class:`~lcl._struct.EMAlgConfig`
         Configuration containing the JAX PRNG seed for reproducible partitioning.
     mle_config : :class:`~lcl._struct.MleConfig`
-        Optimization settings for the subset-level L-BFGS routines.
+        Optimization settings for the subset-level Newton routines.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable, if applicable.
     numeraire_min_abs : float, default=1e-5
@@ -53,7 +53,6 @@ def _get_starting_vals(
         Container holding the initialized taste parameters, uniform starting shares,
         and first-pass posterior class probabilities.
     """
-
     diff_unchosen_chosen_by_class = _random_class_partition(
         diff_unchosen_chosen, data, num_classes, em_alg_config
     )
@@ -95,6 +94,10 @@ def _get_starting_vals(
             jnp.zeros(data.num_alt_vars),
             tol=mle_config.ftol,
             maxiter=mle_config.maxiter,
+            damping=mle_config.hessian_damping,
+            max_step_norm=mle_config.max_step_norm,
+            line_search_maxiter=mle_config.line_search_maxiter,
+            accept_any_decrease=mle_config.accept_any_decrease,
         )
         latent_betas_list.append(optim_res.params)
 
@@ -157,7 +160,7 @@ def _random_class_partition(
     if num_classes > data.num_panels:
         raise ValueError("num_classes cannot exceed the number of panels.")
 
-    # 1. Randomly assign each panel to one of K classes
+    # Randomly assign each panel to one initial class.
     rng = onp.random.default_rng(em_alg_config.jax_prng_seed)
     shuffled_panels = rng.permutation(data.num_panels)
     panels_per_class = onp.array_split(shuffled_panels, num_classes)
@@ -168,22 +171,22 @@ def _random_class_partition(
     for class_idx, panels_in_class in enumerate(panels_per_class):
         panel_to_class[panels_in_class] = class_idx
 
-    # 2. Map class assignments down to the observation level
+    # Map panel assignments to long-format observations.
     row_classes = panel_to_class[onp.array(diff_unchosen_chosen.panels)]
 
     diff_unchosen_chosen_by_class = []
 
     for class_idx in range(num_classes):
-        # 3. Create boolean mask for the current class subset
+        # Select the observations assigned to the current class.
         mask = row_classes == class_idx
 
-        # 4. Filter the arrays
+        # Filter each aligned array with the class mask.
         class_X = diff_unchosen_chosen.X[mask]
         class_alts = diff_unchosen_chosen.alts[mask]
         raw_cases = diff_unchosen_chosen.cases[mask]
         raw_panels = diff_unchosen_chosen.panels[mask]
 
-        # 5. Crucial: Re-index cases and panels to be strictly contiguous and zero-indexed!
+        # Re-index cases and panels to contiguous, zero-based identifiers.
         # The return_inverse array provides the perfect remapped IDs for JAX segment_sum.
         _, contiguous_cases = onp.unique(raw_cases, return_inverse=True)
         _, contiguous_panels = onp.unique(raw_panels, return_inverse=True)

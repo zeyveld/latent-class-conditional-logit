@@ -61,6 +61,14 @@ def _history_frame(rows: list[dict[str, Any]] | None) -> pl.DataFrame:
     return pl.DataFrame(clean_rows)
 
 
+def _model_variable_label(model: Any, variable: str) -> str:
+    """Return a fitted model's display label for ``variable`` when available."""
+    labeler = getattr(model, "variable_label", None)
+    if callable(labeler):
+        return str(labeler(variable))
+    return variable
+
+
 def _panel_constant_columns(data: object, panel_col: str) -> pl.DataFrame:
     """Return raw columns that are constant within each prediction panel.
 
@@ -169,6 +177,7 @@ class LCLResults:
         em_vars: EMVars,
         estimation_data: Data,
         em_recursion: int,
+        converged: bool,
         em_alg_config: EMAlgConfig,
         error_config: ErrorConfig | None,
         estim_time_sec: float,
@@ -189,6 +198,8 @@ class LCLResults:
             Encoded estimation data.
         em_recursion : int
             Number of EM recursions completed before termination.
+        converged : bool
+            Whether the explicit EM stopping criterion was satisfied.
         em_alg_config : :class:`~lcl._struct.EMAlgConfig`
             EM convergence and iteration configuration.
         error_config : :class:`~lcl._struct.ErrorConfig` | None
@@ -206,7 +217,7 @@ class LCLResults:
         self.em_res = em_vars
         self.data = estimation_data
         self.total_recursions = em_recursion
-        self.converged = em_recursion < (em_alg_config.maxiter - 1)
+        self.converged = converged
         self.estim_time_sec = estim_time_sec
         self.error_config = error_config if error_config is not None else ErrorConfig()
         self.diagnostics_config = (
@@ -246,9 +257,9 @@ class LCLResults:
         self.bic = (
             jnp.log(num_panels) * self.num_params - 2 * self.em_res.unconditional_loglik
         )
-        n_star = (self.num_params + 2) / 24
         self.adjusted_bic = (
-            jnp.log(num_panels) * n_star - 2 * self.em_res.unconditional_loglik
+            jnp.log((num_panels + 2) / 24) * self.num_params
+            - 2 * self.em_res.unconditional_loglik
         )
         logger.info(
             "Information criteria: CAIC=%.1f, BIC=%.1f, adjusted BIC=%.1f",
@@ -422,10 +433,9 @@ class LCLResults:
             val = target_func(flat_params_cpu)
             jac = jacrev(target_func)(flat_params_cpu)
 
-            if val.ndim == 0:
-                variance = jac.T @ cov_matrix @ jac
-            else:
-                variance = jnp.einsum("kp,pq,kq->k", jac, cov_matrix, jac)
+            jac_rows = jac.reshape((-1, flat_params_cpu.size))
+            variance = jnp.einsum("ip,pq,iq->i", jac_rows, cov_matrix, jac_rows)
+            variance = variance.reshape(val.shape)
 
             return val, jnp.sqrt(jnp.maximum(variance, 0.0))
 
@@ -480,7 +490,9 @@ class LCLResults:
         Returns
         -------
         pl.DataFrame
-            Long-format table with one row per variable and latent class.
+            Long-format table with one row per variable and latent class.  The
+            ``variable`` column preserves raw model names; ``label`` contains
+            human-readable presentation labels.
         """
         structural_betas = self.em_res.structural_betas
         if structural_betas is None:
@@ -492,6 +504,7 @@ class LCLResults:
                 rows.append(
                     {
                         "variable": variable,
+                        "label": _model_variable_label(self.model, variable),
                         "class": class_idx,
                         "coefficient": float(beta_array[var_idx, class_idx]),
                         "constrained": variable == self.model.numeraire,
@@ -527,8 +540,8 @@ class LCLResults:
         Returns
         -------
         pl.DataFrame
-            Variables, mean coefficients, standard deviations across classes,
-            Delta-method standard errors, and class-specific extrema.
+            Raw variables, display labels, mean coefficients, standard deviations
+            across classes, Delta-method standard errors, and class-specific extrema.
         """
         if self.data.num_panels is None:
             raise ValueError("Panel identifiers are required to summarize LCL results.")
@@ -551,6 +564,7 @@ class LCLResults:
             rows.append(
                 {
                     "variable": variable,
+                    "label": _model_variable_label(self.model, variable),
                     "mean": float(means[idx]),
                     "mean_se": float(se_means[idx]),
                     "sd": float(stds[idx]),
@@ -570,14 +584,28 @@ class LCLResults:
         ),
         num_decimals: int = 3,
     ) -> pl.DataFrame:
-        """Print and return population-level moments with Delta-method SEs."""
+        """Print and return population-level coefficient moments.
+
+        Parameters
+        ----------
+        header : tuple[str, str, str], default=("Variable", ...)
+            Column labels used in the printed LaTeX and terminal tables.
+        num_decimals : int, default=3
+            Number of decimal places used in printed tables.
+
+        Returns
+        -------
+        pl.DataFrame
+            Tidy coefficient-moment table.  The ``variable`` column preserves raw
+            model names; ``label`` contains presentation labels used for printing.
+        """
         summary_df = self.beta_summary()
         body_rows, data_clean = [], []
         converter = LatexNodes2Text(math_mode="text")
         header_clean = [converter.latex_to_text(col) for col in header]
 
         for row in summary_df.iter_rows(named=True):
-            coeff_nm = str(row["variable"])
+            coeff_nm = str(row["label"])
             body_rows.append(
                 f"{coeff_nm} & {float(row['mean']):.{num_decimals}f} & {float(row['sd']):.{num_decimals}f} \\\\"
             )
@@ -642,11 +670,16 @@ class LCLResults:
                     " [negative, "
                     f"min_abs={getattr(self.model, 'numeraire_min_abs', 1e-5):g}]"
                 )
-            lines.append(f"  {variable}{suffix}")
+            label = _model_variable_label(self.model, variable)
+            variable_text = label if label == variable else f"{label} ({variable})"
+            lines.append(f"  {variable_text}{suffix}")
         lines.append("")
         lines.append("Class-membership variables:")
         if self.model.dem_varnames:
-            lines.extend(f"  {variable}" for variable in self.model.dem_varnames)
+            for variable in self.model.dem_varnames:
+                label = _model_variable_label(self.model, variable)
+                variable_text = label if label == variable else f"{label} ({variable})"
+                lines.append(f"  {variable_text}")
         else:
             lines.append("  none")
         return "\n".join(lines)
@@ -943,9 +976,7 @@ class LCLResults:
         else:
             marginal_utility_income = -structural_betas[numeraire_idx, :]
 
-        surplus_by_class = (
-            log_sum_exp_utility / marginal_utility_income[None, :]
-        ).squeeze()
+        surplus_by_class = log_sum_exp_utility / marginal_utility_income[None, :]
 
         if numeraire_idx is not None:
             betas_sans_numeraire = jnp.delete(structural_betas, numeraire_idx, axis=0)
@@ -994,6 +1025,7 @@ class LCLResults:
         )
 
         first_case_rows = predict_data.cases != jnp.roll(predict_data.cases, shift=1)
+        first_case_rows = first_case_rows.at[0].set(True)
         surplus_df = pl.DataFrame(
             {
                 "panels": onp.array(parsed_predict.original_panels[first_case_rows]),

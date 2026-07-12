@@ -1,4 +1,4 @@
-"""Matrix algebra operations for case data (as against demographic data)"""
+"""Matrix algebra operations for choice-situation data."""
 
 import jax.numpy as jnp
 from equinox import filter_jit
@@ -99,15 +99,13 @@ def _loglik_value(
     Float64[Array, ""]
         Scalar negative log-likelihood.
     """
-    Vd = jnp.minimum(diff_unchosen_chosen.X.dot(structural_betas), 700.0)
-    eVd = jnp.exp(Vd)
-    probs = 1 / (
-        1
-        + segment_sum(
-            eVd, diff_unchosen_chosen.cases, num_segments=diff_unchosen_chosen.num_cases
-        )
+    log_probs, _ = _diff_logit_components(
+        diff_unchosen_chosen.X,
+        structural_betas,
+        diff_unchosen_chosen.cases,
+        diff_unchosen_chosen.num_cases,
     )
-    return -jnp.sum(jnp.log(probs) * weights)
+    return -jnp.sum(log_probs * weights)
 
 
 def _to_structural_betas(
@@ -123,7 +121,7 @@ def _to_structural_betas(
     Parameters
     ----------
     latent_betas : Float64[Array, "..."]
-        Unconstrained parameters managed by the L-BFGS solver.
+        Unconstrained parameters managed by the Newton solver.
     numeraire_idx : int | None
         The column index of the numeraire variable, if applicable.
     numeraire_min_abs : float, default=1e-5
@@ -161,20 +159,18 @@ def _diff_unchosen_chosen(case_data: Data) -> DiffUnchosenChosen:
         )
     if not isinstance(case_data.y, Array):
         raise TypeError("case_data.y must be a JAX array.")
-    _, num_unchosen_per_id = jnp.unique(
-        case_data.cases[~case_data.y], return_counts=True
-    )
+    unchosen = ~case_data.y
     if case_data.panels is not None:
-        panels = case_data.panels[~case_data.y]
+        panels = case_data.panels[unchosen]
     else:
         panels = None
 
     # Compute difference between unchosen alts' characteristics and those of the
-    # chosen alt. That is, X^d_{ij} := X_{ij} - X_{y_i}
-    X_d = case_data.X[~case_data.y] - jnp.repeat(
-        case_data.X[case_data.y], num_unchosen_per_id, axis=0
-    )
-    alts_d = case_data.alts[~case_data.y]  # alt ID for unchosen alts only
-    cases_d = case_data.cases[~case_data.y]  # case ID for unchosen alts only
+    # chosen alt. Contiguous case IDs index the one chosen row per case directly,
+    # avoiding a unique/count/repeat allocation.
+    cases_d = case_data.cases[unchosen]
+    chosen_X_by_case = case_data.X[case_data.y]
+    X_d = case_data.X[unchosen] - chosen_X_by_case[cases_d]
+    alts_d = case_data.alts[unchosen]
 
     return DiffUnchosenChosen(X_d, alts_d, cases_d, panels, case_data.num_cases)

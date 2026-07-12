@@ -6,7 +6,7 @@ import pytest
 from jax.nn import softmax
 
 import lcl
-from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient
+from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient, _loglik_value
 from lcl.constraints import (
     NegativeCoefficient,
     pullback_negative_derivatives,
@@ -94,6 +94,19 @@ def test_loglik_gradient_and_hessian_match_autodiff() -> None:
 
     assert jnp.allclose(grad, jax.grad(objective)(betas))
     assert jnp.allclose(hess, jax.hessian(objective)(betas))
+
+
+def test_scalar_and_derivative_loglik_paths_match_at_extreme_utilities() -> None:
+    data = _tiny_panel_data()
+    diff = _diff_unchosen_chosen(data)
+    weights = jnp.ones(data.num_cases)
+    betas = jnp.array([2.0, -3.0])
+
+    scalar_value = _loglik_value(betas, diff, weights)
+    derivative_value = _loglik_gradient(betas, diff, weights)[0][0]
+
+    assert jnp.isfinite(scalar_value)
+    assert jnp.allclose(scalar_value, derivative_value)
 
 
 def test_negative_constraint_pullback_matches_autodiff() -> None:
@@ -212,6 +225,27 @@ def test_fractional_response_hessian_matches_random_autodiff_simulations() -> No
         assert jnp.max(jnp.abs(hess - autodiff_hess)) < 1e-8
 
 
+def test_fractional_response_derivatives_match_with_extreme_logits() -> None:
+    data = _demographic_data_from_dems(jnp.array([[-1.0], [0.0], [1.0]]))
+    targets = jnp.array(
+        [[0.2, 0.3, 0.5], [0.5, 0.25, 0.25], [0.1, 0.7, 0.2]]
+    )
+    thetas = jnp.array([[900.0, -900.0], [500.0, -500.0]]).ravel()
+
+    def objective(params):
+        return _compute_grouped_data_loglik_grad_hess(params, targets, data, 3)[0]
+
+    value, grad, hess = _compute_grouped_data_loglik_grad_hess(
+        thetas, targets, data, 3
+    )
+
+    assert jnp.isfinite(value)
+    assert jnp.all(jnp.isfinite(grad))
+    assert jnp.all(jnp.isfinite(hess))
+    assert jnp.allclose(grad, jax.grad(objective)(thetas), atol=1e-8)
+    assert jnp.allclose(hess, jax.hessian(objective)(thetas), atol=1e-8)
+
+
 def test_panel_loglik_hessian_stays_finite_with_extreme_utilities() -> None:
     data = _tiny_panel_data()
     diff = _diff_unchosen_chosen(data)
@@ -253,6 +287,29 @@ def test_newton_backtracking_only_uses_scalar_value_function() -> None:
     jax.block_until_ready(res.params)
 
     assert counts == {"value": 2, "heavy": 2}
+
+
+def test_newton_regularizes_an_indefinite_hessian() -> None:
+    def value_fn(params):
+        return (params[0] ** 2 - 1.0) ** 2
+
+    value_grad_hess_fn = jax.value_and_grad(value_fn)
+
+    def derivatives(params):
+        value, grad = value_grad_hess_fn(params)
+        return value, grad, jax.hessian(value_fn)(params)
+
+    result = exact_newton_minimize(
+        value_fn,
+        derivatives,
+        jnp.array([0.1]),
+        tol=1e-8,
+        maxiter=50,
+        max_step_norm=2.0,
+    )
+
+    assert not bool(result.failed)
+    assert jnp.allclose(jnp.abs(result.params), 1.0, atol=1e-5)
 
 
 def _small_lcl_df() -> pl.DataFrame:
@@ -365,6 +422,11 @@ def test_lcl_spec_api_custom_negative_constraint_floor() -> None:
         "grad_norm",
         "effective_panels",
     }
+    expected_abic = (
+        results.num_params * jnp.log((results.data.num_panels + 2) / 24)
+        - 2 * results.em_res.unconditional_loglik
+    )
+    assert jnp.allclose(results.adjusted_bic, expected_abic)
 
 
 def test_lcl_spec_accepts_separate_formula_fields() -> None:
@@ -391,6 +453,46 @@ def test_lcl_spec_accepts_separate_formula_fields() -> None:
 
     assert results.model.case_varnames == ["x"]
     assert results.model.dem_varnames == ["C(segment)[T.treated]"]
+
+
+def test_variable_labels_flow_to_lcl_tables_and_formulaic_terms() -> None:
+    df = _small_lcl_df().with_columns(
+        pl.when(pl.col("dem") > 0)
+        .then(pl.lit("treated"))
+        .otherwise(pl.lit("control"))
+        .alias("segment")
+    )
+    spec = LCLSpec(
+        ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
+        utility_formula="choice ~ x",
+        membership_formula="~ C(segment)",
+        classes=2,
+        variable_labels={
+            "x": "Alternative score",
+            "segment": "Household segment",
+        },
+    )
+
+    results = lcl.fit(
+        df,
+        spec,
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
+    )
+
+    beta_summary = results.beta_summary()
+    class_coefficients = results.class_coefficients()
+
+    assert beta_summary.select("variable", "label").row(0) == (
+        "x",
+        "Alternative score",
+    )
+    assert class_coefficients["label"].unique().to_list() == ["Alternative score"]
+    assert (
+        results.model.variable_label("C(segment)[T.treated]")
+        == "Household segment: treated"
+    )
 
 
 def test_lcl_robust_covariance_and_delta_method_outputs_are_on_cpu() -> None:
@@ -548,6 +650,53 @@ def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data(
     assert "--- LaTeX Output ---" in captured.out
     assert "--- Table preview ---" in captured.out
     assert "shape:" not in captured.out
+
+
+def test_variable_labels_flow_to_wtp_tables_and_class_tradeoffs(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    df = _small_wtp_df()
+    model = LatentClassConditionalLogit(num_classes=2, numeraire="cost")
+    results = model.fit(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["cost", "time"],
+        variable_labels={
+            "cost": "Travel cost",
+            "time": "Travel time",
+            "income_quintile": "Income quintile",
+        },
+        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
+        mle_config=MleConfig(maxiter=2),
+        error_config=ErrorConfig(skip_std_errs=True),
+    )
+    prediction = results.predict(data=df)
+    tables = prediction.compute_wtp(
+        WTPRequest(
+            alt_var="time",
+            demographic_var="income_quintile",
+            partition_type=PartitionType.CATEGORICAL,
+        ),
+        se="none",
+    )
+
+    title, table = next(iter(tables.items()))
+    tradeoffs = prediction.wtp_by_class()
+
+    assert "Marginal WTP for Travel time by Income quintile" in title
+    assert table.select(
+        "variable", "label", "partition_variable", "partition_label"
+    ).row(0) == ("time", "Travel time", "income_quintile", "Income quintile")
+    assert tradeoffs.select("variable", "label", "denominator_label").row(0) == (
+        "time",
+        "Travel time",
+        "Travel cost",
+    )
+    captured = capsys.readouterr()
+    assert "Travel time by Income quintile" in captured.out
 
 
 def test_wtp_uses_stored_posterior_class_probs_with_past_choices() -> None:
@@ -898,6 +1047,10 @@ def test_prediction_noncontiguous_panel_ids() -> None:
 
     assert set(prediction.predicted_probs["panels"].to_list()) == {101, 205}
 
+    one_case = df.filter((pl.col("panel") == 101) & (pl.col("case") == 1))
+    one_case_prediction = results.predict(data=one_case)
+    assert one_case_prediction.surplus.height == 1
+
 
 def test_case_ids_repeated_across_panels_are_not_merged() -> None:
     df = _small_lcl_df()
@@ -951,3 +1104,20 @@ def test_cl_hessian_covariance_uses_exact_hessian_not_opg_inverse() -> None:
     expected_cov = jnp.linalg.pinv(jax.hessian(objective)(results.latent_coeff_))
 
     assert onp.allclose(onp.array(results.covariance), onp.array(expected_cov))
+
+
+def test_cl_skip_standard_errors_returns_nan_inference() -> None:
+    df = _small_lcl_df()
+    results = ConditionalLogit().fit(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["x"],
+        mle_config=MleConfig(maxiter=5),
+        error_config=ErrorConfig(skip_std_errs=True),
+    )
+
+    assert jnp.all(jnp.isnan(results.covariance))
+    assert jnp.all(jnp.isnan(results.stderr))

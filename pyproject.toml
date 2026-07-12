@@ -1,6 +1,6 @@
 [project]
 name = "lcl-choice"
-version = "0.1.35"
+version = "0.1.36"
 description = "A high-performance Python package for estimating latent-class conditional logit models."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -15,11 +15,12 @@ dependencies = [
     "polars>=0.20.0",
     "jaxtyping>=0.2.25",
     "beartype>=0.17.0",
-    "jaxopt>=0.8.5",
     "equinox>=0.13.6",
     "formulaic>=1.2.1",
     "pylatexenc>=2.10",
     "tabulate>=0.10",
+    "pandas>=2.0",
+    "scipy>=1.10",
 ]
 
 [build-system]
@@ -42,15 +43,20 @@ docs = [
 ]
 
 [tool.ruff.lint]
+extend-select = ["D"]
 extend-ignore = [
     "F722",  # Ruff does not parse jaxtyping's shape-string annotations.
     "F821",  # Ruff treats jaxtyping dimension names as undefined variables.
 ]
 
+[tool.ruff.lint.pydocstyle]
+convention = "numpy"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D100", "D103", "D104"]
+
 [[tool.mypy.overrides]]
 module = [
-    "jaxopt",
-    "jaxopt.*",
     "pandas",
     "pandas.*",
     "pylatexenc",

@@ -52,6 +52,8 @@ def _robust_covariance(hess_inv: ArrayLike, grad_n: ArrayLike) -> Array:
         ``(K, K)`` Huber-White robust covariance matrix.
     """
     n = jnp.shape(grad_n)[0]
+    if n < 2:
+        raise ValueError("Robust covariance requires at least two score contributions.")
     grad_n_sub = grad_n - (
         jnp.sum(grad_n, axis=0) / n
     )  # Subtract the mean gradient value

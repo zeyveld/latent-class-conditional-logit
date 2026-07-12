@@ -11,6 +11,7 @@ from lcl.constraints import (
     constraint_summary_rows,
     normalize_negative_constraints,
 )
+from lcl._labels import label_for_variable
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,12 @@ class LCLSpec:
     membership_formula : str | None, default=None
         Right-hand-side Formulaic string for the class-membership demographic
         regression, such as ``"~ income + C(segment)"``.
+    variable_labels : Mapping[str, str] | None, default=None
+        Optional mapping from raw DataFrame/model variable names to human-readable
+        labels used in printed coefficient and WTP/tradeoff tables.  Exact
+        Formulaic-expanded names may also be labeled directly; otherwise labels
+        for raw categorical columns are reused for terms such as
+        ``"C(segment)[T.high]"``.
     """
 
     ids: ChoiceIds
@@ -78,6 +85,7 @@ class LCLSpec:
     formula: str | None = None
     utility_formula: str | None = None
     membership_formula: str | None = None
+    variable_labels: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         """Validate internal consistency."""
@@ -146,11 +154,14 @@ class LCLSpec:
                 for constraint in self.negative_constraints:
                     if constraint.variable == variable:
                         suffix = f" [negative, min_abs={constraint.min_abs:g}]"
-                lines.append(f"  {variable}{suffix}")
+                label = self._display_variable(variable)
+                lines.append(f"  {label}{suffix}")
         lines.append("")
         lines.append("Class-membership variables:")
         if self.membership:
-            lines.extend(f"  {variable}" for variable in self.membership)
+            lines.extend(
+                f"  {self._display_variable(variable)}" for variable in self.membership
+            )
         elif self.membership_formula is not None:
             lines.append(f"  formula: {self.membership_formula}")
         elif self.formula is not None:
@@ -158,6 +169,11 @@ class LCLSpec:
         else:
             lines.append("  none")
         return lines
+
+    def _display_variable(self, variable: str) -> str:
+        """Return a specification variable with its label when available."""
+        label = label_for_variable(variable, self.variable_labels or {})
+        return label if label == variable else f"{label} ({variable})"
 
     def constraint_rows(self) -> list[dict[str, object]]:
         """Return serializable constraint metadata."""

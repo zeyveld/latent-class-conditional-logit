@@ -2,7 +2,7 @@ import logging
 
 import jax.numpy as jnp
 from equinox import filter_jit
-from jax.nn import softmax
+from jax.nn import log_softmax, softmax
 from jaxtyping import Array, Float64
 
 from lcl._optimize import exact_newton_minimize
@@ -57,7 +57,7 @@ def _update_thetas(
     if not convergence:
         logger.warning("Demographic regression failed to converge.")
 
-    predicted_class_probs, *_ = _predict_class_membership_probs(updated_thetas, data)
+    predicted_class_probs = _predict_class_membership_probs(updated_thetas, data)
 
     return updated_thetas, predicted_class_probs
 
@@ -106,7 +106,10 @@ def _perform_frac_response_reg(
         num_classes,
         tol=mle_config.ftol,
         maxiter=mle_config.maxiter,
-        damping=1e-8,
+        damping=mle_config.hessian_damping,
+        max_step_norm=mle_config.max_step_norm,
+        line_search_maxiter=mle_config.line_search_maxiter,
+        accept_any_decrease=mle_config.accept_any_decrease,
     )
     thetas = optim_res.params.reshape(data.num_dem_vars + 1, num_classes - 1)
     return thetas, float(optim_res.error) <= mle_config.ftol
@@ -121,11 +124,8 @@ def _compute_grouped_data_loglik_value(
 ) -> Float64[Array, ""]:
     """Compute the fractional-response negative log likelihood."""
     thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)
-    predicted_class_probs, *_ = _predict_class_membership_probs(thetas, data)
-
-    return -jnp.sum(
-        class_probs_by_panel * jnp.log(jnp.maximum(predicted_class_probs, 1e-250))
-    )
+    logits = _class_membership_logits(thetas, data)
+    return -jnp.sum(class_probs_by_panel * log_softmax(logits, axis=1))
 
 
 @filter_jit
@@ -148,12 +148,11 @@ def _compute_grouped_data_loglik_grad_hess(
     ``k`` and ``l`` is ``sum(w_n) * p_nk * (1[k=l] - p_nl) * z_n z_n'``.
     """
     thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)
-    predicted_class_probs, *_ = _predict_class_membership_probs(thetas, data)
+    logits = _class_membership_logits(thetas, data)
+    predicted_class_probs = softmax(logits, axis=1)
     predicted_nonbaseline = predicted_class_probs[:, 1:]
 
-    neg_loglik = -jnp.sum(
-        class_probs_by_panel * jnp.log(jnp.maximum(predicted_class_probs, 1e-250))
-    )
+    neg_loglik = -jnp.sum(class_probs_by_panel * log_softmax(logits, axis=1))
 
     dem_design = _demographic_design_matrix(data)
     row_weights = class_probs_by_panel.sum(axis=1)
@@ -244,7 +243,7 @@ def _compute_grouped_data_loglik_and_grad(
         Analytic gradient of the negative objective.
     """
     thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)
-    predicted_class_probs, *_ = _predict_class_membership_probs(thetas, data)
+    predicted_class_probs = _predict_class_membership_probs(thetas, data)
     predicted_nonbaseline = predicted_class_probs[:, 1:]
 
     neg_loglik = _compute_grouped_data_loglik_value(
@@ -277,11 +276,7 @@ def _demographic_design_matrix(
 @filter_jit
 def _predict_class_membership_probs(
     thetas: Float64[Array, "dem_vars_plus_one classes_minus_one"], data: Data
-) -> tuple[
-    Float64[Array, "panels classes"],
-    Float64[Array, "panels classes_minus_one"],
-    Float64[Array, "panels"],
-]:
+) -> Float64[Array, "panels classes"]:
     """Compute predicted class-membership probabilities from demographics.
 
     Parameters
@@ -296,22 +291,28 @@ def _predict_class_membership_probs(
     -------
     predicted_class_probs : Float64[Array, "panels classes"]
         Class-membership probabilities for each panel, including the baseline class.
-    exp_latent_class_vars : Float64[Array, "panels classes_minus_one"]
-        Exponentiated non-baseline logits, returned for callers that need low-level
-        diagnostic components.
-    sum_exp_latent_class_vars : Float64[Array, "panels"]
-        Denominator terms for the non-baseline logit representation.
+    """
+    return softmax(_class_membership_logits(thetas, data), axis=1)
+
+
+@filter_jit
+def _class_membership_logits(
+    thetas: Float64[Array, "dem_vars_plus_one classes_minus_one"], data: Data
+) -> Float64[Array, "panels classes"]:
+    """Return baseline-category logits, including the zero reference class.
+
+    Parameters
+    ----------
+    thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
+        Baseline-category multinomial-logit coefficients.
+    data : :class:`~lcl._struct.Data`
+        Estimation data containing the panel-level demographic matrix.
+
+    Returns
+    -------
+    Float64[Array, "panels classes"]
+        Class logits with a zero-valued baseline column.
     """
     dems = _require_demographics(data)
     V = thetas[None, 0] + dems @ thetas[1:]
-    V_full = jnp.concatenate([jnp.zeros((V.shape[0], 1)), V], axis=1)
-    predicted_class_probs = softmax(V_full, axis=1)
-
-    exp_latent_class_vars: Float64[Array, "panels classes-1"] = jnp.exp(
-        jnp.minimum(V, 700.0)
-    )
-    sum_exp_latent_class_vars: Float64[Array, "panels"] = (
-        1.0 + exp_latent_class_vars.sum(axis=1)
-    )
-
-    return predicted_class_probs, exp_latent_class_vars, sum_exp_latent_class_vars
+    return jnp.concatenate([jnp.zeros((V.shape[0], 1), dtype=V.dtype), V], axis=1)

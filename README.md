@@ -83,6 +83,11 @@ spec = LCLSpec(
     membership_formula="~ income",
     classes=2,
     constraints={"price": NegativeCoefficient()},
+    variable_labels={
+        "price": "Price",
+        "quality": "Product quality",
+        "income": "Household income",
+    },
 )
 
 results = lcl.fit(
@@ -103,19 +108,19 @@ Estimation time: 15.344 seconds
 
 --- Table preview ---
 
-┌────────────┬───────────────┬─────────────────────────────┐
-│ Variable   │ Means (β's)   │ Standard deviations (σ's)   │
-├────────────┼───────────────┼─────────────────────────────┤
-│ price      │ -1.124        │ 0.723                       │
-│            │ (0.114)       │ (0.128)                     │
-│ quality    │ 0.905         │ 0.611                       │
-│            │ (0.097)       │ (0.130)                     │
-└────────────┴───────────────┴─────────────────────────────┘
+┌─────────────────┬───────────────┬─────────────────────────────┐
+│ Variable        │ Means (β's)   │ Standard deviations (σ's)   │
+├─────────────────┼───────────────┼─────────────────────────────┤
+│ Price           │ -1.124        │ 0.723                       │
+│                 │ (0.114)       │ (0.128)                     │
+│ Product quality │ 0.905         │ 0.611                       │
+│                 │ (0.097)       │ (0.130)                     │
+└─────────────────┴───────────────┴─────────────────────────────┘
 
 <LCLResults: 2 Classes | Converged | Log likelihood: -597.8 | CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1197.4>
 ```
 
-The parentheses enclose Delta-method standard errors of the population moments. `summarize_betas()` also returns those moments as a tidy Polars frame; the class-specific β's are available with `results.class_coefficients()`.
+The parentheses enclose Delta-method standard errors of the population moments. `summarize_betas()` also returns those moments as a tidy Polars frame; the class-specific β's are available with `results.class_coefficients()`. Both frames preserve raw variable names and include a `label` column for publication-ready tables.
 
 ## Roadmap
 
@@ -139,7 +144,7 @@ uv run pytest tests/
 
 ## Acknowledgments
 
-LCL is built on JAX, Polars, equinox, jaxopt, jaxtyping, beartype, and formulaic. The differenced-design-matrix kernel at the heart of the conditional logit likelihood evaluation owes a particular debt to the [xlogit](https://github.com/arteagac/xlogit/) package by Cristian Arteaga, JeeWoong Park, Prithvi Bhat Beeramoole, and Alexander Paz.
+LCL is built on JAX, Polars, Equinox, jaxtyping, beartype, and Formulaic. The differenced-design-matrix kernel at the heart of the conditional logit likelihood evaluation owes a particular debt to the [xlogit](https://github.com/arteagac/xlogit/) package by Cristian Arteaga, JeeWoong Park, Prithvi Bhat Beeramoole, and Alexander Paz.
 
 The documentation site is set in [Luciole](https://luciole-vision.com/), a typeface designed for visually impaired readers by Laurent Bourcellier and Jonathan Perez in collaboration with the Centre Technique Régional pour la Déficience Visuelle and typographies.fr, released under [CC-BY 4.0](https://creativecommons.org/licenses/by/4.0/).
 

@@ -124,10 +124,44 @@ class DiffUnchosenChosen(NamedTuple):
 
 @dataclass
 class MleConfig:
-    """Container for Maximum Likelihood Estimation (MLE) optimization options."""
+    """Container for safeguarded exact-Newton optimization options.
+
+    Parameters
+    ----------
+    maxiter : int, default=75
+        Maximum Newton iterations.
+    ftol : float, default=1e-5
+        Infinity-norm tolerance for the objective gradient.
+    hessian_damping : float, default=1e-6
+        Initial relative diagonal shift used for modified-Cholesky regularization.
+    max_step_norm : float, default=25.0
+        Maximum Euclidean norm of a trial search direction.
+    line_search_maxiter : int, default=25
+        Maximum Armijo step halvings per Newton iteration.
+    accept_any_decrease : bool, default=False
+        Accept any finite objective decrease after backtracking instead of requiring
+        Armijo sufficient decrease.
+    """
 
     maxiter: int = 75
     ftol: float = 1e-5
+    hessian_damping: float = 1e-6
+    max_step_norm: float = 25.0
+    line_search_maxiter: int = 25
+    accept_any_decrease: bool = False
+
+    def __post_init__(self) -> None:
+        """Validate optimizer settings."""
+        if self.maxiter < 0:
+            raise ValueError("maxiter must be nonnegative.")
+        if self.ftol <= 0:
+            raise ValueError("ftol must be positive.")
+        if self.hessian_damping <= 0:
+            raise ValueError("hessian_damping must be positive.")
+        if self.max_step_norm <= 0:
+            raise ValueError("max_step_norm must be positive.")
+        if self.line_search_maxiter < 0:
+            raise ValueError("line_search_maxiter must be nonnegative.")
 
 
 @dataclass
@@ -137,7 +171,7 @@ class OptimizationOptions(MleConfig):
     Parameters
     ----------
     maxiter : int, default=75
-        Maximum Newton/BFGS iterations used inside each M-step.
+        Maximum Newton iterations used inside each M-step.
     ftol : float, default=1e-5
         Gradient tolerance.  Kept for backward compatibility with
         :class:`MleConfig`.
@@ -148,9 +182,9 @@ class OptimizationOptions(MleConfig):
         More descriptive alias for ``ftol``.  When supplied, it overrides
         ``ftol``.
     hessian_damping : float, default=1e-6
-        Reserved for explicit optimizer configuration in future releases.
+        Initial relative diagonal shift used for modified-Cholesky regularization.
     max_step_norm : float, default=25.0
-        Reserved for explicit optimizer configuration in future releases.
+        Maximum Euclidean norm of a trial search direction.
     line_search : str, default="armijo"
         Name of the line-search strategy.
     fallback : str, default="gradient"
@@ -159,8 +193,6 @@ class OptimizationOptions(MleConfig):
 
     method: str = "newton"
     gradient_tol: float | None = None
-    hessian_damping: float = 1e-6
-    max_step_norm: float = 25.0
     line_search: str = "armijo"
     fallback: str = "gradient"
 
@@ -168,6 +200,13 @@ class OptimizationOptions(MleConfig):
         """Normalize aliases to the legacy fields consumed by internals."""
         if self.gradient_tol is not None:
             self.ftol = self.gradient_tol
+        super().__post_init__()
+        if self.method != "newton":
+            raise ValueError("Only method='newton' is currently supported.")
+        if self.line_search != "armijo":
+            raise ValueError("Only line_search='armijo' is currently supported.")
+        if self.fallback != "gradient":
+            raise ValueError("Only fallback='gradient' is currently supported.")
 
 
 @dataclass
@@ -179,6 +218,21 @@ class EMAlgConfig:
     maxiter: int = 2000
     num_devices: int = field(default_factory=device_count)
     check_interval: int = 10
+
+    def __post_init__(self) -> None:
+        """Validate EM and device settings."""
+        if self.loglik_tol <= 0:
+            raise ValueError("loglik_tol must be positive.")
+        if self.maxiter < 0:
+            raise ValueError("maxiter must be nonnegative.")
+        if self.check_interval <= 0:
+            raise ValueError("check_interval must be positive.")
+        available_devices = device_count()
+        if not 1 <= self.num_devices <= available_devices:
+            raise ValueError(
+                "num_devices must be between 1 and the number of available JAX "
+                f"devices ({available_devices})."
+            )
 
 
 @dataclass

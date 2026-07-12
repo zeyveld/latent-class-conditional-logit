@@ -2,17 +2,13 @@ from collections.abc import Callable
 from typing import NamedTuple
 
 import jax.numpy as jnp
-from equinox import combine, is_array, partition
 from jax import lax
 from jax.scipy.linalg import cho_factor, cho_solve
-from jaxopt import BFGS  # type: ignore[import-untyped]
 from jaxtyping import Array, Float64
 
 from lcl.constraints import (
     DEFAULT_NEGATIVE_MIN_ABS,
     pullback_negative_derivatives,
-    pullback_negative_gradient,
-    pullback_negative_score_rows,
 )
 from lcl._case_utils import _to_structural_betas
 from lcl._struct import MleConfig, OptimizeResult
@@ -25,6 +21,9 @@ class NewtonState(NamedTuple):
     hess: jnp.ndarray
     step_num: int
     error: jnp.ndarray
+    failed: jnp.ndarray
+    num_fun_eval: jnp.ndarray
+    num_grad_hess_eval: jnp.ndarray
 
 
 def exact_newton_minimize(
@@ -63,7 +62,9 @@ def exact_newton_minimize(
     maxiter : int, default=50
         Maximum number of Newton iterations.
     damping : float, default=1e-6
-        Tikhonov regularization (ridge penalty) applied to the diagonal of the Hessian.
+        Initial relative diagonal shift for the regularized Hessian. The shift is
+        increased geometrically if Cholesky factorization does not yield a descent
+        direction.
     max_step_norm : float, default=25.0
         Maximum norm allowed for a trial direction before line search.
     line_search_maxiter : int, default=25
@@ -78,7 +79,6 @@ def exact_newton_minimize(
         Final optimizer state containing parameters, value, gradient, Hessian, and
         convergence diagnostics.
     """
-
     init_loss, init_grad, init_hess = value_grad_hess_fn(init_params, *args)
 
     init_state = NewtonState(
@@ -88,26 +88,63 @@ def exact_newton_minimize(
         hess=init_hess,
         step_num=0,
         error=jnp.max(jnp.abs(init_grad)),
+        failed=jnp.array(False),
+        num_fun_eval=jnp.array(0),
+        num_grad_hess_eval=jnp.array(1),
     )
 
     def outer_cond(state: NewtonState) -> jnp.ndarray:
         """Continue while the gradient is too large and iterations remain."""
-        return jnp.logical_and(state.error > tol, state.step_num < maxiter)
+        return jnp.logical_and(
+            jnp.logical_and(state.error > tol, state.step_num < maxiter),
+            ~state.failed,
+        )
 
     def outer_body(state: NewtonState) -> NewtonState:
         """Run one damped Newton step plus backtracking line search."""
-        # Use Cholesky rather than LU because the damped Hessian is positive
-        # definite; this is materially faster for the small systems optimized here.
+        # Try a cheap Cholesky factorization first, increasing the diagonal shift
+        # geometrically only when the pulled-back Hessian is not positive definite.
+        # This avoids an eigenvalue decomposition on the usual well-behaved path.
         H_sym = 0.5 * (state.hess + state.hess.T)
-        H_damped = H_sym + jnp.eye(state.params.shape[0]) * damping
+        identity = jnp.eye(state.params.shape[0], dtype=state.params.dtype)
+        matrix_scale = jnp.maximum(1.0, jnp.max(jnp.abs(jnp.diag(H_sym))))
 
-        # JAX Cholesky solve
-        c, lower = cho_factor(H_damped)
-        newton_direction = -cho_solve((c, lower), state.grad)
+        class RegularizationState(NamedTuple):
+            shift: jnp.ndarray
+            direction: jnp.ndarray
+            attempts: int
 
-        newton_is_descent = jnp.logical_and(
-            jnp.all(jnp.isfinite(newton_direction)),
-            jnp.dot(state.grad, newton_direction) < 0.0,
+        def regularized_direction(shift: jnp.ndarray) -> jnp.ndarray:
+            """Solve one diagonally shifted Newton system by Cholesky."""
+            factor, lower = cho_factor(H_sym + identity * shift)
+            return -cho_solve((factor, lower), state.grad)
+
+        initial_shift = jnp.asarray(damping, dtype=state.params.dtype) * matrix_scale
+        initial_direction = regularized_direction(initial_shift)
+        initial_regularization = RegularizationState(
+            initial_shift, initial_direction, 0
+        )
+
+        def regularization_cond(reg_state: RegularizationState) -> jnp.ndarray:
+            """Increase damping until the direction is finite and descending."""
+            valid = jnp.all(jnp.isfinite(reg_state.direction)) & (
+                jnp.dot(state.grad, reg_state.direction) < 0.0
+            )
+            return (~valid) & (reg_state.attempts < 12)
+
+        def regularization_body(reg_state: RegularizationState) -> RegularizationState:
+            """Retry the Newton system with ten times more diagonal damping."""
+            shift = reg_state.shift * 10.0
+            return RegularizationState(
+                shift, regularized_direction(shift), reg_state.attempts + 1
+            )
+
+        regularization = lax.while_loop(
+            regularization_cond, regularization_body, initial_regularization
+        )
+        newton_direction = regularization.direction
+        newton_is_descent = jnp.all(jnp.isfinite(newton_direction)) & (
+            jnp.dot(state.grad, newton_direction) < 0.0
         )
         search_direction = jnp.where(newton_is_descent, newton_direction, -state.grad)
         direction_norm = jnp.linalg.norm(search_direction)
@@ -145,7 +182,7 @@ def exact_newton_minimize(
 
             return LSState(new_step, new_params, new_loss, ls_state.ls_iter + 1)
 
-        # Start line search
+        # Try the full direction before backtracking.
         full_params = state.params + search_direction
         full_loss = value_fn(full_params, *args)
 
@@ -186,16 +223,17 @@ def exact_newton_minimize(
             hess=new_hess,
             step_num=state.step_num + 1,
             error=jnp.max(jnp.abs(new_grad)),
+            failed=~accepted,
+            num_fun_eval=state.num_fun_eval + final_ls.ls_iter + 1,
+            num_grad_hess_eval=state.num_grad_hess_eval + accepted.astype(jnp.int32),
         )
 
     return lax.while_loop(outer_cond, outer_body, init_state)
 
 
 def _minimize(
-    loglik_fn: Callable[
-        ...,
-        tuple[tuple[Array, Array], Array] | tuple[tuple[Array, Array], Array, Array],
-    ],
+    value_fn: Callable[..., Float64[Array, ""]],
+    value_grad_hess_fn: Callable[..., tuple[tuple[Array, Array], Array, Array]],
     params: Float64[Array, "params"],
     args: tuple[object, ...],
     mle_config: MleConfig | None = None,
@@ -203,17 +241,18 @@ def _minimize(
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
     assert_converge: bool = False,
 ) -> OptimizeResult:
-    """Execute the L-BFGS optimization routine for Maximum Likelihood Estimation.
+    """Execute safeguarded exact-Newton maximum-likelihood estimation.
 
-    Employs JAXopt's hardware-accelerated L-BFGS solver with zoom line-search.
-    Crucially, this function performs an internal scaling normalization to prevent
-    the optimizer from taking disastrously large initial steps that could push
-    latent variables into the zero-gradient region of the softplus transformation.
+    The objective, analytic gradient, and analytic Hessian are normalized by their
+    initial scale. Newton directions use a modified-Cholesky diagonal shift, a
+    gradient fallback, a step-norm bound, and Armijo backtracking.
 
     Parameters
     ----------
-    loglik_fn : Callable
-        The objective function returning a tuple of `((neg_loglik, aux), gradient)`.
+    value_fn : Callable
+        Scalar negative-loglikelihood used for inexpensive line-search evaluations.
+    value_grad_hess_fn : Callable
+        Objective returning ``((neg_loglik, score_rows), gradient, hessian)``.
     params : Array
         Initial guess for the unconstrained parameters.
     args : tuple
@@ -226,7 +265,7 @@ def _minimize(
     numeraire_min_abs : float, default=1e-5
         Minimum absolute value imposed on the numeraire coefficient.
     assert_converge : bool, default=False
-        If True, throws an AssertionError if the solver fails to reach the
+        If True, raises ``RuntimeError`` if the solver fails to reach the
         specified tolerance.
 
     Returns
@@ -235,66 +274,63 @@ def _minimize(
         Container holding the optimized parameters, the inverse Hessian, case-level
         gradients, and solver diagnostics.
     """
-
     if mle_config is None:
         mle_config = MleConfig()
 
-    dynamic_args, static_args = partition(args, is_array)
-
-    # Evaluate the objective once to get a scaling factor.
-    # This prevents BFGS from taking disastrously large initial steps
-    # that push latent variables into the softplus vanishing gradient zone.
+    # Normalization keeps stopping tolerances and regularization useful across
+    # datasets without changing an undamped Newton direction.
     p_struct_init = _to_structural_betas(params, numeraire_idx, numeraire_min_abs)
-    init_eval = loglik_fn(p_struct_init, *args)
-    init_res = init_eval[0]
-    init_val = init_res[0] if isinstance(init_res, tuple) else init_res
+    init_val = value_fn(p_struct_init, *args)
     scale_factor = jnp.maximum(jnp.abs(init_val), 1.0)
 
-    def _loglik_fn_closure(
-        p: Float64[Array, "params"], *dyn_args: object
-    ) -> tuple[tuple[Array, Array], Array]:
-        """Scale the objective and apply the numeraire chain rule for JAXopt."""
+    def _value_fn_closure(
+        p: Float64[Array, "params"], *inner_args: object
+    ) -> Float64[Array, ""]:
+        """Evaluate the normalized scalar objective for line search."""
         p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-        all_args = combine(dyn_args, static_args)
+        value = value_fn(p_struct, *inner_args)
+        return value / scale_factor
 
-        # Obtain the analytical gradient
-        loglik_eval = loglik_fn(p_struct, *all_args)
-        (val, aux), grad = loglik_eval[:2]
+    def _value_grad_hess_closure(
+        p: Float64[Array, "params"], *inner_args: object
+    ) -> tuple[Array, Array, Array]:
+        """Evaluate normalized derivatives in unconstrained parameter space."""
+        p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
+        (val, score_rows), grad_struct, hessian = value_grad_hess_fn(
+            p_struct, *inner_args
+        )
+        grad, _, hessian = pullback_negative_derivatives(
+            p, numeraire_idx, grad_struct, score_rows, hessian
+        )
+        return val / scale_factor, grad / scale_factor, hessian / scale_factor
 
-        grad = pullback_negative_gradient(p, numeraire_idx, grad)
-        aux = pullback_negative_score_rows(p, numeraire_idx, aux)
-
-        # Normalize objective and gradient internally
-        return (val / scale_factor, aux), grad / scale_factor
-
-    solver = BFGS(
-        fun=_loglik_fn_closure,
-        value_and_grad=True,
-        has_aux=True,
-        linesearch="zoom",
-        max_stepsize=1.0,
-        maxiter=mle_config.maxiter,
+    state = exact_newton_minimize(
+        _value_fn_closure,
+        _value_grad_hess_closure,
+        params,
+        *args,
         tol=mle_config.ftol,
-        verbose=False,
-        implicit_diff=False,
+        maxiter=mle_config.maxiter,
+        damping=mle_config.hessian_damping,
+        max_step_norm=mle_config.max_step_norm,
+        line_search_maxiter=mle_config.line_search_maxiter,
+        accept_any_decrease=mle_config.accept_any_decrease,
     )
+    params = state.params
 
-    params, state = solver.run(params, *dynamic_args)
-
-    # Check for convergence
+    # Translate the low-level stopping state into a public result message.
     error = state.error.item()
-    stepsize = state.stepsize.item()
-    iterations = state.iter_num.item()
+    iterations = int(state.step_num)
 
     if error <= mle_config.ftol:
         success = True
         message = "Optimization terminated successfully."
+    elif bool(state.failed):
+        success = False
+        message = "Line search failed to find a finite sufficient-decrease step."
     elif iterations >= mle_config.maxiter:
         success = False
         message = "Maximum number of iterations reached without convergence."
-    elif stepsize <= 1e-8:
-        success = False
-        message = "Line search failed."
     else:
         success = False
         message = "Optimization halted prematurely."
@@ -302,30 +338,24 @@ def _minimize(
     if assert_converge and not success:
         raise RuntimeError(message)
 
-    grad_n = state.aux
-
-    final_eval = loglik_fn(
+    final_eval = value_grad_hess_fn(
         _to_structural_betas(params, numeraire_idx, numeraire_min_abs), *args
     )
-    if len(final_eval) == 3:
-        (_, grad_n_unscaled), grad_struct, hessian = final_eval
-        grad_n = grad_n_unscaled
-        _, grad_n, hessian = pullback_negative_derivatives(
-            params, numeraire_idx, grad_struct, grad_n, hessian
-        )
-        Hinv = jnp.linalg.pinv(0.5 * (hessian + hessian.T))
-    else:
-        Hinv = jnp.linalg.pinv(jnp.dot(grad_n.T, grad_n))
+    (neg_loglik, grad_n), grad_struct, hessian = final_eval
+    grad, grad_n, hessian = pullback_negative_derivatives(
+        params, numeraire_idx, grad_struct, grad_n, hessian
+    )
+    Hinv = jnp.linalg.pinv(0.5 * (hessian + hessian.T))
 
     return OptimizeResult(
         success=success,
         params=params,
-        neg_loglik=state.value * scale_factor,  # Unscale back to real magnitude
+        neg_loglik=neg_loglik,
         message=message,
         hess_inv=Hinv,
         grad_n=grad_n,
-        grad=state.grad * scale_factor,  # Unscale back to real magnitude
+        grad=grad,
         nit=iterations,
-        nfev=state.num_fun_eval.item(),
-        njev=state.num_grad_eval.item(),
+        nfev=int(state.num_fun_eval + state.num_grad_hess_eval + 2),
+        njev=int(state.num_grad_hess_eval + 1),
     )
