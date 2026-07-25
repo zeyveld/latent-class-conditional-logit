@@ -62,13 +62,17 @@ def _get_starting_vals(
     for class_diff_unchosen_chosen in diff_unchosen_chosen_by_class:
         # We can bake the weights directly into the closures for the startup
         w_ones = jnp.ones(class_diff_unchosen_chosen.num_cases)
+        objective_scale = jnp.maximum(jnp.sum(w_ones), 1.0)
 
         def _startup_value_closure(
             p: Float64[Array, "alt_vars"],
         ) -> Float64[Array, ""]:
             """Evaluate the subset objective after applying the numeraire transform."""
             p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-            return _loglik_value(p_struct, class_diff_unchosen_chosen, w_ones)
+            return (
+                _loglik_value(p_struct, class_diff_unchosen_chosen, w_ones)
+                / objective_scale
+            )
 
         def _startup_loglik_closure(
             p: Float64[Array, "alt_vars"],
@@ -86,7 +90,11 @@ def _get_starting_vals(
             grad, aux, hessian = pullback_negative_derivatives(
                 p, numeraire_idx, grad, aux, hessian
             )
-            return val, grad, hessian
+            return (
+                val / objective_scale,
+                grad / objective_scale,
+                hessian / objective_scale,
+            )
 
         optim_res = exact_newton_minimize(
             _startup_value_closure,

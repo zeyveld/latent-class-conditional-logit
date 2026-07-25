@@ -4,10 +4,12 @@ from time import time
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as onp
+import polars as pl
 from jax.typing import ArrayLike
 from jaxtyping import Array
 
-from lcl._encoding import ChoiceDataEncoder
+from lcl._encoding import ChoiceDataEncoder, _coerce_frame
 from lcl._labels import label_for_variable, normalize_variable_labels
 from lcl._struct import Data, ParsedData
 
@@ -104,7 +106,12 @@ class ChoiceModel(ABC):
         :class:`~lcl._struct.ParsedData`
             A container holding strictly aligned and sorted JAX arrays and their metadata.
         """
-        self._encoder = ChoiceDataEncoder(
+        if self._encoder is not None:
+            raise RuntimeError(
+                "This model already has a fitted encoder. Create a new model "
+                "instance for another fit."
+            )
+        encoder = ChoiceDataEncoder(
             alts_col=alts_col,
             cases_col=cases_col,
             panels_col=panels_col,
@@ -115,7 +122,9 @@ class ChoiceModel(ABC):
             explicit_case_varnames=case_varnames,
             explicit_dem_varnames=dem_varnames,
         )
-        return self._encoder.fit_transform(data, dems_data=dems_data)
+        parsed = encoder.fit_transform(data, dems_data=dems_data)
+        self._encoder = encoder
+        return parsed
 
     def _transform_data(
         self,
@@ -190,6 +199,12 @@ class ChoiceModel(ABC):
         )
         if weights.shape != (num_cases,):
             raise ValueError("weights must have one entry per choice situation.")
+        if not bool(jnp.all(jnp.isfinite(weights))):
+            raise ValueError("weights must contain only finite values.")
+        if bool(jnp.any(weights < 0)):
+            raise ValueError("weights must be nonnegative.")
+        if not bool(jnp.any(weights > 0)):
+            raise ValueError("At least one case weight must be positive.")
 
         init_beta = (
             jnp.zeros(shape=len(parsed.case_varnames), dtype="float64")
@@ -216,6 +231,126 @@ class ChoiceModel(ABC):
             num_panels=num_panels,
         )
         return data_struct, weights, init_beta
+
+    @staticmethod
+    def _resolve_case_weights(
+        data: Any,
+        parsed: ParsedData,
+        weights: (
+            str
+            | Mapping[object, float | int]
+            | Sequence[float | int]
+            | ArrayLike
+            | None
+        ),
+        *,
+        cases_col: str,
+        panels_col: str,
+    ) -> ArrayLike | None:
+        """Align case weights from user order to encoder-sorted case order.
+
+        Parameters
+        ----------
+        data : Any
+            Original long-format data before encoder sorting.
+        parsed : ParsedData
+            Encoded data whose case order is consumed by the likelihood.
+        weights : str, mapping, ArrayLike, or None
+            A constant-per-case column name, case-keyed mapping, or vector ordered
+            by first case appearance in ``data``.
+        cases_col : str
+            Choice-situation identifier column.
+        panels_col : str
+            Panel identifier column. Cases are keyed jointly by panel and case
+            whenever the two columns differ.
+
+        Returns
+        -------
+        ArrayLike | None
+            Weights aligned to sequential encoded case IDs.
+        """
+        if weights is None:
+            return None
+
+        df = _coerce_frame(data)
+        case_key_cols = (
+            [cases_col] if panels_col == cases_col else [panels_col, cases_col]
+        )
+        case_keys_frame = df.select(case_key_cols).unique(maintain_order=True)
+        appearance_keys = _case_keys(case_keys_frame, case_key_cols)
+
+        first_case_rows = parsed.cases != jnp.roll(parsed.cases, shift=1)
+        first_case_rows = first_case_rows.at[0].set(True)
+        if parsed.original_panels is None or parsed.original_cases is None:
+            raise ValueError(
+                "Encoded data does not preserve original case identifiers."
+            )
+        sorted_panels = onp.asarray(parsed.original_panels[first_case_rows]).tolist()
+        sorted_cases = onp.asarray(parsed.original_cases[first_case_rows]).tolist()
+        sorted_keys: list[object]
+        if panels_col == cases_col:
+            sorted_keys = sorted_cases
+        else:
+            sorted_keys = list(zip(sorted_panels, sorted_cases))
+
+        if isinstance(weights, str):
+            if weights not in df.columns:
+                raise ValueError(f"Weight column {weights!r} was not found in data.")
+            grouped = df.group_by(case_key_cols, maintain_order=True).agg(
+                pl.col(weights).n_unique().alias("_weight_n_unique"),
+                pl.col(weights).first().alias("_case_weight"),
+            )
+            nonconstant = grouped.filter(pl.col("_weight_n_unique") != 1)
+            if nonconstant.height:
+                sample = nonconstant.select(case_key_cols).head(5).to_dicts()
+                raise ValueError(
+                    f"Weight column {weights!r} must be constant within each "
+                    f"choice situation. Conflicting cases include: {sample}"
+                )
+            value_by_key = dict(
+                zip(
+                    _case_keys(grouped, case_key_cols),
+                    grouped["_case_weight"].to_list(),
+                )
+            )
+        elif isinstance(weights, Mapping):
+            mapping_keys = list(weights)
+            uses_joint_keys = bool(mapping_keys) and all(
+                isinstance(key, tuple) and len(key) == 2 for key in mapping_keys
+            )
+            case_ids_are_unique = len(set(sorted_cases)) == len(sorted_cases)
+            if (
+                panels_col != cases_col
+                and not case_ids_are_unique
+                and not uses_joint_keys
+            ):
+                raise ValueError(
+                    "Case IDs repeat across panels. Key the weights mapping by "
+                    "(panel_id, case_id) tuples."
+                )
+            lookup_keys = (
+                sorted_keys
+                if uses_joint_keys or not case_ids_are_unique
+                else sorted_cases
+            )
+            missing = [key for key in lookup_keys if key not in weights]
+            extra = [key for key in weights if key not in set(lookup_keys)]
+            if missing or extra:
+                raise ValueError(
+                    "Weights mapping keys must match the fitted choice situations "
+                    f"exactly. Missing: {missing[:5]}; extra: {extra[:5]}."
+                )
+            return onp.asarray([weights[key] for key in lookup_keys], dtype=float)
+        else:
+            values = onp.asarray(weights, dtype=float)
+            if values.shape != (len(appearance_keys),):
+                raise ValueError(
+                    "A weights vector must have one entry per choice situation "
+                    "in first-appearance order."
+                )
+            value_by_key = dict(zip(appearance_keys, values.tolist()))
+
+        return onp.asarray([value_by_key[key] for key in sorted_keys], dtype=float)
 
     def _pre_fit(
         self,
@@ -246,3 +381,10 @@ class ChoiceModel(ABC):
             Display label when available; otherwise ``variable`` unchanged.
         """
         return label_for_variable(variable, self.variable_labels)
+
+
+def _case_keys(df: pl.DataFrame, columns: Sequence[str]) -> list[object]:
+    """Return scalar or joint case keys from a case-level frame."""
+    if len(columns) == 1:
+        return df[columns[0]].to_list()
+    return [tuple(row) for row in df.select(columns).iter_rows()]

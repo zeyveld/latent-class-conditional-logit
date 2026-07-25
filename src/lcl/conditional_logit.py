@@ -12,9 +12,7 @@ from jax import jacrev
 from jax.ops import segment_sum
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float64, install_import_hook
-from pylatexenc.latex2text import LatexNodes2Text  # type: ignore
 from scipy.stats import norm
-from tabulate import tabulate
 
 # Decorate `@jaxtyped(typechecker=beartype.beartype)`
 with install_import_hook("lcl", "beartype.beartype"):
@@ -29,7 +27,17 @@ with install_import_hook("lcl", "beartype.beartype"):
     from lcl._kernels import _choice_probabilities_and_logsum
     from lcl._logging import log_or_print
     from lcl._optimize import _minimize
-    from lcl._struct import Data, ErrorConfig, MleConfig, OptimizeResult
+    from lcl._presentation import format_cl_coefficients
+    from lcl._struct import (
+        Data,
+        ErrorConfig,
+        InferenceOptions,
+        MleConfig,
+        OptimizationOptions,
+        OptimizeResult,
+        resolve_inference_options,
+        resolve_optimization_options,
+    )
 from lcl.utils import _robust_covariance
 
 logger = logging.getLogger(__name__)
@@ -76,10 +84,18 @@ class ConditionalLogit(ChoiceModel):
         choice_col: str | None = None,
         case_varnames: Sequence[str] | None = None,
         variable_labels: Mapping[str, str] | None = None,
-        weights: ArrayLike | None = None,
+        weights: (
+            str
+            | Mapping[object, float | int]
+            | Sequence[float | int]
+            | ArrayLike
+            | None
+        ) = None,
         init_beta: ArrayLike | None = None,
         mle_config: MleConfig | None = None,
         error_config: ErrorConfig | None = None,
+        optimization_options: OptimizationOptions | None = None,
+        inference: InferenceOptions | None = None,
     ) -> "CLResults":
         """Fit the conditional logit model via Maximum Likelihood Estimation.
 
@@ -98,7 +114,7 @@ class ConditionalLogit(ChoiceModel):
             the covariance matrix is automatically clustered at the panel level. If omitted,
             standard Huber-White robust standard errors are computed.
         formula : str | None, optional
-            Backward-compatible Formulaic string, for example
+            Backward-compatible Formulaic alias, for example
             ``"choice ~ price + C(brand)"``.
         utility_formula : str | None, optional
             Preferred Formulaic string for the alternative-specific utility
@@ -111,24 +127,33 @@ class ConditionalLogit(ChoiceModel):
         variable_labels : Mapping[str, str] | None, optional
             Optional mapping from raw DataFrame/model variable names to
             human-readable labels used in printed coefficient tables.
-        weights : ArrayLike | None, optional
-            ``(Nc,)`` vector of choice situation importance weights.
+        weights : str, Mapping, ArrayLike, or None, optional
+            Case-level importance weights. A string names a data column that must
+            be constant within case; a mapping is keyed by case ID (or
+            ``(panel_id, case_id)`` when case IDs repeat); a vector follows first
+            case appearance in the input data and is realigned after encoding.
         init_beta : ArrayLike | None, optional
             ``(K,)`` vector of initial taste parameters.
         mle_config : :class:`~lcl._struct.MleConfig`, optional
             Configuration for safeguarded exact-Newton optimization.
         error_config : :class:`~lcl._struct.ErrorConfig`, optional
-            Configuration determining the robust covariance estimation strategy.
+            Deprecated covariance configuration.
+        optimization_options : OptimizationOptions | None, optional
+            Preferred safeguarded exact-Newton settings.
+        inference : InferenceOptions | None, optional
+            Preferred covariance and standard-error settings.
 
         Returns
         -------
         :class:`~lcl.conditional_logit.CLResults`
             Results container housing coefficients, robust standard errors, and fit statistics.
         """
-        if mle_config is None:
-            mle_config = MleConfig()
-        if error_config is None:
-            error_config = ErrorConfig()
+        optimization_options = resolve_optimization_options(
+            optimization_options, mle_config
+        )
+        inference = resolve_inference_options(inference, error_config)
+        mle_config = optimization_options
+        error_config = inference
 
         # If no panels are provided, we substitute cases for panels purely to satisfy
         # the contiguity checks in the ingestion engine.
@@ -167,9 +192,16 @@ class ConditionalLogit(ChoiceModel):
             self.numeraire_idx = None
 
         # Format data for MLE
+        aligned_weights = self._resolve_case_weights(
+            data,
+            parsed_data,
+            weights,
+            cases_col=cases_col,
+            panels_col=_internal_panels_col,
+        )
         data_struct, weights_arr, init_beta_arr = self._setup_data(
             parsed=parsed_data,
-            weights=weights,
+            weights=aligned_weights,
             init_beta=init_beta,
         )
 
@@ -184,11 +216,12 @@ class ConditionalLogit(ChoiceModel):
             mle_config=mle_config,
             numeraire_idx=self.numeraire_idx,
             numeraire_min_abs=self.numeraire_min_abs,
+            objective_scale=jnp.sum(weights_arr),
         )
 
         # Build Results
         estim_time_sec = time() - self._fit_start_time
-        log_or_print(logger, "Estimation time: %.3f seconds", estim_time_sec)
+        logger.info("Estimation time: %.3f seconds", estim_time_sec)
 
         return CLResults(
             model_spec=self,
@@ -294,25 +327,34 @@ class CLResults:
 
         self.zvalues = self.coeff_ / self.stderr
         self.pvalues = 2 * norm.cdf(-onp.abs(self.zvalues))
+        if self.model.numeraire_idx is not None:
+            self.pvalues[self.model.numeraire_idx] = onp.nan
         self.loglikelihood = -optim_res.neg_loglik
         self.estimation_message = optim_res.message
         self.total_iter = optim_res.nit
         self.estim_time_sec = estim_time_sec
         self.sample_size = data_struct.num_cases
+        self.information_criterion_sample_size = (
+            data_struct.num_panels
+            if has_panels and data_struct.num_panels is not None
+            else data_struct.num_cases
+        )
         self.total_fun_eval = optim_res.nfev
         self.grad_n = optim_res.grad_n
 
         # Information criteria
         self.aic = 2 * len(self.coeff_) - 2 * self.loglikelihood
         self.caic = (
-            len(self.coeff_) * (jnp.log(data_struct.num_cases) + 1)
+            len(self.coeff_) * (jnp.log(self.information_criterion_sample_size) + 1)
             - 2 * self.loglikelihood
         )
         self.bic = (
-            jnp.log(data_struct.num_cases) * len(self.coeff_) - 2 * self.loglikelihood
+            jnp.log(self.information_criterion_sample_size) * len(self.coeff_)
+            - 2 * self.loglikelihood
         )
         self.abic = (
-            jnp.log((data_struct.num_cases + 2) / 24) * len(self.coeff_)
+            jnp.log((self.information_criterion_sample_size + 2) / 24)
+            * len(self.coeff_)
             - 2 * self.loglikelihood
         )
 
@@ -350,6 +392,8 @@ class CLResults:
         self,
         header: tuple[str, str, str] = ("Variable", "Estimate", "Std. Error"),
         num_decimals: int = 3,
+        *,
+        show: bool = True,
     ) -> pl.DataFrame:
         """Print and return a table of parameter estimates and standard errors.
 
@@ -359,6 +403,9 @@ class CLResults:
             Column labels used for printed LaTeX and terminal tables.
         num_decimals : int, default=3
             Number of decimal places used in printed tables.
+        show : bool, default=True
+            Emit LaTeX and terminal renderings. Set to ``False`` for computation-only
+            use.
 
         Returns
         -------
@@ -367,46 +414,17 @@ class CLResults:
             names, while ``label`` contains presentation labels.
         """
         table_df = self.coefficient_table()
-        body_rows, data_clean = [], []
-        converter = LatexNodes2Text(math_mode="text")
-        header_clean = [converter.latex_to_text(col) for col in header]
-
-        for row in table_df.iter_rows(named=True):
-            coeff_nm = str(row["label"])
-            body_rows.append(
-                f"{coeff_nm} & {float(row['estimate']):.{num_decimals}f} & {float(row['std_error']):.{num_decimals}f} \\\\"
+        if show:
+            log_or_print(
+                logger,
+                "%s",
+                format_cl_coefficients(table_df, header, num_decimals),
             )
-            var_clean = converter.latex_to_text(coeff_nm)
-            data_clean.append(
-                (
-                    var_clean,
-                    f"{float(row['estimate']):.{num_decimals}f}",
-                    f"{float(row['std_error']):.{num_decimals}f}",
-                )
-            )
-
-        latex_string = "\n".join(
-            [r"\toprule", " & ".join(header) + r" \\", r"\midrule", "%"]
-            + body_rows
-            + ["%", r"\bottomrule "]
-        )
-        table_preview = tabulate(
-            data_clean,
-            headers=header_clean,
-            tablefmt="simple_outline",
-            floatfmt=f".{num_decimals}f",
-        )
-        log_or_print(
-            logger,
-            "\n--- LaTeX Output ---\n\n%s\n\n--- Table preview ---\n\n%s",
-            latex_string,
-            table_preview,
-        )
         return table_df
 
-    def summarize(self, num_decimals: int = 3) -> pl.DataFrame:
+    def summarize(self, num_decimals: int = 3, *, show: bool = True) -> pl.DataFrame:
         """Alias for :meth:`summarize_betas`."""
-        return self.summarize_betas(num_decimals=num_decimals)
+        return self.summarize_betas(num_decimals=num_decimals, show=show)
 
     def predict(
         self,

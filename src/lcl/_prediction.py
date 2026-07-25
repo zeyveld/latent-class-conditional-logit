@@ -8,13 +8,11 @@ import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jaxtyping import Array, Float64, Int
-from pylatexenc.latex2text import LatexNodes2Text
-from tabulate import tabulate
 
-from lcl._case_utils import _to_structural_betas
 from lcl._encoding import _coerce_frame
 from lcl._kernels import _choice_probabilities_and_logsum
 from lcl._logging import log_or_print
+from lcl._presentation import format_wtp_table
 from lcl._struct import Data, PartitionType, WTPRequest
 
 logger = logging.getLogger(__name__)
@@ -178,7 +176,26 @@ def _apply_wtp_partition(df: pl.DataFrame, req: WTPRequest) -> pl.DataFrame:
     else:
         raise ValueError(f"Unsupported partition type: {partition_type}")
 
-    return df.with_columns(group_expr.alias("Partition"))
+    partitioned = df.with_columns(group_expr.alias("Partition"))
+    if partition_type == PartitionType.QUINTILES:
+        partitioned = partitioned.with_columns(
+            pl.col("Partition")
+            .cast(pl.String)
+            .replace_strict({"Q1": 0, "Q2": 1, "Q3": 2, "Q4": 3, "Q5": 4})
+            .alias("_partition_order")
+        )
+    elif partition_type == PartitionType.CUSTOM_BREAKS:
+        if not isinstance(req.bins, list):
+            raise ValueError(
+                "Custom WTP partitions require bins as a list of breakpoints."
+            )
+        bin_order = onp.digitize(
+            df[req.demographic_var].to_numpy(),
+            onp.asarray(req.bins, dtype=float),
+            right=True,
+        )
+        partitioned = partitioned.with_columns(pl.Series("_partition_order", bin_order))
+    return partitioned
 
 
 def _partition_label(partition_name: object) -> object:
@@ -186,90 +203,6 @@ def _partition_label(partition_name: object) -> object:
     if isinstance(partition_name, tuple):
         return partition_name[0]
     return partition_name
-
-
-def _escape_latex(value: object) -> str:
-    """Escape plain-text labels for insertion into a LaTeX table."""
-    replacements = {
-        "\\": r"\textbackslash{}",
-        "&": r"\&",
-        "%": r"\%",
-        "$": r"\$",
-        "#": r"\#",
-        "_": r"\_",
-        "{": r"\{",
-        "}": r"\}",
-        "~": r"\textasciitilde{}",
-        "^": r"\textasciicircum{}",
-    }
-    text = str(value)
-    return "".join(replacements.get(char, char) for char in text)
-
-
-def _format_wtp_table(
-    title: str,
-    res_df: pl.DataFrame,
-    demographic_var: str,
-    demographic_label: str,
-    num_decimals: int,
-) -> str:
-    """Format a WTP summary as LaTeX plus a terminal preview.
-
-    Parameters
-    ----------
-    title : str
-        Human-readable table title.
-    res_df : pl.DataFrame
-        WTP summary with a demographic column, ``Mean_Marginal_WTP``, and
-        ``Standard_Error``.
-    demographic_var : str
-        Name of the partitioning variable column in ``res_df``.
-    demographic_label : str
-        Human-readable label for the partitioning variable.
-    num_decimals : int
-        Number of decimal places for estimates and standard errors.
-
-    Returns
-    -------
-    str
-        A formatted string containing the title, LaTeX table, and terminal preview.
-    """
-    converter = LatexNodes2Text(math_mode="text")
-    header = (demographic_label, "Mean marginal WTP")
-    header_clean = [converter.latex_to_text(col) for col in header]
-    latex_header = [_escape_latex(col) for col in header]
-
-    body_rows: list[str] = []
-    data_clean: list[tuple[str, str]] = []
-    for row in res_df.iter_rows(named=True):
-        partition = str(row[demographic_var])
-        mean_wtp = float(row["Mean_Marginal_WTP"])
-        se_wtp = float(row["Standard_Error"])
-        body_rows.append(
-            f"{_escape_latex(partition)} & {mean_wtp:.{num_decimals}f} \\\\"
-        )
-        body_rows.append(f" & ({se_wtp:.{num_decimals}f}) \\\\")
-        data_clean.append(
-            (converter.latex_to_text(partition), f"{mean_wtp:.{num_decimals}f}")
-        )
-        data_clean.append(("", f"({se_wtp:.{num_decimals}f})"))
-
-    latex_string = "\n".join(
-        [r"\toprule", " & ".join(latex_header) + r" \\", r"\midrule", "%"]
-        + body_rows
-        + ["%", r"\bottomrule "]
-    )
-    table_preview = tabulate(
-        data_clean,
-        headers=header_clean,
-        tablefmt="simple_outline",
-        floatfmt=f".{num_decimals}f",
-    )
-    return (
-        f"{title}\n\n"
-        f"--- LaTeX Output ---\n\n{latex_string}\n\n"
-        f"--- Table preview ---\n\n{table_preview}"
-    )
 
 
 class LCLPrediction:
@@ -496,6 +429,7 @@ class LCLPrediction:
         num_decimals: int = 4,
         class_probabilities: Literal["stored", "prior", "posterior"] = "stored",
         se: Literal["delta", "none"] = "delta",
+        show: bool = True,
     ) -> dict[str, pl.DataFrame]:
         """Compute the Marginal Willingness-to-Pay (WTP) across demographic partitions.
 
@@ -531,6 +465,8 @@ class LCLPrediction:
             prior class probabilities.  Posterior-updated WTP through
             ``past_choices`` requires differentiating through the Bayesian class
             update and is therefore refused unless ``se="none"``.
+        show : bool, default=True
+            Emit LaTeX and terminal renderings for each request.
 
         Returns
         -------
@@ -702,17 +638,18 @@ class LCLPrediction:
                 f"{partition_label} ({partition_desc})"
             )
             summary_tables[title] = res_df
-            log_or_print(
-                logger,
-                "%s",
-                _format_wtp_table(
-                    title,
-                    res_df,
-                    req.demographic_var,
-                    partition_label,
-                    num_decimals,
-                ),
-            )
+            if show:
+                log_or_print(
+                    logger,
+                    "%s",
+                    format_wtp_table(
+                        title,
+                        res_df,
+                        req.demographic_var,
+                        partition_label,
+                        num_decimals,
+                    ),
+                )
 
         return summary_tables
 
@@ -790,9 +727,7 @@ class LCLPrediction:
                 * self.results.model.num_classes,
                 "denominator_value": onp.asarray(denominator),
                 "abs_denominator": onp.asarray(jnp.abs(denominator)),
-                "min_abs_floor": [
-                    getattr(self.results.model, "numeraire_min_abs", 1e-5)
-                ]
+                "min_abs_floor": [self.results._param_packing.numeraire_min_abs]
                 * self.results.model.num_classes,
             }
         )
@@ -881,11 +816,7 @@ class LCLPrediction:
         subset_class_probs = class_probs[subset_panel_indices]
         subset_shares = jnp.mean(subset_class_probs, axis=0)
 
-        structural_betas = _to_structural_betas(
-            latent_betas,
-            self.results.model.numeraire_idx,
-            getattr(self.results.model, "numeraire_min_abs", 1e-5),
-        )
+        structural_betas = self.results._param_packing.to_structural(latent_betas)
 
         # Express the target coefficient in units of positive marginal utility of
         # income, -beta_cost. The target coefficient determines the resulting sign.

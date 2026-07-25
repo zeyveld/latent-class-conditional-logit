@@ -1,16 +1,29 @@
-"""Out-of-sample cross validation for model selection."""
+"""Out-of-sample cross-validation for latent-class model selection."""
+
+from __future__ import annotations
 
 import logging
+import warnings
 from collections.abc import Sequence
-from typing import Any, Optional
+from dataclasses import replace
+from typing import Any
 
 import numpy as onp
 import polars as pl
 
-from lcl._case_utils import _diff_unchosen_chosen
-from lcl._struct import EMAlgConfig, FitOptions, MleConfig, OptimizationOptions
+from lcl._struct import (
+    EMAlgConfig,
+    ErrorConfig,
+    FitOptions,
+    InferenceOptions,
+    MleConfig,
+    OptimizationOptions,
+    resolve_fit_options,
+    resolve_inference_options,
+    resolve_optimization_options,
+)
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
-from lcl.spec import LCLSpec
+from lcl.spec import LCLSpec, resolve_lcl_spec
 
 logger = logging.getLogger(__name__)
 
@@ -21,140 +34,120 @@ def cv_optimal_classes(
     cases_col: str | None = None,
     panels_col: str | None = None,
     num_classes_list: Sequence[int] | None = None,
-    formula: Optional[str] = None,
+    formula: str | None = None,
     utility_formula: str | None = None,
     membership_formula: str | None = None,
-    choice_col: Optional[str] = None,
-    case_varnames: Optional[Sequence[str]] = None,
-    dem_varnames: Optional[Sequence[str]] = None,
-    dems_data: Optional[Any] = None,
-    numeraire: Optional[str] = None,
+    choice_col: str | None = None,
+    case_varnames: Sequence[str] | None = None,
+    dem_varnames: Sequence[str] | None = None,
+    dems_data: Any | None = None,
+    numeraire: str | None = None,
     folds: int = 5,
     seed: int = 42,
     *,
     spec: LCLSpec | None = None,
     fit_options: FitOptions | None = None,
     optimization_options: OptimizationOptions | None = None,
+    inference: InferenceOptions | None = None,
     em_alg_config: EMAlgConfig | None = None,
     mle_config: MleConfig | None = None,
+    error_config: ErrorConfig | None = None,
+    numeraire_min_abs: float | None = None,
 ) -> pl.DataFrame:
-    """Perform blocked K-Fold Cross Validation to determine the optimal number of latent classes.
+    """Select a latent-class count with blocked panel-level cross-validation.
 
-    Splits the data safely at the panel (decision-maker) level to ensure that
-    the same decision-maker does not appear in both the training and test folds.
+    Every test fold is transformed by the encoder fitted on its training fold.
+    Formula-derived columns therefore retain their training-time categorical
+    meaning, and unseen categories produce Formulaic's explicit warning or error.
 
-    The recommended high-level call mirrors :func:`lcl.fit`: pass the same
-    :class:`~lcl.spec.LCLSpec` you fit with, then sweep ``num_classes_list``::
-
-        cv_optimal_classes(data, spec, num_classes_list=[2, 3, 4, 5])
-
-    The lower-level keyword form (``alts_col=...``, ``case_varnames=...``,
-    ``em_alg_config=...``) remains supported for backward compatibility.
+    ``Avg_OOS_LL`` is the mean held-out log likelihood per panel, pooled across
+    all folds. It is set to ``NaN`` when any fold fails so an incomplete class
+    sweep cannot silently compete with complete results. The successful-fold-only
+    value remains available in ``Avg_Successful_OOS_LL`` for diagnosis.
 
     Parameters
     ----------
     data : Any
-        The main dataset containing choice situations and alternatives.
-    alts_col : str | LCLSpec | None
-        Either the alternative-identifier column name or, in the high-level form,
-        the :class:`~lcl.spec.LCLSpec` to reuse across the sweep.  An ``LCLSpec``
-        passed here is equivalent to passing it through ``spec=``.
-    cases_col : str | None
-        Name of the column grouping observations into distinct choice situations.
-        Optional when an ``LCLSpec`` supplies the identifier columns.
-    panels_col : str | None
-        Name of the column mapping observations to specific decision-makers.
-        Optional when an ``LCLSpec`` supplies the identifier columns.
-    num_classes_list : Sequence[int]
-        A sequence of integers specifying the numbers of latent classes to evaluate
-        (e.g., [2, 3, 4, 5, 10, 15, 20]).
+        Long-format choice data.
+    alts_col : str | LCLSpec | None, optional
+        Alternative column. Passing an ``LCLSpec`` here is deprecated; use
+        ``spec=...``.
+    cases_col, panels_col, choice_col : str | None, optional
+        Choice-situation, panel, and chosen-alternative indicator columns.
+    num_classes_list : Sequence[int] | None, optional
+        Candidate class counts, each at least two.
     formula : str | None, optional
-        Backward-compatible combined Formulaic string, for example
-        ``"choice ~ price + C(brand) | income"``.
-    utility_formula : str | None, optional
-        Formulaic string for the utility design, such as
-        ``"choice ~ price + C(brand)"``.
-    membership_formula : str | None, optional
-        Right-hand-side Formulaic string for class-membership demographics, such
-        as ``"~ income + C(segment)"``.
-    choice_col : str | None, optional
-        Name of the boolean/binary column indicating chosen alternatives.
-    case_varnames : Sequence[str] | None, optional
-        List of alternative-specific variables.
-    dem_varnames : Sequence[str] | None, optional
-        List of demographic variables.
+        Deprecated combined utility and membership formula.
+    utility_formula, membership_formula : str | None, optional
+        Separate Formulaic specifications.
+    case_varnames, dem_varnames : Sequence[str] | None, optional
+        Explicit utility and class-membership variables.
     dems_data : Any | None, optional
-        A separate dataset containing panel-level demographics.
+        Separate panel-level demographic data.
     numeraire : str | None, optional
-        The variable to be constrained as strictly negative (e.g., "price")
-        via softplus.
+        Utility coefficient constrained to be strictly negative.
     folds : int, default=5
-        Number of cross-validation folds.
+        Number of blocked panel folds.
     seed : int, default=42
-        Random seed for replicable panel splitting.
-    spec : :class:`~lcl.spec.LCLSpec` | None, optional
-        Declarative specification supplying the identifier columns, utility and
-        membership variables, formula, and numeraire constraint.  Explicit keyword
-        arguments override the corresponding spec fields.
-    fit_options : :class:`~lcl._struct.FitOptions` | None, optional
-        High-level EM fit options applied to every fold.  Translated internally to
-        an :class:`~lcl._struct.EMAlgConfig`.
-    optimization_options : :class:`~lcl._struct.OptimizationOptions` | None, optional
-        High-level M-step optimizer options applied to every fold.
-    em_alg_config : :class:`~lcl._struct.EMAlgConfig`, optional
-        Lower-level configuration for the EM algorithm loop.  Ignored when
-        ``fit_options`` is supplied.
-    mle_config : :class:`~lcl._struct.MleConfig`, optional
-        Lower-level configuration for the inner optimization routines.  Ignored
-        when ``optimization_options`` is supplied.
+        Random seed for panel shuffling.
+    spec : LCLSpec | None, optional
+        Preferred declarative model specification.
+    fit_options : FitOptions | None, optional
+        EM settings, including independent starts per training fold.
+    optimization_options : OptimizationOptions | None, optional
+        M-step optimizer settings.
+    inference : InferenceOptions | None, optional
+        Inference settings. By default CV skips covariance work.
+    em_alg_config, mle_config, error_config : optional
+        Deprecated compatibility inputs for the three option families.
+    numeraire_min_abs : float | None, optional
+        Minimum absolute magnitude for a keyword-specified numeraire.
 
     Returns
     -------
     pl.DataFrame
-        A DataFrame containing the Average Out-of-Sample Log-Likelihood for each
-        specified number of classes.
+        One row per valid class count, with aggregate metrics and list-valued
+        per-fold diagnostics.
     """
     if isinstance(alts_col, LCLSpec):
         if spec is not None:
-            raise ValueError(
-                "Pass an LCLSpec either positionally or via spec=, not both."
-            )
+            raise ValueError("Pass an LCLSpec positionally or via spec=, not both.")
+        warnings.warn(
+            "Passing LCLSpec as alts_col is deprecated; use spec=... instead.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         spec = alts_col
         alts_col = None
 
-    if spec is not None:
-        alts_col = alts_col or spec.ids.alt
-        cases_col = cases_col or spec.ids.case
-        panels_col = panels_col or spec.ids.panel
-        choice_col = choice_col or spec.ids.choice
-        formula = formula if formula is not None else spec.formula
-        utility_formula = (
-            utility_formula if utility_formula is not None else spec.utility_formula
-        )
-        membership_formula = (
-            membership_formula
-            if membership_formula is not None
-            else spec.membership_formula
-        )
-        if formula is None and utility_formula is None:
-            case_varnames = case_varnames if case_varnames is not None else spec.utility
-        if formula is None and membership_formula is None:
-            dem_varnames = dem_varnames if dem_varnames is not None else spec.membership
-        numeraire = numeraire or spec.numeraire
-
     if num_classes_list is None:
         raise ValueError("num_classes_list is required.")
-    if alts_col is None or cases_col is None or panels_col is None:
-        raise ValueError(
-            "alts_col, cases_col, and panels_col are required unless an "
-            "LCLSpec supplies them."
-        )
+    if folds < 2:
+        raise ValueError("folds must be at least 2.")
 
-    if em_alg_config is None:
-        em_alg_config = fit_options.to_em_config() if fit_options else EMAlgConfig()
-    if mle_config is None:
-        mle_config = optimization_options if optimization_options else MleConfig()
-    # Unify input into Polars for easy fold splitting, avoiding pandas coercion bugs
+    base_spec = resolve_lcl_spec(
+        spec=spec,
+        alts_col=alts_col,
+        cases_col=cases_col,
+        panels_col=panels_col,
+        choice_col=choice_col,
+        case_varnames=case_varnames,
+        dem_varnames=dem_varnames,
+        formula=formula,
+        utility_formula=utility_formula,
+        membership_formula=membership_formula,
+        numeraire=numeraire,
+        numeraire_min_abs=numeraire_min_abs,
+    )
+    fit_options = resolve_fit_options(fit_options, em_alg_config)
+    optimization_options = resolve_optimization_options(
+        optimization_options, mle_config
+    )
+    if inference is None and error_config is None:
+        inference = InferenceOptions(skip=True)
+    else:
+        inference = resolve_inference_options(inference, error_config)
+
     if isinstance(data, pl.DataFrame):
         df = data
     elif hasattr(data, "columns"):
@@ -162,86 +155,124 @@ def cv_optimal_classes(
     else:
         df = pl.DataFrame(data)
 
-    unique_panels = df[panels_col].unique().to_numpy()
+    panel_col = base_spec.ids.panel
+    if panel_col not in df.columns:
+        raise ValueError(f"Panel column {panel_col!r} was not found in data.")
+    unique_panels = df[panel_col].unique(maintain_order=True).to_numpy()
+    if folds > len(unique_panels):
+        raise ValueError(
+            f"folds={folds} exceeds the number of unique panels ({len(unique_panels)})."
+        )
 
     rng = onp.random.default_rng(seed)
     shuffled_panels = rng.permutation(unique_panels)
     fold_panel_lists = onp.array_split(shuffled_panels, folds)
-
-    results = []
+    rows: list[dict[str, object]] = []
 
     for num_classes in num_classes_list:
         if num_classes < 2:
             logger.warning(
-                "Skipping evaluation for %s classes. The model requires at least 2 latent classes.",
+                "Skipping %s class: latent-class models require at least 2.",
                 num_classes,
             )
             continue
 
         logger.info("Evaluating model with %s latent classes.", num_classes)
-        fold_lls = []
+        fold_lls: list[float] = []
+        fold_mean_lls: list[float] = []
+        fold_converged: list[bool | None] = []
+        fold_train_panels: list[int] = []
+        fold_test_panels: list[int] = []
+        fold_errors: list[str | None] = []
 
-        for f in range(folds):
-            test_panels = fold_panel_lists[f]
+        for fold_index, test_panels in enumerate(fold_panel_lists, start=1):
+            test_df = df.filter(pl.col(panel_col).is_in(test_panels))
+            train_df = df.filter(~pl.col(panel_col).is_in(test_panels))
+            train_panel_count = train_df[panel_col].n_unique()
+            test_panel_count = test_df[panel_col].n_unique()
+            fold_train_panels.append(train_panel_count)
+            fold_test_panels.append(test_panel_count)
 
-            # Split data at the dataframe level
-            test_df = df.filter(pl.col(panels_col).is_in(test_panels))
-            train_df = df.filter(~pl.col(panels_col).is_in(test_panels))
-
-            # Fit the requested model on the training panels.
             model = LatentClassConditionalLogit(
-                num_classes=num_classes, numeraire=numeraire
+                spec=replace(base_spec, classes=num_classes)
             )
-
             try:
-                res = model.fit(
+                result = model.fit(
                     data=train_df,
-                    alts_col=alts_col,
-                    cases_col=cases_col,
-                    panels_col=panels_col,
-                    formula=formula,
-                    utility_formula=utility_formula,
-                    membership_formula=membership_formula,
-                    choice_col=choice_col,
-                    case_varnames=case_varnames,
-                    dem_varnames=dem_varnames,
                     dems_data=dems_data,
-                    em_alg_config=em_alg_config,
-                    mle_config=mle_config,
+                    fit_options=fit_options,
+                    optimization_options=optimization_options,
+                    inference=inference,
                 )
-
-                # Reuse ingestion so test identifiers are contiguous and aligned.
-                parsed_test = model._ingest_data(
-                    data=test_df,
-                    alts_col=alts_col,
-                    cases_col=cases_col,
-                    panels_col=panels_col,
-                    formula=formula,
-                    utility_formula=utility_formula,
-                    membership_formula=membership_formula,
-                    choice_col=choice_col,
-                    case_varnames=case_varnames,
-                    dem_varnames=dem_varnames,
+                panel_scores = result.loglik(
+                    test_df,
                     dems_data=dems_data,
+                    per_panel=True,
                 )
-
-                test_data, *_ = model._setup_data(parsed_test)
-                test_diff = _diff_unchosen_chosen(test_data)
-
-                # Evaluate the held-out panel log likelihood.
-                oos_ll = res._full_loglik_fn(res.flat_params, test_diff, test_data)
-                fold_lls.append(float(oos_ll))
-
-            except Exception as e:
+                if not isinstance(panel_scores, pl.DataFrame):
+                    raise TypeError("Per-panel scoring did not return a DataFrame.")
+                if panel_scores.height != test_panel_count:
+                    raise ValueError(
+                        "Per-panel scoring returned "
+                        f"{panel_scores.height} rows for {test_panel_count} "
+                        "held-out panels."
+                    )
+                total_ll = float(panel_scores["log_likelihood"].sum())
+                mean_ll = total_ll / test_panel_count
+                fold_lls.append(total_ll)
+                fold_mean_lls.append(mean_ll)
+                fold_converged.append(bool(result.converged))
+                fold_errors.append(None)
+            except Exception as exc:
                 logger.warning(
                     "Model evaluation failed for %s classes, fold %s: %s",
                     num_classes,
-                    f + 1,
-                    e,
+                    fold_index,
+                    exc,
                 )
-                fold_lls.append(onp.nan)
+                fold_lls.append(float("nan"))
+                fold_mean_lls.append(float("nan"))
+                fold_converged.append(None)
+                fold_errors.append(str(exc))
 
-        avg_oos_ll = onp.nanmean(fold_lls)
-        results.append({"Num_Classes": num_classes, "Avg_OOS_LL": avg_oos_ll})
+        successful = onp.isfinite(onp.asarray(fold_lls))
+        successful_folds = int(successful.sum())
+        failed_folds = folds - successful_folds
+        converged_folds = sum(value is True for value in fold_converged)
+        nonconverged_folds = sum(value is False for value in fold_converged)
+        successful_total_ll = float(onp.nansum(onp.asarray(fold_lls, dtype=float)))
+        successful_panels = sum(
+            count
+            for count, succeeded in zip(fold_test_panels, successful.tolist())
+            if succeeded
+        )
+        successful_mean = (
+            successful_total_ll / successful_panels
+            if successful_panels
+            else float("nan")
+        )
+        complete_mean = successful_mean if failed_folds == 0 else float("nan")
 
-    return pl.DataFrame(results)
+        rows.append(
+            {
+                "Num_Classes": num_classes,
+                "Avg_OOS_LL": complete_mean,
+                "Avg_Successful_OOS_LL": successful_mean,
+                "Total_OOS_LL": (
+                    successful_total_ll if failed_folds == 0 else float("nan")
+                ),
+                "Successful_Folds": successful_folds,
+                "Failed_Folds": failed_folds,
+                "Converged_Folds": converged_folds,
+                "Nonconverged_Folds": nonconverged_folds,
+                "Fold": list(range(1, folds + 1)),
+                "Fold_OOS_LL": fold_lls,
+                "Fold_Mean_Panel_LL": fold_mean_lls,
+                "Fold_Converged": fold_converged,
+                "Fold_Train_Panels": fold_train_panels,
+                "Fold_Test_Panels": fold_test_panels,
+                "Fold_Errors": fold_errors,
+            }
+        )
+
+    return pl.DataFrame(rows)

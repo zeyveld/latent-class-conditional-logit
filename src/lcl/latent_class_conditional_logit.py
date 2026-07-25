@@ -1,6 +1,7 @@
 """Estimation for latent-class conditional logit."""
 
 import logging
+import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from time import time
@@ -20,9 +21,7 @@ from lcl._case_utils import (
 )
 from lcl._choice_model import ChoiceModel
 from lcl._em_alg_startup import _get_starting_vals
-from lcl._em_alg_steps import _em_alg
-from lcl._labels import merge_variable_labels
-from lcl._logging import log_or_print
+from lcl._em_alg_steps import _em_step
 from lcl._results import LCLResults
 from lcl._struct import (
     DiagnosticsOptions,
@@ -32,8 +31,11 @@ from lcl._struct import (
     InferenceOptions,
     MleConfig,
     OptimizationOptions,
+    resolve_fit_options,
+    resolve_inference_options,
+    resolve_optimization_options,
 )
-from lcl.spec import LCLSpec
+from lcl.spec import LCLSpec, resolve_lcl_spec
 
 logger = logging.getLogger(__name__)
 
@@ -88,10 +90,17 @@ class LatentClassConditionalLogit(ChoiceModel):
                 raise ValueError(
                     "Pass either LatentClassConditionalLogit(spec) or spec=..., not both."
                 )
+            warnings.warn(
+                "Passing LCLSpec as the first positional argument is deprecated; "
+                "use LatentClassConditionalLogit(spec=spec).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
             spec = num_classes
             num_classes = spec.classes
 
         if spec is not None:
+            num_classes = spec.classes
             if (
                 numeraire is not None
                 and spec.numeraire is not None
@@ -153,7 +162,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             The name of the column mapping choice situations to specific
             decision-makers (panels).
         formula : str | None, default=None
-            Backward-compatible combined Formulaic string, for example
+            Deprecated combined Formulaic string, for example
             ``"choice ~ price + time | income + C(segment)"``.  Prefer
             ``utility_formula`` and ``membership_formula`` in new code.
         utility_formula : str | None, default=None
@@ -180,12 +189,19 @@ class LatentClassConditionalLogit(ChoiceModel):
         dems_data : Any | None, default=None
             An optional, separate panel-level dataset containing demographics. If
             provided, it will be merged with the main `data` on `panels_col`.
-        em_alg_config : :class:`~lcl._struct.EMAlgConfig`, default=EMAlgConfig()
-            A dataclass (PyTree) containing configuration options for the overall EM
-            algorithm (e.g., maximum iterations, tolerance, hardware distribution).
-        mle_config : :class:`~lcl._struct.MleConfig`, default=MleConfig()
-            A dataclass (PyTree) containing optimization settings for the M-step's
-            internal exact-Newton solver.
+        fit_options : FitOptions | None, optional
+            Preferred EM settings, including multi-start orchestration.
+        optimization_options : OptimizationOptions | None, optional
+            Preferred exact-Newton M-step settings.
+        inference : InferenceOptions | None, optional
+            Preferred covariance and standard-error settings.
+        em_alg_config, mle_config, error_config : optional
+            Deprecated compatibility inputs. Passing one together with its preferred
+            replacement raises ``ValueError``.
+        diagnostics : DiagnosticsOptions | None, optional
+            Diagnostic thresholds and switches.
+        progress_callback : callable | None, optional
+            Receives structured hardware, start, EM-step, and completion events.
 
         Returns
         -------
@@ -200,55 +216,61 @@ class LatentClassConditionalLogit(ChoiceModel):
             If a `numeraire` was specified during class instantiation but cannot be
             found in the expanded design matrix columns.
         """
-        if self.spec is not None:
-            alts_col = alts_col or self.spec.ids.alt
-            cases_col = cases_col or self.spec.ids.case
-            panels_col = panels_col or self.spec.ids.panel
-            choice_col = choice_col or self.spec.ids.choice
-            formula = formula if formula is not None else self.spec.formula
-            utility_formula = (
-                utility_formula
-                if utility_formula is not None
-                else self.spec.utility_formula
-            )
-            membership_formula = (
-                membership_formula
-                if membership_formula is not None
-                else self.spec.membership_formula
-            )
-            if formula is None and utility_formula is None:
-                case_varnames = (
-                    case_varnames if case_varnames is not None else self.spec.utility
-                )
-            if formula is None and membership_formula is None:
-                dem_varnames = (
-                    dem_varnames if dem_varnames is not None else self.spec.membership
-                )
-            self.num_classes = self.spec.classes
-            if self.spec.numeraire is not None:
-                self.numeraire = self.spec.numeraire
-                self.numeraire_min_abs = self.spec.numeraire_min_abs
-            variable_labels = merge_variable_labels(
-                self.spec.variable_labels, variable_labels
-            )
-            self.spec = replace(self.spec, variable_labels=variable_labels)
+        self.spec = resolve_lcl_spec(
+            spec=self.spec,
+            alts_col=alts_col,
+            cases_col=cases_col,
+            panels_col=panels_col,
+            choice_col=choice_col,
+            case_varnames=case_varnames,
+            dem_varnames=dem_varnames,
+            formula=formula,
+            utility_formula=utility_formula,
+            membership_formula=membership_formula,
+            classes=self.num_classes,
+            numeraire=self.numeraire,
+            numeraire_min_abs=(
+                self.numeraire_min_abs if self.numeraire is not None else None
+            ),
+            variable_labels=variable_labels,
+        )
+        alts_col = self.spec.ids.alt
+        cases_col = self.spec.ids.case
+        panels_col = self.spec.ids.panel
+        choice_col = self.spec.ids.choice
+        formula = self.spec.formula
+        utility_formula = self.spec.utility_formula
+        membership_formula = self.spec.membership_formula
+        case_varnames = self.spec.utility
+        dem_varnames = self.spec.membership
+        variable_labels = self.spec.variable_labels
+        self.num_classes = self.spec.classes
+        self.numeraire = self.spec.numeraire
+        self.numeraire_min_abs = self.spec.numeraire_min_abs
 
-        if alts_col is None or cases_col is None or panels_col is None:
-            raise ValueError(
-                "alts_col, cases_col, and panels_col are required unless an "
-                "LCLSpec is attached to the model."
-            )
-
-        if self.num_classes < 2:
-            raise ValueError("num_classes must be at least 2.")
-        if em_alg_config is None:
-            em_alg_config = fit_options.to_em_config() if fit_options else EMAlgConfig()
-        if mle_config is None:
-            mle_config = optimization_options if optimization_options else MleConfig()
-        if error_config is None:
-            error_config = inference if inference is not None else ErrorConfig()
+        fit_options = resolve_fit_options(fit_options, em_alg_config)
+        optimization_options = resolve_optimization_options(
+            optimization_options, mle_config
+        )
+        inference = resolve_inference_options(inference, error_config)
+        em_alg_config = fit_options.to_em_config()
+        mle_config = optimization_options
+        error_config = inference
         if diagnostics is None:
             diagnostics = DiagnosticsOptions()
+
+        if fit_options.starts > 1:
+            best_seed = self._select_best_start(
+                data=data,
+                dems_data=dems_data,
+                spec=self.spec,
+                fit_options=fit_options,
+                optimization_options=optimization_options,
+                diagnostics=diagnostics,
+                progress_callback=progress_callback,
+            )
+            fit_options = replace(fit_options, starts=1, seed=best_seed)
+            em_alg_config = fit_options.to_em_config()
 
         parsed_data = self._ingest_data(
             data=data,
@@ -320,7 +342,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             if progress_callback is not None:
                 progress_callback({"event": "em_step", "iteration": em_recursion})
 
-            em_vars = _em_alg(
+            em_vars = _em_step(
                 em_vars,
                 diff_unchosen_chosen,
                 data_struct,
@@ -345,15 +367,16 @@ class LatentClassConditionalLogit(ChoiceModel):
                     converged = True
                     break
 
-        strict_mle_config = MleConfig(
-            ftol=1e-8,
+        pre_refit_ll = float(em_vars.unconditional_loglik)
+        strict_mle_config = OptimizationOptions(
+            gradient_tol=1e-8,
             maxiter=500,
             hessian_damping=mle_config.hessian_damping,
             max_step_norm=mle_config.max_step_norm,
             line_search_maxiter=mle_config.line_search_maxiter,
             accept_any_decrease=mle_config.accept_any_decrease,
         )
-        em_vars = _em_alg(
+        em_vars = _em_step(
             em_vars,
             diff_unchosen_chosen,
             data_struct,
@@ -363,6 +386,18 @@ class LatentClassConditionalLogit(ChoiceModel):
             self.numeraire_idx,
             self.numeraire_min_abs,
         )
+        post_refit_ll = float(em_vars.unconditional_loglik)
+        refit_rel_change = abs(post_refit_ll - pre_refit_ll) / max(
+            abs(pre_refit_ll), 1.0
+        )
+        if converged and refit_rel_change > em_alg_config.loglik_tol:
+            converged = False
+            logger.warning(
+                "The strict final refit moved the log likelihood by %.3g "
+                "relative units, above the EM tolerance %.3g.",
+                refit_rel_change,
+                em_alg_config.loglik_tol,
+            )
         em_history_rows.append(self._em_history_row(em_recursion, em_vars))
         optimization_history_rows = self._optimizer_snapshot(
             em_vars, diff_unchosen_chosen, data_struct, em_recursion
@@ -370,7 +405,7 @@ class LatentClassConditionalLogit(ChoiceModel):
 
         estim_time_sec = time() - self._fit_start_time
 
-        log_or_print(logger, "Estimation time: %.3f seconds", estim_time_sec)
+        logger.info("Estimation time: %.3f seconds", estim_time_sec)
         if progress_callback is not None:
             progress_callback(
                 {"event": "complete", "estimation_time_seconds": estim_time_sec}
@@ -389,6 +424,99 @@ class LatentClassConditionalLogit(ChoiceModel):
             em_history=em_history_rows,
             optimization_history=optimization_history_rows,
         )
+
+    @staticmethod
+    def _select_best_start(
+        *,
+        data: Any,
+        dems_data: Any | None,
+        spec: LCLSpec,
+        fit_options: FitOptions,
+        optimization_options: OptimizationOptions,
+        diagnostics: DiagnosticsOptions,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+    ) -> int:
+        """Evaluate independent EM starts and return the best random seed.
+
+        Preliminary starts skip covariance work. The selected seed is then refit by
+        the caller with the requested inference settings so the returned results
+        contain a covariance matrix aligned to the winning optimum.
+
+        Parameters
+        ----------
+        data : Any
+            Long-format estimation data.
+        dems_data : Any | None
+            Optional panel-level demographics.
+        spec : LCLSpec
+            Canonical model specification shared by every start.
+        fit_options : FitOptions
+            EM options including the number of starts and base seed.
+        optimization_options : OptimizationOptions
+            M-step optimizer settings.
+        diagnostics : DiagnosticsOptions
+            Diagnostic configuration forwarded to candidate fits.
+        progress_callback : callable | None
+            Optional progress callback.
+
+        Returns
+        -------
+        int
+            Seed associated with the highest final training log likelihood.
+
+        Raises
+        ------
+        RuntimeError
+            If every requested start fails.
+        """
+        candidates: list[tuple[float, bool, int]] = []
+        failures: list[str] = []
+        for start_index in range(fit_options.starts):
+            seed = fit_options.seed + start_index
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "start",
+                        "start": start_index + 1,
+                        "starts": fit_options.starts,
+                        "seed": seed,
+                    }
+                )
+            candidate_model = LatentClassConditionalLogit(spec=spec)
+            try:
+                candidate_result = candidate_model.fit(
+                    data=data,
+                    dems_data=dems_data,
+                    fit_options=replace(fit_options, starts=1, seed=seed),
+                    optimization_options=optimization_options,
+                    inference=InferenceOptions(skip=True),
+                    diagnostics=diagnostics,
+                )
+            except Exception as exc:
+                failures.append(f"seed {seed}: {exc}")
+                logger.warning("LCL start with seed %s failed: %s", seed, exc)
+                continue
+            candidates.append(
+                (
+                    float(candidate_result.em_res.unconditional_loglik),
+                    bool(candidate_result.converged),
+                    seed,
+                )
+            )
+
+        if not candidates:
+            detail = "; ".join(failures)
+            raise RuntimeError(f"All {fit_options.starts} EM starts failed: {detail}")
+
+        converged_candidates = [item for item in candidates if item[1]]
+        selection_pool = converged_candidates or candidates
+        best_loglik, _, best_seed = max(selection_pool, key=lambda item: item[0])
+        logger.info(
+            "Selected EM start seed %s with log likelihood %.6f.",
+            best_seed,
+            best_loglik,
+        )
+        return best_seed
 
     def _em_history_row(self, em_iter: int, em_vars: Any) -> dict[str, Any]:
         """Return one lazily evaluated EM-history row.
@@ -468,12 +596,13 @@ class LatentClassConditionalLogit(ChoiceModel):
             grad_raw, _, _ = pullback_negative_derivatives(
                 raw_beta, self.numeraire_idx, grad, score_rows, hessian
             )
+            gradient_scale = jnp.maximum(jnp.sum(weights), 1.0)
             rows.append(
                 {
                     "em_iter": em_iter,
                     "class": class_idx,
                     "neg_loglik": float(neg_loglik),
-                    "grad_norm": float(jnp.max(jnp.abs(grad_raw))),
+                    "grad_norm": float(jnp.max(jnp.abs(grad_raw)) / gradient_scale),
                     "max_abs_beta": float(jnp.max(jnp.abs(structural_beta))),
                     "effective_panels": float(
                         onp.asarray(em_vars.class_probs_by_panel[:, class_idx]).sum()

@@ -240,12 +240,13 @@ def _minimize(
     numeraire_idx: int | None = None,
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
     assert_converge: bool = False,
+    objective_scale: float | Array | None = None,
 ) -> OptimizeResult:
     """Execute safeguarded exact-Newton maximum-likelihood estimation.
 
-    The objective, analytic gradient, and analytic Hessian are normalized by their
-    initial scale. Newton directions use a modified-Cholesky diagonal shift, a
-    gradient fallback, a step-norm bound, and Armijo backtracking.
+    The objective, analytic gradient, and analytic Hessian are normalized by a
+    caller-supplied observational scale. Newton directions use a modified-Cholesky
+    diagonal shift, a gradient fallback, a step-norm bound, and Armijo backtracking.
 
     Parameters
     ----------
@@ -267,6 +268,9 @@ def _minimize(
     assert_converge : bool, default=False
         If True, raises ``RuntimeError`` if the solver fails to reach the
         specified tolerance.
+    objective_scale : float or Array | None, optional
+        Positive divisor used to express the stopping gradient per observational
+        unit. Defaults to one.
 
     Returns
     -------
@@ -277,11 +281,12 @@ def _minimize(
     if mle_config is None:
         mle_config = MleConfig()
 
-    # Normalization keeps stopping tolerances and regularization useful across
-    # datasets without changing an undamped Newton direction.
-    p_struct_init = _to_structural_betas(params, numeraire_idx, numeraire_min_abs)
-    init_val = value_fn(p_struct_init, *args)
-    scale_factor = jnp.maximum(jnp.abs(init_val), 1.0)
+    # A common per-observation scale gives gradient_tol the same meaning across
+    # standalone CL, class-specific M-steps, and demographic M-steps.
+    scale_factor = jnp.maximum(
+        jnp.asarray(1.0 if objective_scale is None else objective_scale),
+        1.0,
+    )
 
     def _value_fn_closure(
         p: Float64[Array, "params"], *inner_args: object
@@ -356,6 +361,6 @@ def _minimize(
         grad_n=grad_n,
         grad=grad,
         nit=iterations,
-        nfev=int(state.num_fun_eval + state.num_grad_hess_eval + 2),
+        nfev=int(state.num_fun_eval + state.num_grad_hess_eval + 1),
         njev=int(state.num_grad_hess_eval + 1),
     )

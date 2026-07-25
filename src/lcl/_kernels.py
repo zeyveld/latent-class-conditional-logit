@@ -152,6 +152,10 @@ def _class_membership_probs(
     if dems is not None:
         V = thetas[None, 0] + dems @ thetas[1:]
     else:
+        if thetas.shape[0] != 1:
+            raise ValueError(
+                "dems is required when thetas contains demographic coefficient rows."
+            )
         V = jnp.repeat(thetas, num_panels, axis=0)
 
     V_ref = jnp.zeros((num_panels, 1))

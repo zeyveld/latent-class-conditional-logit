@@ -98,8 +98,11 @@ spec = LCLSpec(
 results = lcl.fit(
     data,
     spec,
-    fit_options=FitOptions(max_em_iter=50, num_devices=1),
-    optimization_options=OptimizationOptions(maxiter=40),
+    fit_options=FitOptions(seed=7, starts=3, max_em_iter=50, num_devices=1),
+    optimization_options=OptimizationOptions(
+        maxiter=40,
+        gradient_tol=1e-5,
+    ),
 )
 
 coefficient_table = results.summarize_betas()
@@ -114,8 +117,8 @@ The printed coefficient table uses the labels:
 ├─────────────────┼───────────────┼─────────────────────────────┤
 │ Price           │ -1.124        │ 0.723                       │
 │                 │ (0.114)       │ (0.128)                     │
-│ Product quality │ 0.905         │ 0.611                       │
-│                 │ (0.097)       │ (0.130)                     │
+│ Product quality │ 0.906         │ 0.612                       │
+│                 │ (0.097)       │ (0.131)                     │
 └─────────────────┴───────────────┴─────────────────────────────┘
 ```
 
@@ -126,9 +129,30 @@ The returned frame keeps both identities:
 │ variable ┆ label           ┆ mean   ┆ mean_se │
 ╞══════════╪═════════════════╪════════╪═════════╡
 │ price    ┆ Price           ┆ -1.124 ┆ 0.114   │
-│ quality  ┆ Product quality ┆ 0.905  ┆ 0.097   │
+│ quality  ┆ Product quality ┆ 0.906  ┆ 0.097   │
 └──────────┴─────────────────┴────────┴─────────┘
 ```
+
+Use `results.summarize_betas(show=False)` when you want the returned frame
+without the LaTeX and terminal preview.
+
+The same fitted encoder scores held-out choices and powers panel-blocked model
+selection:
+
+```python
+test_log_likelihood = results.loglik(test_data)
+panel_scores = results.loglik(test_data, per_panel=True)
+
+cv_results = lcl.cv_optimal_classes(
+    data,
+    spec=spec,
+    num_classes_list=[2, 3, 4],
+    fit_options=FitOptions(seed=7, starts=3),
+)
+```
+
+Cross-validation reports pooled mean held-out log likelihood per panel, fold
+convergence, panel counts, and explicit failure diagnostics.
 
 ## What the package covers
 
@@ -155,6 +179,7 @@ before they become opaque compiled-kernel failures.
 
 - Follow the [estimation and counterfactual tutorial](tutorials/estimation.md).
 - Compare class counts with [panel-blocked cross-validation](tutorials/cross_validation.md).
+- Adopt the current [best practices and migration patterns](guides/best_practices.md).
 - Review the [`LCLSpec` and options API](api/specification.md).
 
 The project is open source under the MIT license. Bug reports, focused feature

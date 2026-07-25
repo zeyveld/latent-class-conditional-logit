@@ -22,7 +22,7 @@ from lcl._optimize import exact_newton_minimize
 from lcl._struct import Data, DiffUnchosenChosen, EMAlgConfig, EMVars, MleConfig
 
 
-def _em_alg(
+def _em_step(
     em_vars: EMVars,
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
@@ -34,10 +34,8 @@ def _em_alg(
 ) -> EMVars:
     """Execute a single step of the Expectation-Maximization (EM) algorithm.
 
-    The step proceeds iteratively:
-    1. (E-Step) Update conditional class membership probabilities for each decision-maker.
-    2. (M-Step 1) Update taste coefficients for each latent class via MLE.
-    3. (M-Step 2) Update aggregate class shares or demographic regression coefficients.
+    The step updates posterior class membership, class-specific taste
+    coefficients, and then aggregate shares or demographic coefficients.
 
     Parameters
     ----------
@@ -346,7 +344,8 @@ def _distributed_update(
             """Evaluate the objective using the dynamic/static diff PyTree split."""
             full_diff = combine(d_diff, static_diff)
             p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-            return _loglik_value(p_struct, full_diff, w_inner)
+            scale = jnp.maximum(jnp.sum(w_inner), 1.0)
+            return _loglik_value(p_struct, full_diff, w_inner) / scale
 
         def _loglik_fn_closure(
             p: Float64[Array, "alt_vars"],
@@ -367,7 +366,8 @@ def _distributed_update(
                 p, numeraire_idx, grad, aux, hessian
             )
 
-            return val, grad, hessian
+            scale = jnp.maximum(jnp.sum(w_inner), 1.0)
+            return val / scale, grad / scale, hessian / scale
 
         optim_res = exact_newton_minimize(
             _value_fn_closure,

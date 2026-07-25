@@ -41,7 +41,14 @@ A two-class model on a small synthetic panel. The [estimation tutorial](https://
 import numpy as onp
 import polars as pl
 import lcl
-from lcl import ChoiceIds, FitOptions, LCLSpec, NegativeCoefficient, OptimizationOptions
+from lcl import (
+    ChoiceIds,
+    FitOptions,
+    InferenceOptions,
+    LCLSpec,
+    NegativeCoefficient,
+    OptimizationOptions,
+)
 
 rng = onp.random.default_rng(7)
 
@@ -70,6 +77,7 @@ for panel in range(n_panels):
                 "price":   float(prices[alt]),
                 "quality": float(quality[alt]),
                 "income":  float(income),
+                "survey_weight": 1.0,
             })
 
 df = pl.DataFrame(rows)
@@ -93,15 +101,81 @@ spec = LCLSpec(
 results = lcl.fit(
     df,
     spec,
-    fit_options=FitOptions(max_em_iter=50, num_devices=1),
-    optimization_options=OptimizationOptions(maxiter=40),
+    fit_options=FitOptions(
+        seed=7,
+        starts=3,
+        max_em_iter=50,
+        num_devices=1,
+    ),
+    optimization_options=OptimizationOptions(
+        maxiter=40,
+        gradient_tol=1e-5,
+    ),
+    inference=InferenceOptions(covariance="clustered"),
 )
 
-results.summarize_betas()
+summary = results.summarize_betas()
 print(results)
 ```
 
-A representative end-of-run printout (`summarize_betas()` also emits a LaTeX version of the table, elided here):
+`FitOptions.starts` runs independent panel-partition starts and keeps the best
+optimum. Use several starts for reported mixture models and fix `seed` for
+reproducibility.
+
+The same fitted encoder is used for held-out scoring, preserving Formulaic
+categorical levels and expanded-column order:
+
+```python
+total_ll = results.loglik(held_out_df)
+panel_ll = results.loglik(held_out_df, per_panel=True)
+```
+
+Blocked cross-validation consumes that public scoring API and skips covariance
+work by default:
+
+```python
+cv = lcl.cv_optimal_classes(
+    df,
+    spec=spec,
+    num_classes_list=[2, 3, 4],
+    fit_options=FitOptions(seed=7, starts=3, max_em_iter=100),
+)
+```
+
+`Avg_OOS_LL` is mean held-out log likelihood per panel. The returned frame also
+contains per-fold likelihoods, train/test panel counts, convergence flags, and
+failure messages. If any fold fails, `Avg_OOS_LL` is `NaN` rather than silently
+averaging only successful folds; `Avg_Successful_OOS_LL` remains available for
+diagnosis.
+
+For standard conditional logit, case weights can be supplied as a column name,
+a case-keyed mapping, or a vector in first-case-appearance order. Column and
+mapping forms are safest for durable data pipelines:
+
+```python
+cl_results = lcl.ConditionalLogit().fit(
+    df,
+    alts_col="alt",
+    cases_col="case",
+    panels_col="panel",
+    choice_col="choice",
+    case_varnames=["price", "quality"],
+    weights="survey_weight",
+    optimization_options=OptimizationOptions(gradient_tol=1e-5),
+    inference=InferenceOptions(covariance="clustered"),
+)
+```
+
+The preferred configuration objects are `FitOptions`, `OptimizationOptions`,
+and `InferenceOptions`. The older `EMAlgConfig`, `MleConfig`, and `ErrorConfig`
+inputs remain accepted with deprecation warnings. Prefer separate
+`utility_formula` and `membership_formula` fields over the deprecated combined
+`formula`, and pass specifications to lower-level entry points by keyword:
+`LatentClassConditionalLogit(spec=spec)` and
+`cv_optimal_classes(..., spec=spec)`.
+
+A representative end-of-run printout (`summarize_betas()` also emits a LaTeX
+version of the table, elided here):
 
 ```text
 --- Table preview ---
@@ -111,14 +185,30 @@ A representative end-of-run printout (`summarize_betas()` also emits a LaTeX ver
 ├─────────────────┼───────────────┼─────────────────────────────┤
 │ Price           │ -1.124        │ 0.723                       │
 │                 │ (0.114)       │ (0.128)                     │
-│ Product quality │ 0.905         │ 0.611                       │
-│                 │ (0.097)       │ (0.130)                     │
+│ Product quality │ 0.906         │ 0.612                       │
+│                 │ (0.097)       │ (0.131)                     │
 └─────────────────┴───────────────┴─────────────────────────────┘
 
 <LCLResults: 2 Classes | Converged | Log likelihood: -597.8 | CAIC: 1233.4 | BIC: 1227.4 | Adj. BIC: 1208.4>
 ```
 
-The parentheses enclose Delta-method standard errors of the population moments. `summarize_betas()` also returns those moments as a tidy Polars frame; the class-specific β's are available with `results.class_coefficients()`. Both frames preserve raw variable names and include a `label` column for publication-ready tables.
+The parentheses enclose Delta-method standard errors of the population moments.
+`summarize_betas()` also returns those moments as a tidy Polars frame; pass
+`show=False` for computation without terminal or LaTeX output. The class-specific
+β's are available with `results.class_coefficients()`. Both frames preserve raw
+variable names and include a `label` column for publication-ready tables.
+
+For prediction, prefer `results.predict(data=counterfactual_df)`. Array-oriented
+callers should pass `dem_panel_ids` with `dems` so LCL can validate and reorder
+panel demographics; the same alignment field is available on `PastChoicesData`.
+`prediction.compute_wtp(..., show=False)` returns its dictionary of Polars tables
+without printing, and numeric quintile/custom-break groups follow numeric bin
+order.
+
+See the documentation's
+[best-practices and migration guide](https://zeyveld.github.io/latent-class-conditional-logit/guides/best_practices/)
+for weight-key conventions, cross-validation failure semantics, and legacy API
+replacements.
 
 ## Roadmap
 

@@ -2,11 +2,13 @@
 
 Run from the repository root with ``uv run --group docs python
 tools/rebuild_docs_examples.py``. The script prints section-delimited transcripts for
-the homepage, estimation tutorial, and cross-validation tutorial.
+the homepage, estimation tutorial, and cross-validation tutorial. Pass
+``--section homepage`` (or another section name) to refresh one example.
 """
 
 from __future__ import annotations
 
+import argparse
 import contextlib
 import io
 from pathlib import Path
@@ -137,8 +139,17 @@ def _homepage_example() -> None:
     results = lcl.fit(
         data,
         spec,
-        fit_options=FitOptions(max_em_iter=50, num_devices=1),
-        optimization_options=OptimizationOptions(maxiter=40),
+        fit_options=FitOptions(
+            seed=7,
+            starts=3,
+            max_em_iter=50,
+            num_devices=1,
+        ),
+        optimization_options=OptimizationOptions(
+            maxiter=40,
+            gradient_tol=1e-5,
+        ),
+        inference=InferenceOptions(covariance="clustered"),
     )
     results.summarize_betas()
     print(results)
@@ -150,8 +161,16 @@ def _estimation_example(data: pl.DataFrame) -> None:
     results = lcl.fit(
         data,
         _spec(),
-        fit_options=FitOptions(max_em_iter=25, num_devices=1),
-        optimization_options=OptimizationOptions(maxiter=40),
+        fit_options=FitOptions(
+            seed=42,
+            starts=3,
+            max_em_iter=60,
+            num_devices=1,
+        ),
+        optimization_options=OptimizationOptions(
+            maxiter=40,
+            gradient_tol=1e-5,
+        ),
         inference=InferenceOptions(covariance="clustered"),
     )
     results.summarize_betas()
@@ -192,6 +211,7 @@ def _estimation_example(data: pl.DataFrame) -> None:
             partition_type=PartitionType.QUINTILES,
         ),
         class_probabilities="prior",
+        show=False,
     )
 
 
@@ -199,22 +219,39 @@ def _cross_validation_example(data: pl.DataFrame) -> None:
     """Run the model-selection sweep and render its documented chart."""
     cv_results = lcl.cv_optimal_classes(
         data,
-        _spec(),
+        spec=_spec(),
         num_classes_list=[2, 3, 4, 5],
         folds=3,
         seed=42,
-        fit_options=FitOptions(max_em_iter=60, num_devices=1),
-        optimization_options=OptimizationOptions(maxiter=30),
+        fit_options=FitOptions(
+            seed=42,
+            starts=3,
+            max_em_iter=60,
+            num_devices=1,
+        ),
+        optimization_options=OptimizationOptions(
+            maxiter=30,
+            gradient_tol=1e-5,
+        ),
     )
-    print(cv_results)
+    print(
+        cv_results.select(
+            "Num_Classes",
+            "Avg_OOS_LL",
+            "Successful_Folds",
+            "Failed_Folds",
+            "Converged_Folds",
+        )
+    )
+    complete_results = cv_results.filter(pl.col("Failed_Folds") == 0)
     chart = (
-        alt.Chart(cv_results)
+        alt.Chart(complete_results)
         .mark_line(point=True, color="#3F2B47")
         .encode(
             x=alt.X("Num_Classes:O", title="Number of latent classes"),
             y=alt.Y(
                 "Avg_OOS_LL:Q",
-                title="Average out-of-sample log likelihood",
+                title="Mean held-out log likelihood per panel",
                 scale=alt.Scale(zero=False),
             ),
         )
@@ -223,18 +260,39 @@ def _cross_validation_example(data: pl.DataFrame) -> None:
     chart.save(Path("site") / "cv_plot.html")
 
 
+def _parse_args() -> argparse.Namespace:
+    """Parse the optional documentation section selector."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--section",
+        choices=("all", "homepage", "estimation", "cross-validation"),
+        default="all",
+        help="Example section to rebuild (default: all).",
+    )
+    return parser.parse_args()
+
+
 def main() -> None:
-    """Run every documentation example and print one combined transcript."""
+    """Run the requested documentation examples and save their transcript."""
+    args = _parse_args()
     Path("site").mkdir(exist_ok=True)
     transcript = io.StringIO()
     with contextlib.redirect_stdout(transcript):
-        _section("HOMEPAGE")
-        _homepage_example()
-        data = _apollo_long_data()
-        _section("ESTIMATION")
-        _estimation_example(data)
-        _section("CROSS VALIDATION")
-        _cross_validation_example(data)
+        if args.section in {"all", "homepage"}:
+            _section("HOMEPAGE")
+            _homepage_example()
+        if args.section == "all":
+            data = _apollo_long_data()
+            _section("ESTIMATION")
+            _estimation_example(data)
+            _section("CROSS VALIDATION")
+            _cross_validation_example(data)
+        elif args.section == "estimation":
+            _section("ESTIMATION")
+            _estimation_example(_apollo_long_data())
+        elif args.section == "cross-validation":
+            _section("CROSS VALIDATION")
+            _cross_validation_example(_apollo_long_data())
     output = transcript.getvalue()
     Path("site/example-transcript.txt").write_text(output, encoding="utf-8")
     print(output)

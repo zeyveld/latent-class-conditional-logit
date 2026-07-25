@@ -119,14 +119,25 @@ spec = LCLSpec(
 results = lcl.fit(
     df_long,
     spec,
-    fit_options=FitOptions(max_em_iter=60, num_devices=1),
-    optimization_options=OptimizationOptions(maxiter=40),
+    fit_options=FitOptions(
+        seed=42,
+        starts=3,
+        max_em_iter=60,
+        num_devices=1,
+    ),
+    optimization_options=OptimizationOptions(
+        maxiter=40,
+        gradient_tol=1e-5,
+    ),
     inference=InferenceOptions(covariance="clustered"),
 )
 
-results.summarize_betas()
+summary = results.summarize_betas()
 print(results)
 ```
+
+Representative output (the exact optimum can vary with the JAX version and
+available hardware):
 
 ```text
 --- LaTeX Output ---
@@ -139,8 +150,8 @@ Fare & -0.061 & 0.024 \\
  & (0.002) & (0.002) \\
 Travel time & -0.011 & 0.001 \\
  & (0.001) & (0.001) \\
-Travel mode: bus & -1.750 & 1.371 \\
- & (0.230) & (0.313) \\
+Travel mode: bus & -1.749 & 1.371 \\
+ & (0.229) & (0.313) \\
 Travel mode: car & 1.085 & 0.742 \\
  & (0.130) & (0.150) \\
 Travel mode: rail & 0.418 & 0.321 \\
@@ -157,8 +168,8 @@ Travel mode: rail & 0.418 & 0.321 \\
 │                   │ (0.002)       │ (0.002)                     │
 │ Travel time       │ -0.011        │ 0.001                       │
 │                   │ (0.001)       │ (0.001)                     │
-│ Travel mode: bus  │ -1.750        │ 1.371                       │
-│                   │ (0.230)       │ (0.313)                     │
+│ Travel mode: bus  │ -1.749        │ 1.371                       │
+│                   │ (0.229)       │ (0.313)                     │
 │ Travel mode: car  │ 1.085         │ 0.742                       │
 │                   │ (0.130)       │ (0.150)                     │
 │ Travel mode: rail │ 0.418         │ 0.321                       │
@@ -171,19 +182,28 @@ Travel mode: rail & 0.418 & 0.321 \\
 !!! note "Formulas or explicit lists?"
     `LCLSpec` also accepts `utility=[...]` and `membership=[...]` when the input
     columns are already model-ready. Use formulas for categorical expansion,
-    interactions, or transformations. A combined legacy `formula=` remains
-    available, but separate utility and membership formulas are easier to audit.
+    interactions, or transformations. The combined legacy `formula=` is
+    deprecated; separate utility and membership formulas are easier to audit and
+    reuse.
+
+!!! tip "Use several starts for reported mixture models"
+    `FitOptions(starts=3, seed=42)` runs three independent panel-partition starts
+    with seeds 42, 43, and 44, then refits the best start with the requested
+    inference settings. Increase `starts` for consequential analyses.
 
 !!! tip "Watching the EM iterations"
     LCL sends iterative progress to Python's `logging` module. Enable it with
     `logging.basicConfig(level=logging.INFO)` when you need the full optimization
-    trace.
+    trace. Fitting does not write timing messages directly to standard output.
 
 `summarize_betas()` reports the share-weighted mean and standard deviation of each
 structural coefficient, with delta-method standard errors in parentheses. The table
 uses labels such as **Travel mode: bus**; the returned frame also retains Formulaic's
 raw name, `C(alt)[T.bus]`. Use `results.class_coefficients()` for class-specific
 coefficients and `results.class_shares()` for the estimated class composition.
+In a pipeline that provides its own display, use
+`results.summarize_betas(show=False)` (or the `results.summarize(show=False)`
+alias) to obtain the same frame without printing LaTeX and terminal tables.
 
 ## 3. Inspect the fit with the diagnostic tools
 
@@ -202,11 +222,11 @@ fit           converged               ok            1         EM convergence fla
 fit           log_likelihood          ok        -6413.84      Final unconditional log likelihood.
 data          panels                  ok          500         Number of decision-maker panels.
 data          cases                   ok         8000         Number of choice situations.
-latent_class  posterior_entropy_mean  ok            0.278257  Mean entropy of posterior class membership.
-latent_class  min_class_share         ok            0.241837  Small classes can indicate weakly identified local optima.
-latent_class  min_effective_panels    ok          120.919     Smallest posterior panel mass across classes.
-coefficients  max_abs_beta            ok            3.74922   Largest absolute structural coefficient.
-coefficients  min_abs_numeraire       ok            0.035543  Small numeraires can dominate WTP/tradeoff ratios.
+latent_class  posterior_entropy_mean  ok            0.27833   Mean entropy of posterior class membership.
+latent_class  min_class_share         ok            0.241938  Small classes can indicate weakly identified local optima.
+latent_class  min_effective_panels    ok          120.969     Smallest posterior panel mass across classes.
+coefficients  max_abs_beta            ok            3.74783   Largest absolute structural coefficient.
+coefficients  min_abs_numeraire       ok            0.035545  Small numeraires can dominate WTP/tradeoff ratios.
 ```
 
 Configure warning thresholds with `DiagnosticsOptions` at fit time. For example,
@@ -222,7 +242,7 @@ Converged: True
 EM recursions: 30
 Final log likelihood: -6413.84
 Warnings: 0
-Last EM history row: {'em_iter': 30, 'loglik': -6413.840790186069, 'class_0_share': 0.24183736641517078, 'class_1_share': 0.3050601879815024, 'class_2_share': 0.45310244560332685}
+Last EM history row: {'em_iter': 30, 'loglik': -6413.840782946274, 'class_0_share': 0.45298103347438456, 'class_1_share': 0.24193776632753392, 'class_2_share': 0.3050812001980814}
 ```
 
 `class_shares()` reports each class's aggregate share and posterior panel mass.
@@ -241,9 +261,9 @@ shape: (3, 3)
 │ ---   ┆ ---      ┆ ---              │
 │ i64   ┆ f64      ┆ f64              │
 ╞═══════╪══════════╪══════════════════╡
-│ 0     ┆ 0.241837 ┆ 120.918674       │
-│ 1     ┆ 0.30506  ┆ 152.530099       │
-│ 2     ┆ 0.453102 ┆ 226.551228       │
+│ 0     ┆ 0.452981 ┆ 226.490521       │
+│ 1     ┆ 0.241938 ┆ 120.968878       │
+│ 2     ┆ 0.305081 ┆ 152.5406         │
 └───────┴──────────┴──────────────────┘
 shape: (15, 5)
 ┌────────────────┬───────────────────┬───────┬─────────────┬─────────────┐
@@ -251,17 +271,17 @@ shape: (15, 5)
 │ ---            ┆ ---               ┆ ---   ┆ ---         ┆ ---         │
 │ str            ┆ str               ┆ i64   ┆ f64         ┆ bool        │
 ╞════════════════╪═══════════════════╪═══════╪═════════════╪═════════════╡
-│ cost           ┆ Fare              ┆ 0     ┆ -0.100253   ┆ true        │
-│ cost           ┆ Fare              ┆ 1     ┆ -0.035543   ┆ true        │
-│ cost           ┆ Fare              ┆ 2     ┆ -0.056122   ┆ true        │
-│ time           ┆ Travel time       ┆ 0     ┆ -0.01306    ┆ false       │
-│ time           ┆ Travel time       ┆ 1     ┆ -0.010947   ┆ false       │
+│ cost           ┆ Fare              ┆ 0     ┆ -0.056118   ┆ true        │
+│ cost           ┆ Fare              ┆ 1     ┆ -0.10024    ┆ true        │
+│ cost           ┆ Fare              ┆ 2     ┆ -0.035545   ┆ true        │
+│ time           ┆ Travel time       ┆ 0     ┆ -0.010986   ┆ false       │
+│ time           ┆ Travel time       ┆ 1     ┆ -0.013059   ┆ false       │
 │ …              ┆ …                 ┆ …     ┆ …           ┆ …           │
-│ C(alt)[T.car]  ┆ Travel mode: car  ┆ 1     ┆ 0.078436    ┆ false       │
-│ C(alt)[T.car]  ┆ Travel mode: car  ┆ 2     ┆ 1.240218    ┆ false       │
-│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 0     ┆ 0.904493    ┆ false       │
-│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 1     ┆ 0.031566    ┆ false       │
-│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 2     ┆ 0.418674    ┆ false       │
+│ C(alt)[T.car]  ┆ Travel mode: car  ┆ 1     ┆ 2.061444    ┆ false       │
+│ C(alt)[T.car]  ┆ Travel mode: car  ┆ 2     ┆ 0.07853     ┆ false       │
+│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 0     ┆ 0.418737    ┆ false       │
+│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 1     ┆ 0.904207    ┆ false       │
+│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 2     ┆ 0.031596    ┆ false       │
 └────────────────┴───────────────────┴───────┴─────────────┴─────────────┘
 ```
 
@@ -269,6 +289,38 @@ The class-specific estimates reveal heterogeneity that population averages conce
 `results.audit_report()` combines the specification, fit statistics, class shares,
 and diagnostics in a text report. `results.em_history_` and
 `results.optimization_history_` expose iteration histories as Polars frames.
+
+## Score observed choices without refitting
+
+Use `loglik` to evaluate a validation or test sample with the fitted model. The
+method reuses the training encoder, including Formulaic's categorical levels and
+expanded column order.
+
+```python
+validation_ll = results.loglik(validation_long)
+validation_by_panel = results.loglik(validation_long, per_panel=True)
+
+print(validation_ll)
+print(validation_by_panel.head(3))
+```
+
+```text
+-1927.846
+shape: (3, 2)
+┌───────┬────────────────┐
+│ panel ┆ log_likelihood │
+│ ---   ┆ ---            │
+│ i64   ┆ f64            │
+╞═══════╪════════════════╡
+│ 12    ┆ -11.4902       │
+│ 27    ┆ -13.0018       │
+│ 31    ┆ -10.7725       │
+└───────┴────────────────┘
+```
+
+The numbers above are illustrative; the returned `panel` column always contains
+the original panel IDs. An unseen categorical level produces Formulaic's warning
+instead of being silently assigned a different code.
 
 ## 4. A counterfactual fare increase, conditioned on observed choices
 
@@ -297,14 +349,14 @@ shape: (8, 4)
 │ ---    ┆ ---   ┆ ---  ┆ ---          │
 │ i64    ┆ u32   ┆ str  ┆ f64          │
 ╞════════╪═══════╪══════╪══════════════╡
-│ 1      ┆ 0     ┆ air  ┆ 0.369361     │
-│ 1      ┆ 0     ┆ rail ┆ 0.630639     │
-│ 1      ┆ 1     ┆ air  ┆ 0.206002     │
-│ 1      ┆ 1     ┆ rail ┆ 0.793998     │
-│ 1      ┆ 2     ┆ air  ┆ 0.556804     │
-│ 1      ┆ 2     ┆ rail ┆ 0.443196     │
-│ 1      ┆ 3     ┆ air  ┆ 0.879005     │
-│ 1      ┆ 3     ┆ rail ┆ 0.120995     │
+│ 1      ┆ 0     ┆ air  ┆ 0.369339     │
+│ 1      ┆ 0     ┆ rail ┆ 0.630661     │
+│ 1      ┆ 1     ┆ air  ┆ 0.205966     │
+│ 1      ┆ 1     ┆ rail ┆ 0.794034     │
+│ 1      ┆ 2     ┆ air  ┆ 0.556787     │
+│ 1      ┆ 2     ┆ rail ┆ 0.443213     │
+│ 1      ┆ 3     ┆ air  ┆ 0.879016     │
+│ 1      ┆ 3     ┆ rail ┆ 0.120984     │
 └────────┴───────┴──────┴──────────────┘
 ```
 
@@ -315,6 +367,14 @@ DataFrame.
 
 `LCLPrediction` also reports expected consumer surplus by choice situation and a
 panel-level willingness-to-pay frame for downstream welfare analysis.
+
+!!! tip "Prefer tabular prediction when possible"
+    `results.predict(data=...)` is the safest interface because the fitted encoder
+    aligns formulas and panel characteristics. For array-style prediction, pass
+    `dem_panel_ids` alongside `dems`; LCL validates and reorders the demographic
+    rows. Without IDs, demographic rows must follow sorted unique panel-ID order.
+    A demographic membership model cannot be predicted without `dems`. The same
+    alignment rule applies to `PastChoicesData(dems=..., dem_panel_ids=...)`.
 
 ## 5. Elasticities
 
@@ -333,14 +393,14 @@ shape: (8, 6)
 │ ---    ┆ ---   ┆ ---  ┆ ---         ┆ ---             ┆ ---             │
 │ u32    ┆ u32   ┆ u32  ┆ u32         ┆ f64             ┆ f64             │
 ╞════════╪═══════╪══════╪═════════════╪═════════════════╪═════════════════╡
-│ 0      ┆ 0     ┆ 0    ┆ 0           ┆ -3.966249       ┆ -0.370317       │
-│ 0      ┆ 0     ┆ 0    ┆ 1           ┆ 3.408495        ┆ 1.036888        │
-│ 0      ┆ 0     ┆ 1    ┆ 0           ┆ 2.323005        ┆ 0.216892        │
-│ 0      ┆ 0     ┆ 1    ┆ 1           ┆ -1.996333       ┆ -0.607298       │
-│ 0      ┆ 1     ┆ 0    ┆ 0           ┆ -4.431003       ┆ -0.612663       │
-│ 0      ┆ 1     ┆ 0    ┆ 1           ┆ 3.115549        ┆ 1.487897        │
-│ 0      ┆ 1     ┆ 1    ┆ 0           ┆ 1.149616        ┆ 0.158954        │
-│ 0      ┆ 1     ┆ 1    ┆ 1           ┆ -0.808324       ┆ -0.386032       │
+│ 0      ┆ 0     ┆ 0    ┆ 0           ┆ -3.966785       ┆ -0.370332       │
+│ 0      ┆ 0     ┆ 0    ┆ 1           ┆ 3.408956        ┆ 1.036931        │
+│ 0      ┆ 0     ┆ 1    ┆ 0           ┆ 2.323102        ┆ 0.216881        │
+│ 0      ┆ 0     ┆ 1    ┆ 1           ┆ -1.996415       ┆ -0.607266       │
+│ 0      ┆ 1     ┆ 0    ┆ 0           ┆ -4.431907       ┆ -0.612719       │
+│ 0      ┆ 1     ┆ 0    ┆ 1           ┆ 3.116184        ┆ 1.488032        │
+│ 0      ┆ 1     ┆ 1    ┆ 0           ┆ 1.149604        ┆ 0.158935        │
+│ 0      ┆ 1     ┆ 1    ┆ 1           ┆ -0.808315       ┆ -0.385984       │
 └────────┴───────┴──────┴─────────────┴─────────────────┴─────────────────┘
 ```
 
@@ -364,7 +424,7 @@ update. Use `se="none"` to weight point estimates by stored posteriors.
 ```python
 from lcl import PartitionType, WTPRequest
 
-prediction.compute_wtp(
+wtp_tables = prediction.compute_wtp(
     WTPRequest(alt_var="time", demographic_var="income_band",
                partition_type=PartitionType.CATEGORICAL),
     WTPRequest(alt_var="time", demographic_var="female",
@@ -428,11 +488,15 @@ Female traveler & Mean marginal WTP \\
 └───────────────────┴─────────────────────┘
 ```
 
-Groups retain their first-observed order. Sort the returned frame when a prescribed
-ordering is required.
+Categorical groups retain their first-observed order. Numeric quintiles and custom
+break partitions are returned in numeric bin order.
 
 The estimate varies more across income bands than across gender. Its sign follows the
 coefficient convention: travel time enters utility as a disamenity.
+
+`wtp_tables` is a dictionary whose keys are the displayed titles and whose values
+are the corresponding Polars frames. Use `show=False` when a notebook, test, or
+application should receive those frames without terminal and LaTeX output.
 
 !!! note "No manual one-hot encoding"
     `C(income_band)` handles estimation coding while `compute_wtp` groups on the
@@ -454,18 +518,18 @@ shape: (3, 7)
 │ variable ┆ label       ┆ denominator ┆ denominator_label ┆ class ┆ tradeoff  ┆ denominator_value │
 │ str      ┆ str         ┆ str         ┆ str               ┆ i64   ┆ f64       ┆ f64               │
 ╞══════════╪═════════════╪═════════════╪═══════════════════╪═══════╪═══════════╪═══════════════════╡
-│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 0     ┆ -0.130275 ┆ 0.100253          │
-│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 1     ┆ -0.308002 ┆ 0.035543          │
-│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 2     ┆ -0.195745 ┆ 0.056122          │
+│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 0     ┆ -0.195762 ┆ 0.056118          │
+│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 1     ┆ -0.130273 ┆ 0.10024           │
+│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 2     ┆ -0.308005 ┆ 0.035545          │
 └──────────┴─────────────┴─────────────┴───────────────────┴───────┴───────────┴───────────────────┘
 shape: (3, 6)
 ┌───────┬─────────────┬───────────────────┬───────────────────┬─────────────────┬───────────────┐
 │ class ┆ denominator ┆ denominator_label ┆ denominator_value ┆ abs_denominator ┆ min_abs_floor │
 │ i64   ┆ str         ┆ str               ┆ f64               ┆ f64             ┆ f64           │
 ╞═══════╪═════════════╪═══════════════════╪═══════════════════╪═════════════════╪═══════════════╡
-│ 0     ┆ cost        ┆ Fare              ┆ 0.100253          ┆ 0.100253        ┆ 0.00001       │
-│ 1     ┆ cost        ┆ Fare              ┆ 0.035543          ┆ 0.035543        ┆ 0.00001       │
-│ 2     ┆ cost        ┆ Fare              ┆ 0.056122          ┆ 0.056122        ┆ 0.00001       │
+│ 0     ┆ cost        ┆ Fare              ┆ 0.056118          ┆ 0.056118        ┆ 0.00001       │
+│ 1     ┆ cost        ┆ Fare              ┆ 0.10024           ┆ 0.10024         ┆ 0.00001       │
+│ 2     ┆ cost        ┆ Fare              ┆ 0.035545          ┆ 0.035545        ┆ 0.00001       │
 └───────┴─────────────┴───────────────────┴───────────────────┴─────────────────┴───────────────┘
 ```
 
@@ -477,10 +541,11 @@ column can define a partition; use `partition_data=...` when the grouping variab
 lives in a separate table.
 
 ```python
-prediction.compute_wtp(
+income_quintiles = prediction.compute_wtp(
     WTPRequest(alt_var="time", demographic_var="income",
                partition_type=PartitionType.QUINTILES),
     class_probabilities="prior",
+    show=False,
 )
 ```
 

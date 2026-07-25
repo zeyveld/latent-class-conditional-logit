@@ -1,5 +1,6 @@
 """Containers for data."""
 
+import warnings
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple, Optional, Union
@@ -124,14 +125,15 @@ class DiffUnchosenChosen(NamedTuple):
 
 @dataclass
 class MleConfig:
-    """Container for safeguarded exact-Newton optimization options.
+    """Deprecated exact-Newton options; prefer :class:`OptimizationOptions`.
 
     Parameters
     ----------
     maxiter : int, default=75
         Maximum Newton iterations.
     ftol : float, default=1e-5
-        Infinity-norm tolerance for the objective gradient.
+        Deprecated name for the infinity-norm tolerance on the mean
+        negative-log-likelihood gradient.
     hessian_damping : float, default=1e-6
         Initial relative diagonal shift used for modified-Cholesky regularization.
     max_step_norm : float, default=25.0
@@ -173,14 +175,13 @@ class OptimizationOptions(MleConfig):
     maxiter : int, default=75
         Maximum Newton iterations used inside each M-step.
     ftol : float, default=1e-5
-        Gradient tolerance.  Kept for backward compatibility with
-        :class:`MleConfig`.
+        Deprecated alias retained for compatibility with :class:`MleConfig`.
     method : str, default="newton"
         Optimizer family requested by the user.  The latent-class M-step currently
         uses exact Newton updates.
     gradient_tol : float | None, default=None
-        More descriptive alias for ``ftol``.  When supplied, it overrides
-        ``ftol``.
+        Infinity-norm tolerance on the mean negative-log-likelihood gradient.
+        When supplied, it overrides ``ftol``.
     hessian_damping : float, default=1e-6
         Initial relative diagonal shift used for modified-Cholesky regularization.
     max_step_norm : float, default=25.0
@@ -201,6 +202,7 @@ class OptimizationOptions(MleConfig):
         if self.gradient_tol is not None:
             self.ftol = self.gradient_tol
         super().__post_init__()
+        self.gradient_tol = self.ftol
         if self.method != "newton":
             raise ValueError("Only method='newton' is currently supported.")
         if self.line_search != "armijo":
@@ -211,7 +213,7 @@ class OptimizationOptions(MleConfig):
 
 @dataclass
 class EMAlgConfig:
-    """Container for Expectation-Maximization (EM) algorithm options."""
+    """Deprecated EM settings; prefer :class:`FitOptions`."""
 
     jax_prng_seed: int = 0
     loglik_tol: float = 1e-6
@@ -252,11 +254,11 @@ class FitOptions:
     check_interval : int, default=10
         Frequency of convergence checks.
     starts : int, default=1
-        Reserved for future multi-start orchestration.
+        Number of independent panel-partition starts.
     start_method : str, default="panel_partition"
         Initialization method label.
     refit_best_start : bool, default=True
-        Reserved for future multi-start orchestration.
+        Retained for API compatibility. The best converged start is always retained.
     """
 
     seed: int = 0
@@ -267,6 +269,27 @@ class FitOptions:
     starts: int = 1
     start_method: str = "panel_partition"
     refit_best_start: bool = True
+
+    def __post_init__(self) -> None:
+        """Validate user-facing EM settings."""
+        if self.em_tol <= 0:
+            raise ValueError("em_tol must be positive.")
+        if self.max_em_iter < 0:
+            raise ValueError("max_em_iter must be nonnegative.")
+        if self.check_interval <= 0:
+            raise ValueError("check_interval must be positive.")
+        if self.starts < 1:
+            raise ValueError("starts must be at least 1.")
+        if self.start_method != "panel_partition":
+            raise ValueError(
+                "Only start_method='panel_partition' is currently supported."
+            )
+        available_devices = device_count()
+        if not 1 <= self.num_devices <= available_devices:
+            raise ValueError(
+                "num_devices must be between 1 and the number of available JAX "
+                f"devices ({available_devices})."
+            )
 
     def to_em_config(self) -> EMAlgConfig:
         """Convert to the internal EM configuration dataclass."""
@@ -281,7 +304,7 @@ class FitOptions:
 
 @dataclass
 class ErrorConfig:
-    """Container for standard error and covariance matrix options."""
+    """Deprecated covariance settings; prefer :class:`InferenceOptions`."""
 
     robust: bool = True
     skip_std_errs: bool = False
@@ -297,9 +320,10 @@ class InferenceOptions(ErrorConfig):
         Legacy flag controlling robust covariance calculation.
     skip_std_errs : bool, default=False
         Legacy flag to skip standard-error calculations.
-    covariance : str, default="clustered"
-        Covariance estimator label.  ``"none"``/``"unadjusted"`` disable the
-        sandwich correction; ``"clustered"`` and ``"robust"`` enable it.
+    covariance : str | None, default=None
+        Covariance estimator label. ``None`` derives the label from the legacy
+        ``robust`` flag. ``"none"``/``"unadjusted"`` disable the sandwich
+        correction; ``"clustered"`` and ``"robust"`` enable it.
     cluster : str | None, default="panel"
         Cluster level label for reports.  The current latent-class estimator
         clusters at panel level.
@@ -309,14 +333,18 @@ class InferenceOptions(ErrorConfig):
         Descriptive alias for ``skip_std_errs``.
     """
 
-    covariance: str = "clustered"
+    covariance: str | None = None
     cluster: str | None = "panel"
     finite_sample_correction: bool = True
     skip: bool = False
 
     def __post_init__(self) -> None:
         """Normalize user-facing covariance labels."""
-        covariance = self.covariance.lower()
+        covariance = (
+            ("clustered" if self.robust else "unadjusted")
+            if self.covariance is None
+            else self.covariance.lower()
+        )
         if covariance in {"none", "unadjusted", "hessian"}:
             self.robust = False
         elif covariance in {"clustered", "robust", "sandwich"}:
@@ -326,8 +354,96 @@ class InferenceOptions(ErrorConfig):
                 "InferenceOptions.covariance must be one of 'clustered', "
                 "'robust', 'sandwich', 'unadjusted', or 'none'."
             )
+        self.covariance = covariance
         if self.skip:
             self.skip_std_errs = True
+
+
+def resolve_fit_options(
+    fit_options: FitOptions | None,
+    em_alg_config: EMAlgConfig | None,
+) -> FitOptions:
+    """Return one canonical EM option object.
+
+    Parameters
+    ----------
+    fit_options : FitOptions | None
+        Preferred user-facing EM options.
+    em_alg_config : EMAlgConfig | None
+        Deprecated compatibility input.
+
+    Returns
+    -------
+    FitOptions
+        Canonical options consumed by high-level fit orchestration.
+    """
+    if fit_options is not None and em_alg_config is not None:
+        raise ValueError("Pass fit_options or em_alg_config, not both.")
+    if fit_options is not None:
+        return fit_options
+    if em_alg_config is None:
+        return FitOptions()
+    warnings.warn(
+        "em_alg_config is deprecated; pass fit_options=FitOptions(...) instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    return FitOptions(
+        seed=em_alg_config.jax_prng_seed,
+        max_em_iter=em_alg_config.maxiter,
+        em_tol=em_alg_config.loglik_tol,
+        num_devices=em_alg_config.num_devices,
+        check_interval=em_alg_config.check_interval,
+    )
+
+
+def resolve_optimization_options(
+    optimization_options: OptimizationOptions | None,
+    mle_config: MleConfig | None,
+) -> OptimizationOptions:
+    """Return one canonical M-step optimizer option object."""
+    if optimization_options is not None and mle_config is not None:
+        raise ValueError("Pass optimization_options or mle_config, not both.")
+    if optimization_options is not None:
+        return optimization_options
+    if mle_config is None:
+        return OptimizationOptions()
+    warnings.warn(
+        "mle_config is deprecated; pass "
+        "optimization_options=OptimizationOptions(...) instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    return OptimizationOptions(
+        maxiter=mle_config.maxiter,
+        gradient_tol=mle_config.ftol,
+        hessian_damping=mle_config.hessian_damping,
+        max_step_norm=mle_config.max_step_norm,
+        line_search_maxiter=mle_config.line_search_maxiter,
+        accept_any_decrease=mle_config.accept_any_decrease,
+    )
+
+
+def resolve_inference_options(
+    inference: InferenceOptions | None,
+    error_config: ErrorConfig | None,
+) -> InferenceOptions:
+    """Return one canonical covariance and inference option object."""
+    if inference is not None and error_config is not None:
+        raise ValueError("Pass inference or error_config, not both.")
+    if inference is not None:
+        return inference
+    if error_config is None:
+        return InferenceOptions()
+    warnings.warn(
+        "error_config is deprecated; pass inference=InferenceOptions(...) instead.",
+        DeprecationWarning,
+        stacklevel=3,
+    )
+    return InferenceOptions(
+        covariance="clustered" if error_config.robust else "unadjusted",
+        skip=error_config.skip_std_errs,
+    )
 
 
 @dataclass
@@ -417,8 +533,11 @@ class PastChoicesData:
     panels : ArrayLike
         Decision-maker identifiers aligned to rows of ``X``.
     dems : ArrayLike | None, optional
-        Panel-level demographic matrix, one row per unique panel, when the fitted
-        latent-class membership model includes demographics.
+        Panel-level demographic matrix, one row per unique panel. When
+        ``dem_panel_ids`` is omitted, rows must follow sorted unique panel-ID order.
+    dem_panel_ids : ArrayLike | None, optional
+        Panel identifiers aligned to rows of ``dems``. Supplying these IDs allows
+        the parser to validate and reorder demographic rows safely.
     """
 
     X: ArrayLike
@@ -427,6 +546,7 @@ class PastChoicesData:
     cases: ArrayLike
     panels: ArrayLike
     dems: ArrayLike | None = None
+    dem_panel_ids: ArrayLike | None = None
 
 
 class PartitionType(StrEnum):
@@ -495,6 +615,10 @@ class WTPRequest:
             raise ValueError(
                 "When partition_type is 'custom_breaks', 'bins' must be a list of breakpoints."
             )
+        if isinstance(self.bins, list) and any(
+            right <= left for left, right in zip(self.bins, self.bins[1:])
+        ):
+            raise ValueError("Custom WTP breakpoints must be strictly increasing.")
         if self.dummy_vars is not None:
             if not self.dummy_vars:
                 raise ValueError("'dummy_vars' must contain at least one column name.")

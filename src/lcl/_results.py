@@ -12,10 +12,8 @@ from jax import hessian, jacfwd, jacrev
 from jax.tree_util import Partial
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float64
-from pylatexenc.latex2text import LatexNodes2Text
-from tabulate import tabulate
 
-from lcl._case_utils import _diff_unchosen_chosen, _to_structural_betas
+from lcl._case_utils import _diff_unchosen_chosen
 from lcl._diagnostics import LCLDiagnostics
 from lcl._em_alg_steps import (
     _compute_conditional_class_probs,
@@ -23,9 +21,11 @@ from lcl._em_alg_steps import (
 )
 from lcl._encoding import _coerce_frame
 from lcl._jax_compat import cpu_device, device_put_array_leaves
-from lcl._kernels import _choice_probabilities_and_logsum, _class_membership_probs
+from lcl._kernels import _choice_probabilities_and_logsum
 from lcl._logging import log_or_print
+from lcl._params import ParamPacking
 from lcl._prediction import LCLPrediction
+from lcl._presentation import format_lcl_beta_summary
 from lcl._struct import (
     Data,
     DiagnosticsOptions,
@@ -236,17 +236,15 @@ class LCLResults:
         if self.data.num_panels is None:
             raise ValueError("Panel identifiers are required for LCL results.")
 
+        self._param_packing = ParamPacking(
+            num_alt_vars=self.model.num_vars,
+            num_classes=self.model.num_classes,
+            num_dem_vars=self.model.num_dem_vars,
+            numeraire_idx=self.model.numeraire_idx,
+            numeraire_min_abs=self.model.numeraire_min_abs,
+        )
         self.flat_params = self._pack_params()
-
-        # Calculate degrees of freedom
-        latent_betas = self.em_res.latent_betas
-        num_beta_params = latent_betas.size
-        if self.em_res.thetas is not None:
-            num_theta_params = self.em_res.thetas.size
-        else:
-            num_theta_params = self.model.num_classes - 1
-
-        self.num_params = num_beta_params + num_theta_params
+        self.num_params = self._param_packing.num_params
         self.cov_matrix = self._compute_covariance()
 
         # Compute information criteria
@@ -293,16 +291,11 @@ class LCLResults:
         latent_betas = self.em_res.latent_betas
         if latent_betas is None:
             raise ValueError("Latent betas are required to pack parameters.")
-        latent_betas_flat = latent_betas.ravel()
-        if self.em_res.thetas is not None:
-            theta_flat = self.em_res.thetas.ravel()
-        else:
-            if self.em_res.shares is None:
-                raise ValueError("Class shares are required to pack parameters.")
-            shares = jnp.clip(self.em_res.shares, 1e-10)
-            shares = shares / shares.sum()
-            theta_flat = jnp.log(shares[1:] / shares[0]).ravel()
-        return jnp.concatenate([latent_betas_flat, theta_flat])
+        return self._param_packing.pack(
+            latent_betas,
+            self.em_res.thetas,
+            self.em_res.shares,
+        )
 
     def _unpack_params(
         self, flat_params: Float64[Array, "all_params"]
@@ -311,20 +304,7 @@ class LCLResults:
         Float64[Array, "dem_vars_plus_one classes_minus_one"],
     ]:
         """Reconstruct parameter matrices from the flattened array."""
-        num_beta_params = self.model.num_vars * self.model.num_classes
-        latent_betas = flat_params[:num_beta_params].reshape(
-            self.model.num_vars, self.model.num_classes
-        )
-
-        thetas_flat = flat_params[num_beta_params:]
-        if self.model.num_dem_vars > 0:
-            thetas = thetas_flat.reshape(
-                self.model.num_dem_vars + 1, self.model.num_classes - 1
-            )
-        else:
-            thetas = thetas_flat.reshape(1, self.model.num_classes - 1)
-
-        return latent_betas, thetas
+        return self._param_packing.unpack(flat_params)
 
     def _get_class_probs(
         self,
@@ -333,7 +313,7 @@ class LCLResults:
         num_panels: int,
     ) -> Float64[Array, "panels classes"]:
         """Extract unconditional class probabilities (via fractional response)."""
-        return _class_membership_probs(thetas, dems, num_panels)
+        return self._param_packing.class_probs(thetas, dems, num_panels)
 
     def _compute_covariance(self) -> Float64[Array, "all_params all_params"]:
         """Compute covariance on CPU, optionally with clustered sandwich correction.
@@ -388,11 +368,7 @@ class LCLResults:
     ) -> Float64[Array, "panels"]:
         """Compute the log-likelihood for each panel (used to build the Jacobian)."""
         latent_betas, thetas = self._unpack_params(flat_params)
-        structural_betas = _to_structural_betas(
-            latent_betas,
-            getattr(self.model, "numeraire_idx", None),
-            getattr(self.model, "numeraire_min_abs", 1e-5),
-        )
+        structural_betas = self._param_packing.to_structural(latent_betas)
         if data.num_panels is None:
             raise ValueError("Panel identifiers are required for LCL log-likelihoods.")
         class_probs = self._get_class_probs(thetas, data.dems, data.num_panels)
@@ -408,6 +384,56 @@ class LCLResults:
     ) -> Float64[Array, ""]:
         """Re-sums the panel log-likelihoods to a scalar for the Hessian."""
         return jnp.sum(self._panel_loglik_fn(flat_params, diff_unchosen_chosen, data))
+
+    def loglik(
+        self,
+        data: object,
+        dems_data: object | None = None,
+        *,
+        per_panel: bool = False,
+    ) -> float | pl.DataFrame:
+        """Score observed choices with the fitted empirical specification.
+
+        The fitted encoder is reused, so Formulaic categorical levels and expanded
+        columns retain their training-time meaning.
+
+        Parameters
+        ----------
+        data : object
+            Long-format data containing one observed choice per case.
+        dems_data : object | None, optional
+            Optional panel-level demographics joined by the fitted panel ID column.
+        per_panel : bool, default=False
+            Return a panel-level table instead of the total log likelihood.
+
+        Returns
+        -------
+        float or pl.DataFrame
+            Total log likelihood when ``per_panel=False``. Otherwise, a table with
+            the original panel IDs and their log-likelihood contributions.
+        """
+        parsed = self.model._transform_data(
+            data,
+            dems_data=dems_data,
+            require_choice=True,
+        )
+        data_struct = cast(Data, self.model._setup_data(parsed)[0])
+        if data_struct.num_panels is None or data_struct.panels is None:
+            raise ValueError("Panel identifiers are required to score LCL data.")
+        diff = _diff_unchosen_chosen(data_struct)
+        panel_values = self._panel_loglik_fn(self.flat_params, diff, data_struct)
+
+        if not per_panel:
+            return float(jnp.sum(panel_values))
+
+        first_panel_rows = data_struct.panels != jnp.roll(data_struct.panels, shift=1)
+        first_panel_rows = first_panel_rows.at[0].set(True)
+        return pl.DataFrame(
+            {
+                "panel": onp.asarray(parsed.original_panels[first_panel_rows]),
+                "log_likelihood": onp.asarray(panel_values, dtype=onp.float64),
+            }
+        )
 
     def _apply_delta_method(
         self,
@@ -451,11 +477,7 @@ class LCLResults:
         class_probs = self._get_class_probs(thetas, dems, num_panels)
         avg_shares = jnp.mean(class_probs, axis=0)
 
-        structural_betas = _to_structural_betas(
-            latent_betas,
-            getattr(self.model, "numeraire_idx", None),
-            getattr(self.model, "numeraire_min_abs", 1e-5),
-        )
+        structural_betas = self._param_packing.to_structural(latent_betas)
         return structural_betas @ avg_shares
 
     def _calc_population_std_betas(
@@ -467,16 +489,10 @@ class LCLResults:
         """Compute the population variance of the structural taste parameters."""
         latent_betas, thetas = self._unpack_params(flat_params)
 
-        numeraire_idx = getattr(self.model, "numeraire_idx", None)
-
         class_probs = self._get_class_probs(thetas, dems, num_panels)
         avg_shares = jnp.mean(class_probs, axis=0)
 
-        structural_betas = _to_structural_betas(
-            latent_betas,
-            numeraire_idx,
-            getattr(self.model, "numeraire_min_abs", 1e-5),
-        )
+        structural_betas = self._param_packing.to_structural(latent_betas)
 
         mean_betas = structural_betas @ avg_shares
         diff_sq = (structural_betas - mean_betas[:, None]) ** 2
@@ -583,6 +599,8 @@ class LCLResults:
             r"Standard deviations (\sigma's)",
         ),
         num_decimals: int = 3,
+        *,
+        show: bool = True,
     ) -> pl.DataFrame:
         """Print and return population-level coefficient moments.
 
@@ -592,6 +610,9 @@ class LCLResults:
             Column labels used in the printed LaTeX and terminal tables.
         num_decimals : int, default=3
             Number of decimal places used in printed tables.
+        show : bool, default=True
+            Emit LaTeX and terminal renderings. Set to ``False`` for
+            computation-only use.
 
         Returns
         -------
@@ -600,56 +621,17 @@ class LCLResults:
             model names; ``label`` contains presentation labels used for printing.
         """
         summary_df = self.beta_summary()
-        body_rows, data_clean = [], []
-        converter = LatexNodes2Text(math_mode="text")
-        header_clean = [converter.latex_to_text(col) for col in header]
-
-        for row in summary_df.iter_rows(named=True):
-            coeff_nm = str(row["label"])
-            body_rows.append(
-                f"{coeff_nm} & {float(row['mean']):.{num_decimals}f} & {float(row['sd']):.{num_decimals}f} \\\\"
+        if show:
+            log_or_print(
+                logger,
+                "%s",
+                format_lcl_beta_summary(summary_df, header, num_decimals),
             )
-            body_rows.append(
-                f" & ({float(row['mean_se']):.{num_decimals}f}) & ({float(row['sd_se']):.{num_decimals}f}) \\\\"
-            )
-            var_clean = converter.latex_to_text(coeff_nm)
-            data_clean.append(
-                (
-                    var_clean,
-                    f"{float(row['mean']):.{num_decimals}f}",
-                    f"{float(row['sd']):.{num_decimals}f}",
-                )
-            )
-            data_clean.append(
-                (
-                    "",
-                    f"({float(row['mean_se']):.{num_decimals}f})",
-                    f"({float(row['sd_se']):.{num_decimals}f})",
-                )
-            )
-
-        latex_string = "\n".join(
-            [r"\toprule", " & ".join(header) + r" \\", r"\midrule", "%"]
-            + body_rows
-            + ["%", r"\bottomrule "]
-        )
-        table_preview = tabulate(
-            data_clean,
-            headers=header_clean,
-            tablefmt="simple_outline",
-            floatfmt=f".{num_decimals}f",
-        )
-        log_or_print(
-            logger,
-            "\n--- LaTeX Output ---\n\n%s\n\n--- Table preview ---\n\n%s",
-            latex_string,
-            table_preview,
-        )
         return summary_df
 
-    def summarize(self, num_decimals: int = 3) -> pl.DataFrame:
+    def summarize(self, num_decimals: int = 3, *, show: bool = True) -> pl.DataFrame:
         """Alias for :meth:`summarize_betas`."""
-        return self.summarize_betas(num_decimals=num_decimals)
+        return self.summarize_betas(num_decimals=num_decimals, show=show)
 
     def spec_summary(self) -> str:
         """Return a human-readable model specification summary."""
@@ -667,8 +649,7 @@ class LCLResults:
             suffix = ""
             if variable == self.model.numeraire:
                 suffix = (
-                    " [negative, "
-                    f"min_abs={getattr(self.model, 'numeraire_min_abs', 1e-5):g}]"
+                    f" [negative, min_abs={self._param_packing.numeraire_min_abs:g}]"
                 )
             label = _model_variable_label(self.model, variable)
             variable_text = label if label == variable else f"{label} ({variable})"
@@ -843,6 +824,7 @@ class LCLResults:
         cases: ArrayLike | None = None,
         panels: ArrayLike | None = None,
         dems: ArrayLike | None = None,
+        dem_panel_ids: ArrayLike | None = None,
         past_choices: object | None = None,
         data: object | None = None,
         dems_data: object | None = None,
@@ -868,7 +850,12 @@ class LCLResults:
         panels : ArrayLike | None, optional
             Decision-maker identifiers aligned to rows of ``X``.
         dems : ArrayLike | None, optional
-            Panel-level demographics for array-style prediction.
+            Panel-level demographics for array-style prediction. When
+            ``dem_panel_ids`` is omitted, rows must be in sorted unique panel-ID
+            order.
+        dem_panel_ids : ArrayLike | None, optional
+            Panel IDs aligned with rows of ``dems``. The parser uses these IDs to
+            validate and reorder demographic rows.
         past_choices : PastChoicesData or tabular data, optional
             Historical choices used to condition latent-class membership probabilities.
             Pass a :class:`~lcl._struct.PastChoicesData` instance for array-style
@@ -920,6 +907,7 @@ class LCLResults:
                 alts=alts,
                 cases=cases,
                 panels=panels,
+                dem_panel_ids=dem_panel_ids,
                 case_varnames=self.model.case_varnames,
                 dem_varnames=self.model.dem_varnames,
             )
@@ -934,6 +922,12 @@ class LCLResults:
         shares = self.em_res.shares
         if shares is None:
             raise ValueError("Class shares are required for prediction.")
+        if self.em_res.thetas is not None and predict_data.dems is None:
+            raise ValueError(
+                "dems is required for array-style prediction because the fitted "
+                "class-membership model uses demographics. Pass dem_panel_ids to "
+                "validate their panel alignment."
+            )
 
         if past_choices is not None:
             parsed_past = _parse_past_choices(
@@ -1087,6 +1081,7 @@ def _parse_past_choices(
             alts=past_choices.alts,
             cases=past_choices.cases,
             panels=past_choices.panels,
+            dem_panel_ids=past_choices.dem_panel_ids,
             y=past_choices.y,
             case_varnames=model.case_varnames,
             dem_varnames=model.dem_varnames,
@@ -1105,6 +1100,7 @@ def _parsed_prediction_arrays(
     alts: ArrayLike,
     cases: ArrayLike,
     panels: ArrayLike,
+    dem_panel_ids: ArrayLike | None,
     case_varnames: list[str],
     dem_varnames: list[str] | None,
     y: ArrayLike | None = None,
@@ -1123,6 +1119,9 @@ def _parsed_prediction_arrays(
         Choice-situation identifiers aligned to rows of ``X``.
     panels : ArrayLike
         Panel identifiers aligned to rows of ``X``.
+    dem_panel_ids : ArrayLike | None
+        Panel identifiers aligned to rows of ``dems``. When omitted, demographic
+        rows must already follow sorted unique panel-ID order.
     case_varnames : list[str]
         Names corresponding to columns of ``X``.
     dem_varnames : list[str] | None
@@ -1139,6 +1138,19 @@ def _parsed_prediction_arrays(
     alts_np = onp.asarray(alts)
     cases_np = onp.asarray(cases)
     panels_np = onp.asarray(panels)
+    if X_np.ndim != 2:
+        raise ValueError("X must be a two-dimensional design matrix.")
+    num_rows = X_np.shape[0]
+    if any(arr.shape != (num_rows,) for arr in (alts_np, cases_np, panels_np)):
+        raise ValueError(
+            "alts, cases, and panels must align one-to-one with rows of X."
+        )
+    if X_np.shape[1] != len(case_varnames):
+        raise ValueError(
+            f"X has {X_np.shape[1]} columns; expected {len(case_varnames)}."
+        )
+    if y is not None and onp.asarray(y).shape != (num_rows,):
+        raise ValueError("y must align one-to-one with rows of X.")
     order = onp.lexsort((alts_np, cases_np, panels_np))
 
     X_sorted = X_np[order]
@@ -1162,9 +1174,43 @@ def _parsed_prediction_arrays(
     dems_array = None
     if dems is not None:
         dems_np = onp.asarray(dems)
+        if dems_np.ndim != 2:
+            raise ValueError("dems must be a two-dimensional matrix.")
         if dems_np.shape[0] != panel_ids.shape[0]:
             raise ValueError("dems must have one row per unique panel.")
+        expected_dem_vars = len(dem_varnames or [])
+        if dems_np.shape[1] != expected_dem_vars:
+            raise ValueError(
+                f"dems has {dems_np.shape[1]} columns; expected {expected_dem_vars}."
+            )
+        if dem_panel_ids is not None:
+            dem_panel_ids_np = onp.asarray(dem_panel_ids)
+            if dem_panel_ids_np.shape != (dems_np.shape[0],):
+                raise ValueError(
+                    "dem_panel_ids must align one-to-one with rows of dems."
+                )
+            if onp.unique(dem_panel_ids_np).shape[0] != dem_panel_ids_np.shape[0]:
+                raise ValueError("dem_panel_ids cannot contain duplicates.")
+            lookup = {
+                panel_id: idx for idx, panel_id in enumerate(dem_panel_ids_np.tolist())
+            }
+            missing_panels = [
+                panel_id for panel_id in panel_ids.tolist() if panel_id not in lookup
+            ]
+            extra_panels = [
+                panel_id
+                for panel_id in lookup
+                if panel_id not in set(panel_ids.tolist())
+            ]
+            if missing_panels or extra_panels:
+                raise ValueError(
+                    "dem_panel_ids must match the unique prediction panels exactly. "
+                    f"Missing: {missing_panels}; extra: {extra_panels}."
+                )
+            dems_np = dems_np[[lookup[panel_id] for panel_id in panel_ids.tolist()]]
         dems_array = jnp.array(dems_np, dtype="float64")
+    elif dem_panel_ids is not None:
+        raise ValueError("dem_panel_ids can only be supplied with dems.")
 
     return ParsedData(
         X=jnp.array(X_sorted, dtype="float64"),

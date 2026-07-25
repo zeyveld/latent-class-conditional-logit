@@ -2,7 +2,7 @@
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import jax.numpy as jnp
@@ -32,6 +32,15 @@ class ChoiceDataEncoder:
     y_model_spec: Any | None = None
     x_model_spec: Any | None = None
     dem_model_spec: Any | None = None
+    _fitted: bool = field(default=False, init=False, repr=False)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        """Prevent metadata mutation after a successful fit."""
+        if getattr(self, "_fitted", False):
+            raise AttributeError(
+                "A fitted ChoiceDataEncoder is immutable; use transform() for new data."
+            )
+        super().__setattr__(name, value)
 
     def __post_init__(self) -> None:
         """Validate mutually exclusive formula interfaces."""
@@ -66,7 +75,15 @@ class ChoiceDataEncoder:
         :class:`~lcl._struct.ParsedData`
             Encoded arrays, sequential IDs, original labels, and variable names.
         """
-        return self._transform(data, dems_data=dems_data, fit=True, require_choice=True)
+        if self._fitted:
+            raise RuntimeError(
+                "ChoiceDataEncoder is already fitted and cannot be refitted."
+            )
+        parsed = self._transform(
+            data, dems_data=dems_data, fit=True, require_choice=True
+        )
+        self._fitted = True
+        return parsed
 
     def transform(
         self,
@@ -90,6 +107,10 @@ class ChoiceDataEncoder:
         :class:`~lcl._struct.ParsedData`
             Encoded arrays using the model specification learned during fitting.
         """
+        if not self._fitted:
+            raise RuntimeError(
+                "ChoiceDataEncoder must be fitted before transform is called."
+            )
         return self._transform(
             data, dems_data=dems_data, fit=False, require_choice=require_choice
         )
@@ -287,11 +308,12 @@ class ChoiceDataEncoder:
                 if self.membership_formula is not None:
                     df = self._encode_membership_formula(pandas_df, df, fit=fit)
                 else:
-                    self.dem_varnames = (
-                        list(self.explicit_dem_varnames)
-                        if self.explicit_dem_varnames is not None
-                        else None
-                    )
+                    if fit:
+                        self.dem_varnames = (
+                            list(self.explicit_dem_varnames)
+                            if self.explicit_dem_varnames is not None
+                            else None
+                        )
 
                 dem_vars = self.dem_varnames
                 if self.utility_formula is not None and (fit or require_choice):
@@ -323,8 +345,9 @@ class ChoiceDataEncoder:
                 else None
             )
             y_array = self._choice_array_from_column(df, fit, require_choice)
-            self.case_varnames = case_vars
-            self.dem_varnames = dem_vars
+            if fit:
+                self.case_varnames = case_vars
+                self.dem_varnames = dem_vars
 
         return y_array, case_vars, dem_vars, df
 
@@ -542,14 +565,15 @@ class ChoiceDataEncoder:
         self, df: pl.DataFrame, *, require_choice: bool, fit: bool
     ) -> list[str]:
         """Validate and store explicit alternative-specific variables."""
-        del require_choice, fit
+        del require_choice
         if self.explicit_case_varnames is None:
             raise ValueError(
                 "Must provide either utility_formula, formula, or explicit case_varnames."
             )
         case_vars = list(self.explicit_case_varnames)
         _require_columns(df, case_vars)
-        self.case_varnames = case_vars
+        if fit:
+            self.case_varnames = case_vars
         return case_vars
 
     def _choice_array_from_column(

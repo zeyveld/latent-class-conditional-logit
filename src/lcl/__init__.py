@@ -79,7 +79,7 @@ def fit(
     LCLResults
         Fitted latent-class results.
     """
-    model = LatentClassConditionalLogit(spec)
+    model = LatentClassConditionalLogit(spec=spec)
     return model.fit(
         data=data,
         fit_options=fit_options,
