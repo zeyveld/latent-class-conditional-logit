@@ -164,7 +164,7 @@ convergence, panel counts, and explicit failure diagnostics.
   delta-method standard errors, convergence summaries, and structured audit
   output.
 - **Counterfactuals.** Reuse the fitted encoder for new choice sets and, when
-  useful, update class probabilities with observed choice histories.
+  useful, update class probabilities with observed choice histories. 
 - **Model selection.** Compare class counts using blocked cross-validation that
   keeps each decision-maker entirely within one fold.
 
@@ -178,6 +178,7 @@ before they become opaque compiled-kernel failures.
 ## Next steps
 
 - Follow the [estimation and counterfactual tutorial](tutorials/estimation.md).
+- See [counterfactual future worlds and present-trip welfare](tutorials/counterfactual_simulation.md).
 - Compare class counts with [panel-blocked cross-validation](tutorials/cross_validation.md).
 - Review the [`LCLSpec` and options API](api/specification.md).
 

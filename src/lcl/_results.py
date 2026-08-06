@@ -36,6 +36,7 @@ from lcl._struct import (
     ParsedData,
     PastChoicesData,
 )
+from lcl._welfare import _mix_welfare_components, _train_welfare_by_class
 
 logger = logging.getLogger(__name__)
 
@@ -833,6 +834,9 @@ class LCLResults:
         data: object | None = None,
         dems_data: object | None = None,
         past_choices_dems_data: object | None = None,
+        experienced_X: ArrayLike | None = None,
+        experienced_data: object | None = None,
+        experienced_dems_data: object | None = None,
     ) -> LCLPrediction:
         """Generate out-of-sample latent-class predictions.
 
@@ -841,12 +845,19 @@ class LCLResults:
         When historical choices are supplied through ``past_choices``, class
         membership probabilities are updated with Bayes' rule before computing
         counterfactual choice probabilities, consumer surplus, and willingness to pay.
+        Optional experienced attributes produce present-trip welfare using Train's
+        (2015) distinction between attributes used to choose and attributes actually
+        experienced.
 
         Parameters
         ----------
         X : ArrayLike | None, optional
             Alternative-specific design matrix for array-style prediction. Ignored
             when ``data`` is provided.
+        experienced_X : ArrayLike | None, optional
+            Row-aligned experienced-attribute design matrix for array-style welfare
+            calculations.  Consumers choose using ``X`` but obtain utility from
+            ``experienced_X``.  Defaults to ``X``.
         alts : ArrayLike | None, optional
             Alternative identifiers aligned to rows of ``X``.
         cases : ArrayLike | None, optional
@@ -869,8 +880,14 @@ class LCLResults:
         data : object | None, optional
             Long-format prediction data. If provided, the fitted encoder parses this
             data using the original empirical specification.
+        experienced_data : object | None, optional
+            Long-format experienced attributes for the same panels, cases, and
+            alternatives as ``data``.  This affects welfare, not choice probabilities.
+            Defaults to ``data``.
         dems_data : object | None, optional
             Optional panel-level demographics to merge into ``data`` during prediction.
+        experienced_dems_data : object | None, optional
+            Optional panel-level columns needed to encode ``experienced_data``.
         past_choices_dems_data : object | None, optional
             Optional panel-level demographics to merge into tabular ``past_choices``.
             This argument is not used with :class:`~lcl._struct.PastChoicesData`.
@@ -878,8 +895,9 @@ class LCLResults:
         Returns
         -------
         :class:`~lcl._prediction.LCLPrediction`
-            Prediction results, including choice probabilities, consumer surplus,
-            panel-level WTP values, and the class probabilities used for prediction.
+            Prediction results, including choice probabilities, Train-consistent
+            present-trip surplus in utils and (with a numeraire) dollars, panel-level
+            WTP values, and the class probabilities used for prediction.
 
         Raises
         ------
@@ -891,6 +909,20 @@ class LCLResults:
         if past_choices is None and past_choices_dems_data is not None:
             raise ValueError(
                 "past_choices_dems_data can only be used when past_choices is provided."
+            )
+        if experienced_data is None and experienced_dems_data is not None:
+            raise ValueError(
+                "experienced_dems_data can only be used with experienced_data."
+            )
+        if data is not None and experienced_X is not None:
+            raise ValueError(
+                "Use experienced_data with tabular data; experienced_X is for "
+                "array-style prediction."
+            )
+        if data is None and experienced_data is not None:
+            raise ValueError(
+                "experienced_data requires tabular data. Use experienced_X with "
+                "array-style prediction."
             )
         partition_data_df = None
         if data is not None:
@@ -916,6 +948,23 @@ class LCLResults:
                 dem_varnames=self.model.dem_varnames,
             )
         predict_data = cast(Data, self.model._setup_data(parsed_predict)[0])
+        if experienced_data is not None:
+            parsed_experienced = self.model._transform_data(
+                experienced_data, dems_data=experienced_dems_data
+            )
+            _validate_experienced_choice_sets(parsed_predict, parsed_experienced)
+            experienced_design = parsed_experienced.X
+        elif experienced_X is not None:
+            experienced_design = jnp.asarray(experienced_X, dtype=jnp.float64)
+            if experienced_design.shape != predict_data.X.shape:
+                raise ValueError(
+                    "experienced_X must have the same shape as X: "
+                    f"expected {predict_data.X.shape}, got {experienced_design.shape}."
+                )
+            if not bool(jnp.all(jnp.isfinite(experienced_design))):
+                raise ValueError("experienced_X must contain only finite values.")
+        else:
+            experienced_design = predict_data.X
         if predict_data.num_panels is None or predict_data.panels is None:
             raise ValueError(
                 "Panel identifiers are required for latent-class prediction."
@@ -961,23 +1010,38 @@ class LCLResults:
             )
             class_probabilities_source = "prior"
 
-        choice_probs_by_class, log_sum_exp_utility = _choice_probabilities_and_logsum(
+        choice_probs_by_class, _ = _choice_probabilities_and_logsum(
             predict_data.X,
             structural_betas,
             predict_data.cases,
             predict_data.num_cases,
         )
 
-        # Ensure alpha (marginal utility of income) is correctly signed
+        # A dollar conversion must occur within class before marginalization.  This
+        # avoids dividing average utility by an average price coefficient.
         numeraire_idx = getattr(self.model, "numeraire_idx", None)
         if numeraire_idx is None:
-            marginal_utility_income = jnp.ones(self.model.num_classes)
+            marginal_utility_income = None
         else:
             marginal_utility_income = -structural_betas[numeraire_idx, :]
 
-        surplus_by_class = log_sum_exp_utility / marginal_utility_income[None, :]
+        if predict_data.panels_of_cases is None:
+            raise ValueError("Panel identifiers are required for welfare calculations.")
+        welfare_by_class = _train_welfare_by_class(
+            predict_data.X,
+            experienced_design,
+            structural_betas,
+            predict_data.cases,
+            predict_data.num_cases,
+        )
+        welfare = _mix_welfare_components(
+            welfare_by_class,
+            class_probs_by_panel[predict_data.panels_of_cases],
+            marginal_utility_income,
+        )
 
         if numeraire_idx is not None:
+            assert marginal_utility_income is not None
             betas_sans_numeraire = jnp.delete(structural_betas, numeraire_idx, axis=0)
             wtp_alt_vars_by_class = betas_sans_numeraire / marginal_utility_income
             wtp_alt_vars_by_panel = class_probs_by_panel @ wtp_alt_vars_by_class.T
@@ -1002,12 +1066,6 @@ class LCLResults:
             raise ValueError(
                 "Panel identifiers are required for latent-class prediction."
             )
-        conditional_surplus = jnp.einsum(
-            "np,np->n",
-            class_probs_by_panel[predict_data.panels_of_cases],
-            surplus_by_class,
-        )
-
         unconditional_choice_probs = jnp.sum(
             class_probs_by_panel[predict_data.panels] * choice_probs_by_class, axis=1
         )
@@ -1025,13 +1083,36 @@ class LCLResults:
 
         first_case_rows = predict_data.cases != jnp.roll(predict_data.cases, shift=1)
         first_case_rows = first_case_rows.at[0].set(True)
-        surplus_df = pl.DataFrame(
-            {
-                "panels": onp.array(parsed_predict.original_panels[first_case_rows]),
-                "cases": onp.array(parsed_predict.original_cases[first_case_rows]),
-                "surplus": onp.array(conditional_surplus, dtype=onp.float64),
-            }
+        surplus_columns: dict[str, object] = {
+            "panels": onp.array(parsed_predict.original_panels[first_case_rows]),
+            "cases": onp.array(parsed_predict.original_cases[first_case_rows]),
+        }
+        welfare_order = [
+            "anticipated_surplus_utils",
+            "experience_effect_utils",
+            "experienced_surplus_utils",
+            "perfect_foresight_surplus_utils",
+            "foreknowledge_loss_utils",
+            "anticipated_surplus_dollars",
+            "experience_effect_dollars",
+            "experienced_surplus_dollars",
+            "perfect_foresight_surplus_dollars",
+            "foreknowledge_loss_dollars",
+        ]
+        for column in welfare_order:
+            if column in welfare:
+                surplus_columns[column] = onp.array(
+                    welfare[column], dtype=onp.float64
+                )
+        legacy_surplus = (
+            welfare["experienced_surplus_dollars"]
+            if marginal_utility_income is not None
+            else welfare["experienced_surplus_utils"]
         )
+        surplus_columns["surplus"] = onp.array(
+            legacy_surplus, dtype=onp.float64
+        )
+        surplus_df = pl.DataFrame(surplus_columns)
 
         return LCLPrediction(
             predicted_probs_df=predicted_probs_df,
@@ -1042,6 +1123,30 @@ class LCLResults:
             class_probs_by_panel=class_probs_by_panel,
             class_probabilities_source=class_probabilities_source,
             partition_data_df=partition_data_df,
+        )
+
+
+def _validate_experienced_choice_sets(
+    anticipated: ParsedData, experienced: ParsedData
+) -> None:
+    """Require experienced attributes to align to anticipated choice-set rows."""
+    identifiers = (
+        ("panels", anticipated.original_panels, experienced.original_panels),
+        ("cases", anticipated.original_cases, experienced.original_cases),
+        ("alternatives", anticipated.original_alts, experienced.original_alts),
+    )
+    for label, anticipated_ids, experienced_ids in identifiers:
+        if not onp.array_equal(
+            onp.asarray(anticipated_ids), onp.asarray(experienced_ids)
+        ):
+            raise ValueError(
+                "experienced_data must contain exactly the same panels, cases, and "
+                f"alternatives as data. The sorted {label} do not align."
+            )
+    if anticipated.X.shape != experienced.X.shape:
+        raise ValueError(
+            "experienced_data produced a design matrix with a different shape: "
+            f"expected {anticipated.X.shape}, got {experienced.X.shape}."
         )
 
 
