@@ -1,6 +1,5 @@
 """Containers for data."""
 
-import warnings
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, NamedTuple, Optional, Union
@@ -124,64 +123,18 @@ class DiffUnchosenChosen(NamedTuple):
 
 
 @dataclass
-class MleConfig:
-    """Deprecated exact-Newton options; prefer :class:`OptimizationOptions`.
-
-    Parameters
-    ----------
-    maxiter : int, default=75
-        Maximum Newton iterations.
-    ftol : float, default=1e-5
-        Deprecated name for the infinity-norm tolerance on the mean
-        negative-log-likelihood gradient.
-    hessian_damping : float, default=1e-6
-        Initial relative diagonal shift used for modified-Cholesky regularization.
-    max_step_norm : float, default=25.0
-        Maximum Euclidean norm of a trial search direction.
-    line_search_maxiter : int, default=25
-        Maximum Armijo step halvings per Newton iteration.
-    accept_any_decrease : bool, default=False
-        Accept any finite objective decrease after backtracking instead of requiring
-        Armijo sufficient decrease.
-    """
-
-    maxiter: int = 75
-    ftol: float = 1e-5
-    hessian_damping: float = 1e-6
-    max_step_norm: float = 25.0
-    line_search_maxiter: int = 25
-    accept_any_decrease: bool = False
-
-    def __post_init__(self) -> None:
-        """Validate optimizer settings."""
-        if self.maxiter < 0:
-            raise ValueError("maxiter must be nonnegative.")
-        if self.ftol <= 0:
-            raise ValueError("ftol must be positive.")
-        if self.hessian_damping <= 0:
-            raise ValueError("hessian_damping must be positive.")
-        if self.max_step_norm <= 0:
-            raise ValueError("max_step_norm must be positive.")
-        if self.line_search_maxiter < 0:
-            raise ValueError("line_search_maxiter must be nonnegative.")
-
-
-@dataclass
-class OptimizationOptions(MleConfig):
+class OptimizationOptions:
     """User-facing optimizer settings.
 
     Parameters
     ----------
     maxiter : int, default=75
         Maximum Newton iterations used inside each M-step.
-    ftol : float, default=1e-5
-        Deprecated alias retained for compatibility with :class:`MleConfig`.
     method : str, default="newton"
         Optimizer family requested by the user.  The latent-class M-step currently
         uses exact Newton updates.
-    gradient_tol : float | None, default=None
+    gradient_tol : float, default=1e-5
         Infinity-norm tolerance on the mean negative-log-likelihood gradient.
-        When supplied, it overrides ``ftol``.
     hessian_damping : float, default=1e-6
         Initial relative diagonal shift used for modified-Cholesky regularization.
     max_step_norm : float, default=25.0
@@ -192,49 +145,34 @@ class OptimizationOptions(MleConfig):
         Fallback direction when the Newton direction is not a descent direction.
     """
 
+    maxiter: int = 75
+    gradient_tol: float = 1e-5
+    hessian_damping: float = 1e-6
+    max_step_norm: float = 25.0
+    line_search_maxiter: int = 25
+    accept_any_decrease: bool = False
     method: str = "newton"
-    gradient_tol: float | None = None
     line_search: str = "armijo"
     fallback: str = "gradient"
 
     def __post_init__(self) -> None:
-        """Normalize aliases to the legacy fields consumed by internals."""
-        if self.gradient_tol is not None:
-            self.ftol = self.gradient_tol
-        super().__post_init__()
-        self.gradient_tol = self.ftol
+        """Validate optimizer settings."""
+        if self.maxiter < 0:
+            raise ValueError("maxiter must be nonnegative.")
+        if self.gradient_tol <= 0:
+            raise ValueError("gradient_tol must be positive.")
+        if self.hessian_damping <= 0:
+            raise ValueError("hessian_damping must be positive.")
+        if self.max_step_norm <= 0:
+            raise ValueError("max_step_norm must be positive.")
+        if self.line_search_maxiter < 0:
+            raise ValueError("line_search_maxiter must be nonnegative.")
         if self.method != "newton":
             raise ValueError("Only method='newton' is currently supported.")
         if self.line_search != "armijo":
             raise ValueError("Only line_search='armijo' is currently supported.")
         if self.fallback != "gradient":
             raise ValueError("Only fallback='gradient' is currently supported.")
-
-
-@dataclass
-class EMAlgConfig:
-    """Deprecated EM settings; prefer :class:`FitOptions`."""
-
-    jax_prng_seed: int = 0
-    loglik_tol: float = 1e-6
-    maxiter: int = 2000
-    num_devices: int = field(default_factory=device_count)
-    check_interval: int = 10
-
-    def __post_init__(self) -> None:
-        """Validate EM and device settings."""
-        if self.loglik_tol <= 0:
-            raise ValueError("loglik_tol must be positive.")
-        if self.maxiter < 0:
-            raise ValueError("maxiter must be nonnegative.")
-        if self.check_interval <= 0:
-            raise ValueError("check_interval must be positive.")
-        available_devices = device_count()
-        if not 1 <= self.num_devices <= available_devices:
-            raise ValueError(
-                "num_devices must be between 1 and the number of available JAX "
-                f"devices ({available_devices})."
-            )
 
 
 @dataclass
@@ -257,8 +195,6 @@ class FitOptions:
         Number of independent panel-partition starts.
     start_method : str, default="panel_partition"
         Initialization method label.
-    refit_best_start : bool, default=True
-        Retained for API compatibility. The best converged start is always retained.
     """
 
     seed: int = 0
@@ -268,7 +204,6 @@ class FitOptions:
     check_interval: int = 10
     starts: int = 1
     start_method: str = "panel_partition"
-    refit_best_start: bool = True
 
     def __post_init__(self) -> None:
         """Validate user-facing EM settings."""
@@ -291,159 +226,43 @@ class FitOptions:
                 f"devices ({available_devices})."
             )
 
-    def to_em_config(self) -> EMAlgConfig:
-        """Convert to the internal EM configuration dataclass."""
-        return EMAlgConfig(
-            jax_prng_seed=self.seed,
-            loglik_tol=self.em_tol,
-            maxiter=self.max_em_iter,
-            num_devices=self.num_devices,
-            check_interval=self.check_interval,
-        )
-
 
 @dataclass
-class ErrorConfig:
-    """Deprecated covariance settings; prefer :class:`InferenceOptions`."""
-
-    robust: bool = True
-    skip_std_errs: bool = False
-
-
-@dataclass
-class InferenceOptions(ErrorConfig):
+class InferenceOptions:
     """User-facing inference and covariance settings.
 
     Parameters
     ----------
-    robust : bool, default=True
-        Legacy flag controlling robust covariance calculation.
-    skip_std_errs : bool, default=False
-        Legacy flag to skip standard-error calculations.
-    covariance : str | None, default=None
-        Covariance estimator label. ``None`` derives the label from the legacy
-        ``robust`` flag. ``"none"``/``"unadjusted"`` disable the sandwich
-        correction; ``"clustered"`` and ``"robust"`` enable it.
+    covariance : str, default="clustered"
+        Covariance estimator label. ``"none"``/``"unadjusted"`` disable the
+        sandwich correction; ``"clustered"`` and ``"robust"`` enable it.
     cluster : str | None, default="panel"
         Cluster level label for reports.  The current latent-class estimator
         clusters at panel level.
     finite_sample_correction : bool, default=True
         Whether reports should describe the finite-sample correction.
     skip : bool, default=False
-        Descriptive alias for ``skip_std_errs``.
+        Skip covariance and standard-error calculations.
     """
 
-    covariance: str | None = None
+    covariance: str = "clustered"
     cluster: str | None = "panel"
     finite_sample_correction: bool = True
     skip: bool = False
 
     def __post_init__(self) -> None:
         """Normalize user-facing covariance labels."""
-        covariance = (
-            ("clustered" if self.robust else "unadjusted")
-            if self.covariance is None
-            else self.covariance.lower()
-        )
+        covariance = self.covariance.lower()
         if covariance in {"none", "unadjusted", "hessian"}:
-            self.robust = False
+            covariance = "unadjusted"
         elif covariance in {"clustered", "robust", "sandwich"}:
-            self.robust = True
+            covariance = "clustered"
         else:
             raise ValueError(
                 "InferenceOptions.covariance must be one of 'clustered', "
                 "'robust', 'sandwich', 'unadjusted', or 'none'."
             )
         self.covariance = covariance
-        if self.skip:
-            self.skip_std_errs = True
-
-
-def resolve_fit_options(
-    fit_options: FitOptions | None,
-    em_alg_config: EMAlgConfig | None,
-) -> FitOptions:
-    """Return one canonical EM option object.
-
-    Parameters
-    ----------
-    fit_options : FitOptions | None
-        Preferred user-facing EM options.
-    em_alg_config : EMAlgConfig | None
-        Deprecated compatibility input.
-
-    Returns
-    -------
-    FitOptions
-        Canonical options consumed by high-level fit orchestration.
-    """
-    if fit_options is not None and em_alg_config is not None:
-        raise ValueError("Pass fit_options or em_alg_config, not both.")
-    if fit_options is not None:
-        return fit_options
-    if em_alg_config is None:
-        return FitOptions()
-    warnings.warn(
-        "em_alg_config is deprecated; pass fit_options=FitOptions(...) instead.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-    return FitOptions(
-        seed=em_alg_config.jax_prng_seed,
-        max_em_iter=em_alg_config.maxiter,
-        em_tol=em_alg_config.loglik_tol,
-        num_devices=em_alg_config.num_devices,
-        check_interval=em_alg_config.check_interval,
-    )
-
-
-def resolve_optimization_options(
-    optimization_options: OptimizationOptions | None,
-    mle_config: MleConfig | None,
-) -> OptimizationOptions:
-    """Return one canonical M-step optimizer option object."""
-    if optimization_options is not None and mle_config is not None:
-        raise ValueError("Pass optimization_options or mle_config, not both.")
-    if optimization_options is not None:
-        return optimization_options
-    if mle_config is None:
-        return OptimizationOptions()
-    warnings.warn(
-        "mle_config is deprecated; pass "
-        "optimization_options=OptimizationOptions(...) instead.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-    return OptimizationOptions(
-        maxiter=mle_config.maxiter,
-        gradient_tol=mle_config.ftol,
-        hessian_damping=mle_config.hessian_damping,
-        max_step_norm=mle_config.max_step_norm,
-        line_search_maxiter=mle_config.line_search_maxiter,
-        accept_any_decrease=mle_config.accept_any_decrease,
-    )
-
-
-def resolve_inference_options(
-    inference: InferenceOptions | None,
-    error_config: ErrorConfig | None,
-) -> InferenceOptions:
-    """Return one canonical covariance and inference option object."""
-    if inference is not None and error_config is not None:
-        raise ValueError("Pass inference or error_config, not both.")
-    if inference is not None:
-        return inference
-    if error_config is None:
-        return InferenceOptions()
-    warnings.warn(
-        "error_config is deprecated; pass inference=InferenceOptions(...) instead.",
-        DeprecationWarning,
-        stacklevel=3,
-    )
-    return InferenceOptions(
-        covariance="clustered" if error_config.robust else "unadjusted",
-        skip=error_config.skip_std_errs,
-    )
 
 
 @dataclass

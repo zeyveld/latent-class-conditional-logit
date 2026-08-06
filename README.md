@@ -166,11 +166,9 @@ cl_results = lcl.ConditionalLogit().fit(
 )
 ```
 
-The preferred configuration objects are `FitOptions`, `OptimizationOptions`,
-and `InferenceOptions`. The older `EMAlgConfig`, `MleConfig`, and `ErrorConfig`
-inputs remain accepted with deprecation warnings. Prefer separate
-`utility_formula` and `membership_formula` fields over the deprecated combined
-`formula`, and pass specifications to lower-level entry points by keyword:
+The configuration objects are `FitOptions`, `OptimizationOptions`, and
+`InferenceOptions`. Keep utility and membership formulas in their separate
+fields, and pass specifications to lower-level entry points by keyword:
 `LatentClassConditionalLogit(spec=spec)` and
 `cv_optimal_classes(..., spec=spec)`.
 
@@ -205,10 +203,8 @@ panel demographics; the same alignment field is available on `PastChoicesData`.
 without printing, and numeric quintile/custom-break groups follow numeric bin
 order.
 
-See the documentation's
-[best-practices and migration guide](https://zeyveld.github.io/latent-class-conditional-logit/guides/best_practices/)
-for weight-key conventions, cross-validation failure semantics, and legacy API
-replacements.
+The tutorials document weight-key conventions, cross-validation failure
+semantics, panel alignment, and the current API patterns used above.
 
 ## Roadmap
 

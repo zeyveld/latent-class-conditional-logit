@@ -11,15 +11,21 @@ from lcl.constraints import (
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._em_alg_steps import _compute_conditional_class_probs
 from lcl._optimize import exact_newton_minimize
-from lcl._struct import Data, DiffUnchosenChosen, EMAlgConfig, EMVars, MleConfig
+from lcl._struct import (
+    Data,
+    DiffUnchosenChosen,
+    EMVars,
+    FitOptions,
+    OptimizationOptions,
+)
 
 
 def _get_starting_vals(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
     num_classes: int,
-    em_alg_config: EMAlgConfig,
-    mle_config: MleConfig,
+    fit_options: FitOptions,
+    optimization_options: OptimizationOptions,
     numeraire_idx: int | None = None,
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> EMVars:
@@ -38,9 +44,9 @@ def _get_starting_vals(
         The core estimation data and metadata.
     num_classes : int
         The number of latent classes to initialize.
-    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
-        Configuration containing the JAX PRNG seed for reproducible partitioning.
-    mle_config : :class:`~lcl._struct.MleConfig`
+    fit_options : :class:`~lcl._struct.FitOptions`
+        EM settings containing the reproducible partition seed.
+    optimization_options : :class:`~lcl._struct.OptimizationOptions`
         Optimization settings for the subset-level Newton routines.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable, if applicable.
@@ -54,7 +60,7 @@ def _get_starting_vals(
         and first-pass posterior class probabilities.
     """
     diff_unchosen_chosen_by_class = _random_class_partition(
-        diff_unchosen_chosen, data, num_classes, em_alg_config
+        diff_unchosen_chosen, data, num_classes, fit_options
     )
 
     latent_betas_list = []
@@ -100,12 +106,12 @@ def _get_starting_vals(
             _startup_value_closure,
             _startup_loglik_closure,
             jnp.zeros(data.num_alt_vars),
-            tol=mle_config.ftol,
-            maxiter=mle_config.maxiter,
-            damping=mle_config.hessian_damping,
-            max_step_norm=mle_config.max_step_norm,
-            line_search_maxiter=mle_config.line_search_maxiter,
-            accept_any_decrease=mle_config.accept_any_decrease,
+            tol=optimization_options.gradient_tol,
+            maxiter=optimization_options.maxiter,
+            damping=optimization_options.hessian_damping,
+            max_step_norm=optimization_options.max_step_norm,
+            line_search_maxiter=optimization_options.line_search_maxiter,
+            accept_any_decrease=optimization_options.accept_any_decrease,
         )
         latent_betas_list.append(optim_res.params)
 
@@ -136,7 +142,7 @@ def _random_class_partition(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
     num_classes: int,
-    em_alg_config: EMAlgConfig,
+    fit_options: FitOptions,
 ) -> list[DiffUnchosenChosen]:
     """Randomly partition decision-makers to initialize class-specific parameters.
 
@@ -152,8 +158,8 @@ def _random_class_partition(
         The core estimation data and metadata.
     num_classes : int
         The number of mutually exclusive subsets to generate.
-    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
-        Configuration containing the PRNG seed for reproducibility.
+    fit_options : :class:`~lcl._struct.FitOptions`
+        EM settings containing the reproducible partition seed.
 
     Returns
     -------
@@ -169,7 +175,7 @@ def _random_class_partition(
         raise ValueError("num_classes cannot exceed the number of panels.")
 
     # Randomly assign each panel to one initial class.
-    rng = onp.random.default_rng(em_alg_config.jax_prng_seed)
+    rng = onp.random.default_rng(fit_options.seed)
     shuffled_panels = rng.permutation(data.num_panels)
     panels_per_class = onp.array_split(shuffled_panels, num_classes)
     if any(len(panels_in_class) == 0 for panels_in_class in panels_per_class):

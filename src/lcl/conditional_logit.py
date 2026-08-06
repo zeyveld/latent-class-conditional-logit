@@ -30,13 +30,9 @@ with install_import_hook("lcl", "beartype.beartype"):
     from lcl._presentation import format_cl_coefficients
     from lcl._struct import (
         Data,
-        ErrorConfig,
         InferenceOptions,
-        MleConfig,
         OptimizationOptions,
         OptimizeResult,
-        resolve_inference_options,
-        resolve_optimization_options,
     )
 from lcl.utils import _robust_covariance
 
@@ -79,7 +75,6 @@ class ConditionalLogit(ChoiceModel):
         alts_col: str,
         cases_col: str,
         panels_col: str | None = None,
-        formula: str | None = None,
         utility_formula: str | None = None,
         choice_col: str | None = None,
         case_varnames: Sequence[str] | None = None,
@@ -92,8 +87,6 @@ class ConditionalLogit(ChoiceModel):
             | None
         ) = None,
         init_beta: ArrayLike | None = None,
-        mle_config: MleConfig | None = None,
-        error_config: ErrorConfig | None = None,
         optimization_options: OptimizationOptions | None = None,
         inference: InferenceOptions | None = None,
     ) -> "CLResults":
@@ -113,9 +106,6 @@ class ConditionalLogit(ChoiceModel):
             Name of the column mapping observations to specific decision-makers. If provided,
             the covariance matrix is automatically clustered at the panel level. If omitted,
             standard Huber-White robust standard errors are computed.
-        formula : str | None, optional
-            Backward-compatible Formulaic alias, for example
-            ``"choice ~ price + C(brand)"``.
         utility_formula : str | None, optional
             Preferred Formulaic string for the alternative-specific utility
             specification.  If it includes a left-hand side, that outcome is used
@@ -134,10 +124,6 @@ class ConditionalLogit(ChoiceModel):
             case appearance in the input data and is realigned after encoding.
         init_beta : ArrayLike | None, optional
             ``(K,)`` vector of initial taste parameters.
-        mle_config : :class:`~lcl._struct.MleConfig`, optional
-            Configuration for safeguarded exact-Newton optimization.
-        error_config : :class:`~lcl._struct.ErrorConfig`, optional
-            Deprecated covariance configuration.
         optimization_options : OptimizationOptions | None, optional
             Preferred safeguarded exact-Newton settings.
         inference : InferenceOptions | None, optional
@@ -148,12 +134,10 @@ class ConditionalLogit(ChoiceModel):
         :class:`~lcl.conditional_logit.CLResults`
             Results container housing coefficients, robust standard errors, and fit statistics.
         """
-        optimization_options = resolve_optimization_options(
-            optimization_options, mle_config
-        )
-        inference = resolve_inference_options(inference, error_config)
-        mle_config = optimization_options
-        error_config = inference
+        if optimization_options is None:
+            optimization_options = OptimizationOptions()
+        if inference is None:
+            inference = InferenceOptions()
 
         # If no panels are provided, we substitute cases for panels purely to satisfy
         # the contiguity checks in the ingestion engine.
@@ -164,7 +148,6 @@ class ConditionalLogit(ChoiceModel):
             alts_col=alts_col,
             cases_col=cases_col,
             panels_col=_internal_panels_col,
-            formula=formula,
             utility_formula=utility_formula,
             membership_formula=None,
             choice_col=choice_col,
@@ -213,7 +196,7 @@ class ConditionalLogit(ChoiceModel):
             _loglik_gradient,
             init_beta_arr,
             args=(diff_unchosen_chosen, weights_arr),
-            mle_config=mle_config,
+            optimization_options=optimization_options,
             numeraire_idx=self.numeraire_idx,
             numeraire_min_abs=self.numeraire_min_abs,
             objective_scale=jnp.sum(weights_arr),
@@ -227,7 +210,7 @@ class ConditionalLogit(ChoiceModel):
             model_spec=self,
             optim_res=optim_res,
             data_struct=data_struct,
-            error_config=error_config,
+            inference=inference,
             estim_time_sec=estim_time_sec,
             has_panels=panels_col is not None,
         )
@@ -245,7 +228,7 @@ class CLResults:
         model_spec: ConditionalLogit,
         optim_res: OptimizeResult,
         data_struct: Data,
-        error_config: ErrorConfig,
+        inference: InferenceOptions,
         estim_time_sec: float,
         has_panels: bool,
     ) -> None:
@@ -259,7 +242,7 @@ class CLResults:
             Optimizer output containing parameters, gradients, and Hessian inverse.
         data_struct : :class:`~lcl._struct.Data`
             Encoded estimation data.
-        error_config : :class:`~lcl._struct.ErrorConfig`
+        inference : :class:`~lcl._struct.InferenceOptions`
             Covariance and standard-error configuration.
         estim_time_sec : float
             Wall-clock estimation time in seconds.
@@ -279,10 +262,10 @@ class CLResults:
         )
         self.hess_inv = optim_res.hess_inv
 
-        if error_config.skip_std_errs:
+        if inference.skip:
             self.hess_inv = jnp.full_like(self.hess_inv, jnp.nan)
             self.covariance = self.hess_inv
-        elif error_config.robust:
+        elif inference.covariance == "clustered":
             if (
                 has_panels
                 and data_struct.panels_of_cases is not None
@@ -301,7 +284,8 @@ class CLResults:
                     raise ValueError(
                         "Cluster-robust covariance requires at least two panels."
                     )
-                self.covariance = robust_cov * (G / (G - 1))
+                correction = G / (G - 1) if inference.finite_sample_correction else 1.0
+                self.covariance = robust_cov * correction
             else:
                 # Standard Huber-White Robust Standard Errors
                 self.covariance = _robust_covariance(self.hess_inv, optim_res.grad_n)

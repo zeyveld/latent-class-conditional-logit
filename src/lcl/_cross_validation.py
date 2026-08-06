@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import warnings
 from collections.abc import Sequence
 from dataclasses import replace
 from typing import Any
@@ -12,15 +11,9 @@ import numpy as onp
 import polars as pl
 
 from lcl._struct import (
-    EMAlgConfig,
-    ErrorConfig,
     FitOptions,
     InferenceOptions,
-    MleConfig,
     OptimizationOptions,
-    resolve_fit_options,
-    resolve_inference_options,
-    resolve_optimization_options,
 )
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 from lcl.spec import LCLSpec, resolve_lcl_spec
@@ -30,11 +23,10 @@ logger = logging.getLogger(__name__)
 
 def cv_optimal_classes(
     data: Any,
-    alts_col: str | LCLSpec | None = None,
+    alts_col: str | None = None,
     cases_col: str | None = None,
     panels_col: str | None = None,
     num_classes_list: Sequence[int] | None = None,
-    formula: str | None = None,
     utility_formula: str | None = None,
     membership_formula: str | None = None,
     choice_col: str | None = None,
@@ -49,9 +41,6 @@ def cv_optimal_classes(
     fit_options: FitOptions | None = None,
     optimization_options: OptimizationOptions | None = None,
     inference: InferenceOptions | None = None,
-    em_alg_config: EMAlgConfig | None = None,
-    mle_config: MleConfig | None = None,
-    error_config: ErrorConfig | None = None,
     numeraire_min_abs: float | None = None,
 ) -> pl.DataFrame:
     """Select a latent-class count with blocked panel-level cross-validation.
@@ -69,15 +58,12 @@ def cv_optimal_classes(
     ----------
     data : Any
         Long-format choice data.
-    alts_col : str | LCLSpec | None, optional
-        Alternative column. Passing an ``LCLSpec`` here is deprecated; use
-        ``spec=...``.
+    alts_col : str | None, optional
+        Alternative column.
     cases_col, panels_col, choice_col : str | None, optional
         Choice-situation, panel, and chosen-alternative indicator columns.
     num_classes_list : Sequence[int] | None, optional
         Candidate class counts, each at least two.
-    formula : str | None, optional
-        Deprecated combined utility and membership formula.
     utility_formula, membership_formula : str | None, optional
         Separate Formulaic specifications.
     case_varnames, dem_varnames : Sequence[str] | None, optional
@@ -98,8 +84,6 @@ def cv_optimal_classes(
         M-step optimizer settings.
     inference : InferenceOptions | None, optional
         Inference settings. By default CV skips covariance work.
-    em_alg_config, mle_config, error_config : optional
-        Deprecated compatibility inputs for the three option families.
     numeraire_min_abs : float | None, optional
         Minimum absolute magnitude for a keyword-specified numeraire.
 
@@ -109,17 +93,6 @@ def cv_optimal_classes(
         One row per valid class count, with aggregate metrics and list-valued
         per-fold diagnostics.
     """
-    if isinstance(alts_col, LCLSpec):
-        if spec is not None:
-            raise ValueError("Pass an LCLSpec positionally or via spec=, not both.")
-        warnings.warn(
-            "Passing LCLSpec as alts_col is deprecated; use spec=... instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        spec = alts_col
-        alts_col = None
-
     if num_classes_list is None:
         raise ValueError("num_classes_list is required.")
     if folds < 2:
@@ -133,20 +106,17 @@ def cv_optimal_classes(
         choice_col=choice_col,
         case_varnames=case_varnames,
         dem_varnames=dem_varnames,
-        formula=formula,
         utility_formula=utility_formula,
         membership_formula=membership_formula,
         numeraire=numeraire,
         numeraire_min_abs=numeraire_min_abs,
     )
-    fit_options = resolve_fit_options(fit_options, em_alg_config)
-    optimization_options = resolve_optimization_options(
-        optimization_options, mle_config
-    )
-    if inference is None and error_config is None:
+    if fit_options is None:
+        fit_options = FitOptions()
+    if optimization_options is None:
+        optimization_options = OptimizationOptions()
+    if inference is None:
         inference = InferenceOptions(skip=True)
-    else:
-        inference = resolve_inference_options(inference, error_config)
 
     if isinstance(data, pl.DataFrame):
         df = data

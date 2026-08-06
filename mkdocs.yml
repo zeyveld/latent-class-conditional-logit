@@ -67,8 +67,6 @@ nav:
   - Tutorials:
       - Estimation & counterfactuals: tutorials/estimation.md
       - Cross-validation & model selection: tutorials/cross_validation.md
-  - Guides:
-      - Best practices & migration: guides/best_practices.md
   - API Reference:
       - Specification & options: api/specification.md
       - Latent-class conditional logit: api/latent_class.md

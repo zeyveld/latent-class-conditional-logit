@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 
@@ -47,20 +46,15 @@ class LCLSpec:
         Identifier and choice columns for the long-format dataset.
     utility : Sequence[str] | None, default=None
         Alternative-specific variables in the utility specification.  Omit when
-        ``utility_formula`` or legacy ``formula`` provides the utility design.
+        ``utility_formula`` provides the utility design.
     membership : Sequence[str] | None, default=None
         Panel-level variables for class-membership probabilities.  Omit when
-        ``membership_formula`` or legacy ``formula`` provides the demographic
-        design.
+        ``membership_formula`` provides the demographic design.
     classes : int, default=2
         Number of latent classes.
     constraints : mapping or sequence, optional
         Coefficient constraints.  The current estimation engine supports one
         negative coefficient, typically a price, cost, or travel-time numeraire.
-    formula : str | None, default=None
-        Deprecated combined Formulaic string such as
-        ``"choice ~ cost + time | income + C(segment)"``.  Prefer
-        ``utility_formula`` and ``membership_formula`` in new code.
     utility_formula : str | None, default=None
         Formulaic string for the alternative-specific utility specification, such
         as ``"choice ~ cost + C(mode)"``.  A right-hand-side-only utility formula
@@ -83,7 +77,6 @@ class LCLSpec:
     constraints: (
         Mapping[str, NegativeCoefficient] | Sequence[NegativeCoefficient] | None
     ) = None
-    formula: str | None = None
     utility_formula: str | None = None
     membership_formula: str | None = None
     variable_labels: Mapping[str, str] | None = None
@@ -92,14 +85,7 @@ class LCLSpec:
         """Validate internal consistency."""
         if self.classes < 2:
             raise ValueError("LCLSpec.classes must be at least 2.")
-        if self.formula is not None and (
-            self.utility_formula is not None or self.membership_formula is not None
-        ):
-            raise ValueError(
-                "Use either legacy formula=... or utility_formula=.../"
-                "membership_formula=..., not both."
-            )
-        if self.formula is None and self.utility_formula is None and not self.utility:
+        if self.utility_formula is None and not self.utility:
             raise ValueError("LCLSpec requires either utility variables or a formula.")
         if len(self.negative_constraints) > 1:
             raise NotImplementedError(
@@ -145,9 +131,7 @@ class LCLSpec:
             "",
             "Utility variables:",
         ]
-        if self.formula is not None:
-            lines.append(f"  formula: {self.formula}")
-        elif self.utility_formula is not None:
+        if self.utility_formula is not None:
             lines.append(f"  formula: {self.utility_formula}")
         else:
             for variable in self.utility or []:
@@ -165,8 +149,6 @@ class LCLSpec:
             )
         elif self.membership_formula is not None:
             lines.append(f"  formula: {self.membership_formula}")
-        elif self.formula is not None:
-            lines.append("  from formula")
         else:
             lines.append("  none")
         return lines
@@ -190,7 +172,6 @@ def resolve_lcl_spec(
     choice_col: str | None = None,
     case_varnames: Sequence[str] | None = None,
     dem_varnames: Sequence[str] | None = None,
-    formula: str | None = None,
     utility_formula: str | None = None,
     membership_formula: str | None = None,
     classes: int | None = None,
@@ -200,9 +181,7 @@ def resolve_lcl_spec(
 ) -> LCLSpec:
     """Resolve all supported LCL inputs to one canonical specification.
 
-    Explicit keyword values override fields on ``spec``. The legacy combined
-    ``formula`` remains supported, but it cannot be mixed with the separate
-    utility and membership formula fields.
+    Explicit keyword values override fields on ``spec``.
 
     Parameters
     ----------
@@ -212,8 +191,6 @@ def resolve_lcl_spec(
         Identifier and choice columns.
     case_varnames, dem_varnames : Sequence[str] | None, optional
         Explicit utility and class-membership variables.
-    formula : str | None, optional
-        Deprecated combined utility and membership formula.
     utility_formula, membership_formula : str | None, optional
         Separate Formulaic specifications.
     classes : int | None, optional
@@ -233,8 +210,7 @@ def resolve_lcl_spec(
     Raises
     ------
     ValueError
-        If identifier columns are missing or incompatible formula interfaces are
-        combined.
+        If required identifier columns are missing.
     """
     resolved_alts = (
         alts_col
@@ -256,11 +232,9 @@ def resolve_lcl_spec(
         if choice_col is not None
         else (spec.ids.choice if spec is not None else None)
     )
-    formula_for_choice = formula
-    if formula_for_choice is None and utility_formula is not None:
-        formula_for_choice = utility_formula
+    formula_for_choice = utility_formula
     if formula_for_choice is None and spec is not None:
-        formula_for_choice = spec.formula or spec.utility_formula
+        formula_for_choice = spec.utility_formula
     if resolved_choice is None and formula_for_choice is not None:
         lhs, separator, _ = formula_for_choice.partition("~")
         if separator and lhs.strip():
@@ -282,66 +256,28 @@ def resolve_lcl_spec(
             f"{missing_ids}"
         )
 
-    has_separate_override = any(
-        value is not None
-        for value in (
-            utility_formula,
-            membership_formula,
-            case_varnames,
-            dem_varnames,
+    resolved_utility_formula = (
+        None
+        if case_varnames is not None
+        else (
+            utility_formula
+            if utility_formula is not None
+            else (spec.utility_formula if spec is not None else None)
         )
     )
-    if formula is not None and has_separate_override:
-        raise ValueError(
-            "Use either deprecated formula=... or utility_formula=.../"
-            "membership_formula=/explicit variable lists, not both."
+    resolved_membership_formula = (
+        None
+        if dem_varnames is not None
+        else (
+            membership_formula
+            if membership_formula is not None
+            else (spec.membership_formula if spec is not None else None)
         )
-
-    inherit_legacy_formula = (
-        formula is None
-        and not has_separate_override
-        and spec is not None
-        and spec.formula is not None
     )
-    resolved_formula = (
-        formula
-        if formula is not None
-        else (spec.formula if inherit_legacy_formula and spec is not None else None)
-    )
-    if resolved_formula is None:
-        resolved_utility_formula = (
-            None
-            if case_varnames is not None
-            else (
-                utility_formula
-                if utility_formula is not None
-                else (spec.utility_formula if spec is not None else None)
-            )
-        )
-        resolved_membership_formula = (
-            None
-            if dem_varnames is not None
-            else (
-                membership_formula
-                if membership_formula is not None
-                else (spec.membership_formula if spec is not None else None)
-            )
-        )
-    else:
-        resolved_utility_formula = None
-        resolved_membership_formula = None
-
-    if resolved_formula is not None:
-        warnings.warn(
-            "The combined formula= interface is deprecated; use utility_formula= "
-            "and membership_formula= instead.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
 
     resolved_utility = (
         None
-        if resolved_formula is not None or resolved_utility_formula is not None
+        if resolved_utility_formula is not None
         else (
             case_varnames
             if case_varnames is not None
@@ -350,7 +286,7 @@ def resolve_lcl_spec(
     )
     resolved_membership = (
         None
-        if resolved_formula is not None or resolved_membership_formula is not None
+        if resolved_membership_formula is not None
         else (
             dem_varnames
             if dem_varnames is not None
@@ -407,7 +343,6 @@ def resolve_lcl_spec(
         membership=resolved_membership,
         classes=int(resolved_classes),
         constraints=constraints,
-        formula=resolved_formula,
         utility_formula=resolved_utility_formula,
         membership_formula=resolved_membership_formula,
         variable_labels=labels or None,

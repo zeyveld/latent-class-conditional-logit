@@ -11,7 +11,7 @@ from lcl.constraints import (
     pullback_negative_derivatives,
 )
 from lcl._case_utils import _to_structural_betas
-from lcl._struct import MleConfig, OptimizeResult
+from lcl._struct import OptimizationOptions, OptimizeResult
 
 
 class NewtonState(NamedTuple):
@@ -236,7 +236,7 @@ def _minimize(
     value_grad_hess_fn: Callable[..., tuple[tuple[Array, Array], Array, Array]],
     params: Float64[Array, "params"],
     args: tuple[object, ...],
-    mle_config: MleConfig | None = None,
+    optimization_options: OptimizationOptions | None = None,
     numeraire_idx: int | None = None,
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
     assert_converge: bool = False,
@@ -259,7 +259,7 @@ def _minimize(
     args : tuple
         Tuple of static and dynamic arguments (e.g., design matrices, weights)
         required by the objective function.
-    mle_config : :class:`~lcl._struct.MleConfig`, optional
+    optimization_options : :class:`~lcl._struct.OptimizationOptions`, optional
         Configuration holding tolerances and maximum iteration limits.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable, if bounded to be strictly negative.
@@ -278,8 +278,8 @@ def _minimize(
         Container holding the optimized parameters, the inverse Hessian, case-level
         gradients, and solver diagnostics.
     """
-    if mle_config is None:
-        mle_config = MleConfig()
+    if optimization_options is None:
+        optimization_options = OptimizationOptions()
 
     # A common per-observation scale gives gradient_tol the same meaning across
     # standalone CL, class-specific M-steps, and demographic M-steps.
@@ -314,12 +314,12 @@ def _minimize(
         _value_grad_hess_closure,
         params,
         *args,
-        tol=mle_config.ftol,
-        maxiter=mle_config.maxiter,
-        damping=mle_config.hessian_damping,
-        max_step_norm=mle_config.max_step_norm,
-        line_search_maxiter=mle_config.line_search_maxiter,
-        accept_any_decrease=mle_config.accept_any_decrease,
+        tol=optimization_options.gradient_tol,
+        maxiter=optimization_options.maxiter,
+        damping=optimization_options.hessian_damping,
+        max_step_norm=optimization_options.max_step_norm,
+        line_search_maxiter=optimization_options.line_search_maxiter,
+        accept_any_decrease=optimization_options.accept_any_decrease,
     )
     params = state.params
 
@@ -327,13 +327,13 @@ def _minimize(
     error = state.error.item()
     iterations = int(state.step_num)
 
-    if error <= mle_config.ftol:
+    if error <= optimization_options.gradient_tol:
         success = True
         message = "Optimization terminated successfully."
     elif bool(state.failed):
         success = False
         message = "Line search failed to find a finite sufficient-decrease step."
-    elif iterations >= mle_config.maxiter:
+    elif iterations >= optimization_options.maxiter:
         success = False
         message = "Maximum number of iterations reached without convergence."
     else:

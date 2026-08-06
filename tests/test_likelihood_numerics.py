@@ -19,11 +19,8 @@ from lcl._optimize import exact_newton_minimize
 from lcl._struct import (
     Data,
     DiagnosticsOptions,
-    EMAlgConfig,
-    ErrorConfig,
     FitOptions,
     InferenceOptions,
-    MleConfig,
     OptimizationOptions,
     PartitionType,
     PastChoicesData,
@@ -227,17 +224,13 @@ def test_fractional_response_hessian_matches_random_autodiff_simulations() -> No
 
 def test_fractional_response_derivatives_match_with_extreme_logits() -> None:
     data = _demographic_data_from_dems(jnp.array([[-1.0], [0.0], [1.0]]))
-    targets = jnp.array(
-        [[0.2, 0.3, 0.5], [0.5, 0.25, 0.25], [0.1, 0.7, 0.2]]
-    )
+    targets = jnp.array([[0.2, 0.3, 0.5], [0.5, 0.25, 0.25], [0.1, 0.7, 0.2]])
     thetas = jnp.array([[900.0, -900.0], [500.0, -500.0]]).ravel()
 
     def objective(params):
         return _compute_grouped_data_loglik_grad_hess(params, targets, data, 3)[0]
 
-    value, grad, hess = _compute_grouped_data_loglik_grad_hess(
-        thetas, targets, data, 3
-    )
+    value, grad, hess = _compute_grouped_data_loglik_grad_hess(thetas, targets, data, 3)
 
     assert jnp.isfinite(value)
     assert jnp.all(jnp.isfinite(grad))
@@ -373,9 +366,9 @@ def test_prediction_uses_demographics_when_no_past_choices() -> None:
         choice_col="choice",
         case_varnames=["x"],
         dem_varnames=["dem"],
-        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
-        mle_config=MleConfig(maxiter=2),
-        error_config=ErrorConfig(skip_std_errs=True),
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
     )
     results.em_res = results.em_res._replace(
         structural_betas=jnp.array([[0.0, 0.0]]),
@@ -402,7 +395,7 @@ def test_lcl_spec_api_custom_negative_constraint_floor() -> None:
         constraints={"cost": NegativeCoefficient(min_abs=1e-3, units="dollars")},
     )
 
-    model = LatentClassConditionalLogit(spec)
+    model = LatentClassConditionalLogit(spec=spec)
     results = model.fit(
         data=df,
         fit_options=FitOptions(max_em_iter=1, num_devices=1),
@@ -507,9 +500,9 @@ def test_lcl_robust_covariance_and_delta_method_outputs_are_on_cpu() -> None:
         choice_col="choice",
         case_varnames=["x"],
         dem_varnames=["dem"],
-        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
-        mle_config=MleConfig(maxiter=2),
-        error_config=ErrorConfig(robust=True),
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(covariance="clustered"),
     )
 
     means, se_means = results._apply_delta_method(
@@ -537,9 +530,9 @@ def test_prediction_accepts_tabular_past_choices() -> None:
         choice_col="choice",
         case_varnames=["x"],
         dem_varnames=["dem"],
-        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
-        mle_config=MleConfig(maxiter=2),
-        error_config=ErrorConfig(skip_std_errs=True),
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
     )
     results.em_res = results.em_res._replace(
         structural_betas=jnp.array([[1.0, -1.0]]),
@@ -590,6 +583,56 @@ def test_prediction_accepts_tabular_past_choices() -> None:
     )
 
 
+def _lcl_df_for_panels(panel_ids: list[int]) -> pl.DataFrame:
+    rows = []
+    for panel in panel_ids:
+        for case in [1, 2]:
+            for alt in [0, 1]:
+                rows.append(
+                    {
+                        "panel": panel,
+                        "case": case,
+                        "alt": alt,
+                        "choice": alt == ((panel + case) % 2),
+                        "x": float(alt),
+                        "dem": float(panel % 2),
+                    }
+                )
+    return pl.DataFrame(rows)
+
+
+def test_prediction_rejects_past_choices_with_mismatched_panels() -> None:
+    predict_df = _lcl_df_for_panels([1, 2, 3, 4])
+    model = LatentClassConditionalLogit(num_classes=2)
+    results = model.fit(
+        data=predict_df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["x"],
+        dem_varnames=["dem"],
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
+    )
+
+    matching = results.predict(data=predict_df, past_choices=predict_df)
+    assert matching.class_probs_by_panel is not None
+
+    subset_past = _lcl_df_for_panels([1, 2])
+    superset_past = _lcl_df_for_panels([1, 2, 3, 4, 5, 6])
+    for past_df in [subset_past, superset_past]:
+        with pytest.raises(ValueError, match="past_choices must contain exactly"):
+            results.predict(data=predict_df, past_choices=past_df)
+
+    shifted_past = _lcl_df_for_panels([3, 4, 5, 6])
+    with pytest.raises(ValueError) as excinfo:
+        results.predict(data=predict_df, past_choices=shifted_past)
+    assert "missing from past_choices: [1, 2]" in str(excinfo.value)
+    assert "absent from the prediction data: [5, 6]" in str(excinfo.value)
+
+
 def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -603,9 +646,9 @@ def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data(
         panels_col="panel",
         choice_col="choice",
         case_varnames=["cost", "time"],
-        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
-        mle_config=MleConfig(maxiter=2),
-        error_config=ErrorConfig(robust=True),
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(covariance="clustered"),
     )
     prediction = results.predict(data=df)
 
@@ -669,9 +712,9 @@ def test_variable_labels_flow_to_wtp_tables_and_class_tradeoffs(
             "time": "Travel time",
             "income_quintile": "Income quintile",
         },
-        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
-        mle_config=MleConfig(maxiter=2),
-        error_config=ErrorConfig(skip_std_errs=True),
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
     )
     prediction = results.predict(data=df)
     tables = prediction.compute_wtp(
@@ -709,9 +752,9 @@ def test_wtp_uses_stored_posterior_class_probs_with_past_choices() -> None:
         panels_col="panel",
         choice_col="choice",
         case_varnames=["cost", "time"],
-        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
-        mle_config=MleConfig(maxiter=2),
-        error_config=ErrorConfig(skip_std_errs=True),
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
     )
     results.em_res = results.em_res._replace(
         structural_betas=jnp.array([[-1.0, -1.0], [2.0, 10.0]]),
@@ -774,7 +817,8 @@ def test_formula_encoder_drops_unidentified_intercepts() -> None:
         alts_col="alt",
         cases_col="case",
         panels_col="panel",
-        formula="choice ~ x | dem",
+        utility_formula="choice ~ x",
+        membership_formula="~ dem",
         choice_col=None,
         case_varnames=None,
         dem_varnames=None,
@@ -813,7 +857,8 @@ def test_formula_string_categorical_base_reused_in_prediction() -> None:
         alts_col="alt",
         cases_col="case",
         panels_col="panel",
-        formula="choice ~ cost + mode | segment",
+        utility_formula="choice ~ cost + mode",
+        membership_formula="~ segment",
         choice_col=None,
         case_varnames=None,
         dem_varnames=None,
@@ -899,7 +944,6 @@ def test_separate_utility_and_membership_formulas_reuse_categorical_bases() -> N
         alts_col="alt",
         cases_col="case",
         panels_col="panel",
-        formula=None,
         utility_formula="choice ~ cost + mode",
         membership_formula="~ segment",
         choice_col=None,
@@ -952,7 +996,6 @@ def test_membership_formula_accepts_external_demographics() -> None:
         alts_col="alt",
         cases_col="case",
         panels_col="panel",
-        formula=None,
         utility_formula="choice ~ cost + mode",
         membership_formula="~ segment",
         choice_col=None,
@@ -976,7 +1019,6 @@ def test_membership_formula_rejects_left_hand_side() -> None:
             alts_col="alt",
             cases_col="case",
             panels_col="panel",
-            formula=None,
             utility_formula="choice ~ x",
             membership_formula="segment ~ dem",
             choice_col=None,
@@ -996,7 +1038,6 @@ def test_utility_formula_reports_concatenated_categorical_term() -> None:
             alts_col="alt",
             cases_col="case",
             panels_col="panel",
-            formula=None,
             utility_formula="choice ~ xC(group)",
             membership_formula=None,
             choice_col=None,
@@ -1015,7 +1056,8 @@ def test_demographic_formula_intercept_only_means_no_demographics() -> None:
         alts_col="alt",
         cases_col="case",
         panels_col="panel",
-        formula="choice ~ x | 1",
+        utility_formula="choice ~ x",
+        membership_formula="~ 1",
         choice_col=None,
         case_varnames=None,
         dem_varnames=None,
@@ -1038,9 +1080,9 @@ def test_prediction_noncontiguous_panel_ids() -> None:
         choice_col="choice",
         case_varnames=["x"],
         dem_varnames=["dem"],
-        em_alg_config=EMAlgConfig(maxiter=1, num_devices=1),
-        mle_config=MleConfig(maxiter=2),
-        error_config=ErrorConfig(skip_std_errs=True),
+        fit_options=FitOptions(max_em_iter=1, num_devices=1),
+        optimization_options=OptimizationOptions(maxiter=2),
+        inference=InferenceOptions(skip=True),
     )
 
     prediction = results.predict(data=df)
@@ -1060,7 +1102,6 @@ def test_case_ids_repeated_across_panels_are_not_merged() -> None:
         alts_col="alt",
         cases_col="case",
         panels_col="panel",
-        formula=None,
         choice_col="choice",
         case_varnames=["x"],
         dem_varnames=["dem"],
@@ -1092,8 +1133,8 @@ def test_cl_hessian_covariance_uses_exact_hessian_not_opg_inverse() -> None:
         cases_col="case",
         choice_col="choice",
         case_varnames=["x", "z"],
-        mle_config=MleConfig(maxiter=20),
-        error_config=ErrorConfig(robust=False),
+        optimization_options=OptimizationOptions(maxiter=20),
+        inference=InferenceOptions(covariance="unadjusted"),
     )
     diff = _diff_unchosen_chosen(results.data)
     weights = jnp.ones(results.data.num_cases)
@@ -1115,8 +1156,8 @@ def test_cl_skip_standard_errors_returns_nan_inference() -> None:
         panels_col="panel",
         choice_col="choice",
         case_varnames=["x"],
-        mle_config=MleConfig(maxiter=5),
-        error_config=ErrorConfig(skip_std_errs=True),
+        optimization_options=OptimizationOptions(maxiter=5),
+        inference=InferenceOptions(skip=True),
     )
 
     assert jnp.all(jnp.isnan(results.covariance))

@@ -18,8 +18,7 @@ model = lcl.LatentClassConditionalLogit(spec=spec)
 results = model.fit(data, fit_options=FitOptions(starts=3))
 ```
 
-Pass `spec` by keyword to the lower-level constructor. The positional
-`LatentClassConditionalLogit(spec)` form is deprecated.
+Pass `spec` by keyword to the lower-level constructor.
 
 ## Model
 

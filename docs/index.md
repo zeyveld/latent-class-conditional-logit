@@ -179,7 +179,6 @@ before they become opaque compiled-kernel failures.
 
 - Follow the [estimation and counterfactual tutorial](tutorials/estimation.md).
 - Compare class counts with [panel-blocked cross-validation](tutorials/cross_validation.md).
-- Adopt the current [best practices and migration patterns](guides/best_practices.md).
 - Review the [`LCLSpec` and options API](api/specification.md).
 
 The project is open source under the MIT license. Bug reports, focused feature

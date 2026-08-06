@@ -6,7 +6,7 @@ from jax.nn import log_softmax, softmax
 from jaxtyping import Array, Float64
 
 from lcl._optimize import exact_newton_minimize
-from lcl._struct import Data, MleConfig
+from lcl._struct import Data, OptimizationOptions
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ def _update_thetas(
     class_probs_by_panel: Float64[Array, "panels classes"],
     data: Data,
     num_classes: int,
-    mle_config: MleConfig | None = None,
+    optimization_options: OptimizationOptions | None = None,
 ) -> tuple[
     Float64[Array, "dem_vars_plus_one classes_minus_one"],
     Float64[Array, "panels classes"],
@@ -41,7 +41,7 @@ def _update_thetas(
         Estimation data containing the panel-level demographic matrix.
     num_classes : int
         Total number of latent classes, including the baseline class.
-    mle_config : :class:`~lcl._struct.MleConfig` | None, optional
+    optimization_options : :class:`~lcl._struct.OptimizationOptions` | None, optional
         Newton optimizer configuration for the fractional-response M-step.
 
     Returns
@@ -52,7 +52,11 @@ def _update_thetas(
         Unconditional class probabilities implied by the optimized demographic model.
     """
     updated_thetas, convergence = _perform_frac_response_reg(
-        starting_thetas, class_probs_by_panel, data, num_classes, mle_config
+        starting_thetas,
+        class_probs_by_panel,
+        data,
+        num_classes,
+        optimization_options,
     )
     if not convergence:
         logger.warning("Demographic regression failed to converge.")
@@ -67,7 +71,7 @@ def _perform_frac_response_reg(
     class_probs_by_panel: Float64[Array, "panels classes"],
     data: Data,
     num_classes: int,
-    mle_config: MleConfig | None = None,
+    optimization_options: OptimizationOptions | None = None,
 ) -> tuple[Float64[Array, "dem_vars_plus_one classes_minus_one"], bool]:
     """Fit the fractional-response class-membership model.
 
@@ -85,18 +89,19 @@ def _perform_frac_response_reg(
         Estimation data containing demographics and dimensional metadata.
     num_classes : int
         Total number of latent classes, including the baseline class.
-    mle_config : :class:`~lcl._struct.MleConfig` | None, optional
-        Optimizer settings. Defaults to :class:`~lcl._struct.MleConfig`.
+    optimization_options : :class:`~lcl._struct.OptimizationOptions` | None, optional
+        Optimizer settings. Defaults to :class:`~lcl._struct.OptimizationOptions`.
 
     Returns
     -------
     updated_thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
         Optimized class-membership coefficients.
     converged : bool
-        Whether the final Newton error is within ``mle_config.ftol``.
+        Whether the final Newton error is within
+        ``optimization_options.gradient_tol``.
     """
-    if mle_config is None:
-        mle_config = MleConfig()
+    if optimization_options is None:
+        optimization_options = OptimizationOptions()
     optim_res = exact_newton_minimize(
         _compute_grouped_data_loglik_value_scaled,
         _compute_grouped_data_loglik_grad_hess_scaled,
@@ -104,15 +109,15 @@ def _perform_frac_response_reg(
         class_probs_by_panel,
         data,
         num_classes,
-        tol=mle_config.ftol,
-        maxiter=mle_config.maxiter,
-        damping=mle_config.hessian_damping,
-        max_step_norm=mle_config.max_step_norm,
-        line_search_maxiter=mle_config.line_search_maxiter,
-        accept_any_decrease=mle_config.accept_any_decrease,
+        tol=optimization_options.gradient_tol,
+        maxiter=optimization_options.maxiter,
+        damping=optimization_options.hessian_damping,
+        max_step_norm=optimization_options.max_step_norm,
+        line_search_maxiter=optimization_options.line_search_maxiter,
+        accept_any_decrease=optimization_options.accept_any_decrease,
     )
     thetas = optim_res.params.reshape(data.num_dem_vars + 1, num_classes - 1)
-    return thetas, float(optim_res.error) <= mle_config.ftol
+    return thetas, float(optim_res.error) <= optimization_options.gradient_tol
 
 
 @filter_jit

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import warnings
 from typing import Any
 
@@ -8,6 +9,7 @@ import numpy as np
 import polars as pl
 import pytest
 
+import lcl
 from lcl import (
     ChoiceIds,
     FitOptions,
@@ -22,7 +24,6 @@ from lcl._params import ParamPacking
 from lcl._prediction import _apply_wtp_partition
 from lcl._results import _parsed_prediction_arrays
 from lcl._struct import PartitionType, WTPRequest
-from lcl._struct import ErrorConfig, resolve_inference_options
 from lcl.conditional_logit import ConditionalLogit
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 from lcl.spec import resolve_lcl_spec
@@ -63,7 +64,6 @@ def test_case_weights_are_realigned_from_input_appearance_order() -> None:
         alts_col="alt",
         cases_col="case",
         panels_col="case",
-        formula=None,
         utility_formula=None,
         membership_formula=None,
         choice_col="choice",
@@ -107,7 +107,6 @@ def test_repeated_case_ids_require_joint_weight_mapping_keys() -> None:
         alts_col="alt",
         cases_col="case",
         panels_col="panel",
-        formula=None,
         utility_formula=None,
         membership_formula=None,
         choice_col="choice",
@@ -195,7 +194,6 @@ def test_fitted_encoder_is_immutable_and_public_loglik_reuses_it() -> None:
             alts_col="alt",
             cases_col="case",
             panels_col="panel",
-            formula=None,
             utility_formula=None,
             membership_formula=None,
             choice_col="choice",
@@ -298,7 +296,7 @@ def test_cv_reports_fold_failures_and_uses_per_panel_scores(
         seen_options.append(
             (
                 fit_options.starts,
-                inference.skip_std_errs,
+                inference.skip,
                 self.spec.numeraire_min_abs,
             )
         )
@@ -307,7 +305,6 @@ def test_cv_reports_fold_failures_and_uses_per_panel_scores(
             alts_col=self.spec.ids.alt,
             cases_col=self.spec.ids.case,
             panels_col=self.spec.ids.panel,
-            formula=self.spec.formula,
             utility_formula=self.spec.utility_formula,
             membership_formula=self.spec.membership_formula,
             choice_col=self.spec.ids.choice,
@@ -443,15 +440,26 @@ def test_numeraire_pvalue_is_suppressed_and_panel_bic_is_consistent() -> None:
     assert result.bic == pytest.approx(float(expected_bic))
 
 
-def test_inference_options_are_canonical_and_conflicts_are_rejected() -> None:
-    assert not InferenceOptions(robust=False).robust
-    assert InferenceOptions(covariance="clustered").robust
+def test_inference_options_are_canonical() -> None:
+    assert InferenceOptions(covariance="none").covariance == "unadjusted"
+    assert InferenceOptions(covariance="robust").covariance == "clustered"
+    with pytest.raises(ValueError, match="InferenceOptions.covariance"):
+        InferenceOptions(covariance="invalid")
 
-    with pytest.raises(ValueError, match="inference or error_config"):
-        resolve_inference_options(
-            InferenceOptions(),
-            ErrorConfig(),
-        )
+
+def test_legacy_public_api_patterns_are_removed() -> None:
+    for name in ("EMAlgConfig", "MleConfig", "ErrorConfig"):
+        assert not hasattr(lcl, name)
+
+    lcl_fit_params = inspect.signature(LatentClassConditionalLogit.fit).parameters
+    cl_fit_params = inspect.signature(ConditionalLogit.fit).parameters
+    cv_params = inspect.signature(cv_optimal_classes).parameters
+    for params in (lcl_fit_params, cl_fit_params, cv_params):
+        assert "formula" not in params
+        assert "mle_config" not in params
+        assert "error_config" not in params
+    assert "em_alg_config" not in lcl_fit_params
+    assert "em_alg_config" not in cv_params
 
 
 def test_spec_resolver_applies_explicit_interface_overrides_once() -> None:

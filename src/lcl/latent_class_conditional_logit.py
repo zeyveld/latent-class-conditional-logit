@@ -1,7 +1,6 @@
 """Estimation for latent-class conditional logit."""
 
 import logging
-import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from time import time
@@ -25,15 +24,9 @@ from lcl._em_alg_steps import _em_step
 from lcl._results import LCLResults
 from lcl._struct import (
     DiagnosticsOptions,
-    EMAlgConfig,
-    ErrorConfig,
     FitOptions,
     InferenceOptions,
-    MleConfig,
     OptimizationOptions,
-    resolve_fit_options,
-    resolve_inference_options,
-    resolve_optimization_options,
 )
 from lcl.spec import LCLSpec, resolve_lcl_spec
 
@@ -77,7 +70,7 @@ class LatentClassConditionalLogit(ChoiceModel):
 
     def __init__(
         self,
-        num_classes: int | LCLSpec = 5,
+        num_classes: int = 5,
         numeraire: str | None = None,
         *,
         spec: LCLSpec | None = None,
@@ -85,20 +78,6 @@ class LatentClassConditionalLogit(ChoiceModel):
     ) -> None:
         """Create an unfitted latent-class conditional-logit model specification."""
         super().__init__()
-        if isinstance(num_classes, LCLSpec):
-            if spec is not None:
-                raise ValueError(
-                    "Pass either LatentClassConditionalLogit(spec) or spec=..., not both."
-                )
-            warnings.warn(
-                "Passing LCLSpec as the first positional argument is deprecated; "
-                "use LatentClassConditionalLogit(spec=spec).",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            spec = num_classes
-            num_classes = spec.classes
-
         if spec is not None:
             num_classes = spec.classes
             if (
@@ -124,7 +103,6 @@ class LatentClassConditionalLogit(ChoiceModel):
         alts_col: str | None = None,
         cases_col: str | None = None,
         panels_col: str | None = None,
-        formula: str | None = None,
         utility_formula: str | None = None,
         membership_formula: str | None = None,
         choice_col: str | None = None,
@@ -132,9 +110,6 @@ class LatentClassConditionalLogit(ChoiceModel):
         dem_varnames: Sequence[str] | None = None,
         variable_labels: Mapping[str, str] | None = None,
         dems_data: Any | None = None,
-        em_alg_config: EMAlgConfig | None = None,
-        mle_config: MleConfig | None = None,
-        error_config: ErrorConfig | None = None,
         fit_options: FitOptions | None = None,
         optimization_options: OptimizationOptions | None = None,
         inference: InferenceOptions | None = None,
@@ -161,10 +136,6 @@ class LatentClassConditionalLogit(ChoiceModel):
         panels_col : str
             The name of the column mapping choice situations to specific
             decision-makers (panels).
-        formula : str | None, default=None
-            Deprecated combined Formulaic string, for example
-            ``"choice ~ price + time | income + C(segment)"``.  Prefer
-            ``utility_formula`` and ``membership_formula`` in new code.
         utility_formula : str | None, default=None
             Formulaic string for the alternative-specific utility specification.
             Examples include ``"choice ~ cost + time + C(mode)"`` or, when
@@ -175,10 +146,10 @@ class LatentClassConditionalLogit(ChoiceModel):
             accepted because latent class labels are unobserved.
         choice_col : str | None, default=None
             The name of the boolean or binary column indicating chosen alternatives.
-            Required if `formula` is not provided.
+            Required when ``utility_formula`` has no left-hand side.
         case_varnames : Sequence[str] | None, default=None
             A list of alternative-specific variables to include in the utility
-            specification. Required if `formula` is not provided.
+            specification. Required if ``utility_formula`` is not provided.
         dem_varnames : Sequence[str] | None, default=None
             A list of demographic variables used to predict latent class membership.
         variable_labels : Mapping[str, str] | None, default=None
@@ -195,9 +166,6 @@ class LatentClassConditionalLogit(ChoiceModel):
             Preferred exact-Newton M-step settings.
         inference : InferenceOptions | None, optional
             Preferred covariance and standard-error settings.
-        em_alg_config, mle_config, error_config : optional
-            Deprecated compatibility inputs. Passing one together with its preferred
-            replacement raises ``ValueError``.
         diagnostics : DiagnosticsOptions | None, optional
             Diagnostic thresholds and switches.
         progress_callback : callable | None, optional
@@ -224,7 +192,6 @@ class LatentClassConditionalLogit(ChoiceModel):
             choice_col=choice_col,
             case_varnames=case_varnames,
             dem_varnames=dem_varnames,
-            formula=formula,
             utility_formula=utility_formula,
             membership_formula=membership_formula,
             classes=self.num_classes,
@@ -238,7 +205,6 @@ class LatentClassConditionalLogit(ChoiceModel):
         cases_col = self.spec.ids.case
         panels_col = self.spec.ids.panel
         choice_col = self.spec.ids.choice
-        formula = self.spec.formula
         utility_formula = self.spec.utility_formula
         membership_formula = self.spec.membership_formula
         case_varnames = self.spec.utility
@@ -248,14 +214,12 @@ class LatentClassConditionalLogit(ChoiceModel):
         self.numeraire = self.spec.numeraire
         self.numeraire_min_abs = self.spec.numeraire_min_abs
 
-        fit_options = resolve_fit_options(fit_options, em_alg_config)
-        optimization_options = resolve_optimization_options(
-            optimization_options, mle_config
-        )
-        inference = resolve_inference_options(inference, error_config)
-        em_alg_config = fit_options.to_em_config()
-        mle_config = optimization_options
-        error_config = inference
+        if fit_options is None:
+            fit_options = FitOptions()
+        if optimization_options is None:
+            optimization_options = OptimizationOptions()
+        if inference is None:
+            inference = InferenceOptions()
         if diagnostics is None:
             diagnostics = DiagnosticsOptions()
 
@@ -270,14 +234,12 @@ class LatentClassConditionalLogit(ChoiceModel):
                 progress_callback=progress_callback,
             )
             fit_options = replace(fit_options, starts=1, seed=best_seed)
-            em_alg_config = fit_options.to_em_config()
 
         parsed_data = self._ingest_data(
             data=data,
             alts_col=alts_col,
             cases_col=cases_col,
             panels_col=panels_col,
-            formula=formula,
             utility_formula=utility_formula,
             membership_formula=membership_formula,
             choice_col=choice_col,
@@ -316,13 +278,13 @@ class LatentClassConditionalLogit(ChoiceModel):
             diff_unchosen_chosen,
             data_struct,
             self.num_classes,
-            em_alg_config,
-            mle_config,
+            fit_options,
+            optimization_options,
             self.numeraire_idx,
             self.numeraire_min_abs,
         )
 
-        num_devices = em_alg_config.num_devices
+        num_devices = fit_options.num_devices
         if num_devices > 1:
             if self.num_classes % num_devices == 0:
                 message = f"Distributing {self.num_classes} classes across {num_devices} devices."
@@ -337,7 +299,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         logliks_list, em_recursion = [], 0
         converged = False
         em_history_rows: list[dict[str, Any]] = []
-        while em_recursion < em_alg_config.maxiter:
+        while em_recursion < fit_options.max_em_iter:
             logger.info("EM recursion: %s", em_recursion)
             if progress_callback is not None:
                 progress_callback({"event": "em_step", "iteration": em_recursion})
@@ -347,8 +309,8 @@ class LatentClassConditionalLogit(ChoiceModel):
                 diff_unchosen_chosen,
                 data_struct,
                 self.num_classes,
-                mle_config,
-                em_alg_config,
+                optimization_options,
+                fit_options,
                 self.numeraire_idx,
                 self.numeraire_min_abs,
             )
@@ -358,31 +320,31 @@ class LatentClassConditionalLogit(ChoiceModel):
             em_recursion += 1
 
             # Force a host synchronization only at configured convergence checks.
-            if em_recursion >= 5 and (em_recursion % em_alg_config.check_interval == 0):
+            if em_recursion >= 5 and (em_recursion % fit_options.check_interval == 0):
                 current_ll = float(em_vars.unconditional_loglik)
                 past_ll = float(logliks_list[-5])
 
                 rel_change = abs(current_ll - past_ll) / max(abs(past_ll), 1.0)
-                if rel_change <= em_alg_config.loglik_tol:
+                if rel_change <= fit_options.em_tol:
                     converged = True
                     break
 
         pre_refit_ll = float(em_vars.unconditional_loglik)
-        strict_mle_config = OptimizationOptions(
+        strict_optimization_options = OptimizationOptions(
             gradient_tol=1e-8,
             maxiter=500,
-            hessian_damping=mle_config.hessian_damping,
-            max_step_norm=mle_config.max_step_norm,
-            line_search_maxiter=mle_config.line_search_maxiter,
-            accept_any_decrease=mle_config.accept_any_decrease,
+            hessian_damping=optimization_options.hessian_damping,
+            max_step_norm=optimization_options.max_step_norm,
+            line_search_maxiter=optimization_options.line_search_maxiter,
+            accept_any_decrease=optimization_options.accept_any_decrease,
         )
         em_vars = _em_step(
             em_vars,
             diff_unchosen_chosen,
             data_struct,
             self.num_classes,
-            strict_mle_config,
-            em_alg_config,
+            strict_optimization_options,
+            fit_options,
             self.numeraire_idx,
             self.numeraire_min_abs,
         )
@@ -390,13 +352,13 @@ class LatentClassConditionalLogit(ChoiceModel):
         refit_rel_change = abs(post_refit_ll - pre_refit_ll) / max(
             abs(pre_refit_ll), 1.0
         )
-        if converged and refit_rel_change > em_alg_config.loglik_tol:
+        if converged and refit_rel_change > fit_options.em_tol:
             converged = False
             logger.warning(
                 "The strict final refit moved the log likelihood by %.3g "
                 "relative units, above the EM tolerance %.3g.",
                 refit_rel_change,
-                em_alg_config.loglik_tol,
+                fit_options.em_tol,
             )
         em_history_rows.append(self._em_history_row(em_recursion, em_vars))
         optimization_history_rows = self._optimizer_snapshot(
@@ -417,8 +379,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             estimation_data=data_struct,
             em_recursion=em_recursion,
             converged=converged,
-            em_alg_config=em_alg_config,
-            error_config=error_config,
+            inference=inference,
             diagnostics_config=diagnostics,
             estim_time_sec=estim_time_sec,
             em_history=em_history_rows,

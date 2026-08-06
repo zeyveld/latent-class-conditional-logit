@@ -21,7 +21,6 @@ class ChoiceDataEncoder:
     alts_col: str
     cases_col: str
     panels_col: str
-    formula: str | None = None
     utility_formula: str | None = None
     membership_formula: str | None = None
     choice_col: str | None = None
@@ -43,14 +42,7 @@ class ChoiceDataEncoder:
         super().__setattr__(name, value)
 
     def __post_init__(self) -> None:
-        """Validate mutually exclusive formula interfaces."""
-        if self.formula is not None and (
-            self.utility_formula is not None or self.membership_formula is not None
-        ):
-            raise ValueError(
-                "Use either legacy formula=... or separate utility_formula=... "
-                "and membership_formula=..., not both."
-            )
+        """Validate formula interfaces."""
         if self.membership_formula is not None and _formula_has_lhs(
             self.membership_formula
         ):
@@ -287,53 +279,33 @@ class ChoiceDataEncoder:
             X_df: Any | None = None
             y_df: Any | None = None
 
-            if self.formula is not None:
-                X_df, y_df, df = self._encode_legacy_formula(
+            if self.utility_formula is not None:
+                X_df, y_df = self._encode_utility_formula(
                     pandas_df, df, fit=fit, require_choice=require_choice
                 )
-            else:
-                if self.utility_formula is not None:
-                    X_df, y_df = self._encode_utility_formula(
-                        pandas_df, df, fit=fit, require_choice=require_choice
-                    )
-                    _validate_matrix_height(X_df, df.height, "utility formula")
-                    df = df.with_columns(pl.from_pandas(X_df))
-                    case_vars = list(self.case_varnames or X_df.columns)
-                else:
-                    case_vars = self._encode_explicit_case_variables(
-                        df, require_choice=require_choice, fit=fit
-                    )
-                    y_array = self._choice_array_from_column(df, fit, require_choice)
-
-                if self.membership_formula is not None:
-                    df = self._encode_membership_formula(pandas_df, df, fit=fit)
-                else:
-                    if fit:
-                        self.dem_varnames = (
-                            list(self.explicit_dem_varnames)
-                            if self.explicit_dem_varnames is not None
-                            else None
-                        )
-
-                dem_vars = self.dem_varnames
-                if self.utility_formula is not None and (fit or require_choice):
-                    y_array = self._choice_array_from_formula_or_column(
-                        df, y_df, fit=fit, require_choice=require_choice
-                    )
-
-            if self.formula is not None:
-                if X_df is None:
-                    raise ValueError(
-                        "Formula encoder did not produce a utility matrix."
-                    )
-                _validate_matrix_height(X_df, df.height, "case formula")
+                _validate_matrix_height(X_df, df.height, "utility formula")
                 df = df.with_columns(pl.from_pandas(X_df))
                 case_vars = list(self.case_varnames or X_df.columns)
-                dem_vars = self.dem_varnames
-                if fit or require_choice:
-                    y_array = self._choice_array_from_formula_or_column(
-                        df, y_df, fit=fit, require_choice=require_choice
-                    )
+            else:
+                case_vars = self._encode_explicit_case_variables(
+                    df, require_choice=require_choice, fit=fit
+                )
+                y_array = self._choice_array_from_column(df, fit, require_choice)
+
+            if self.membership_formula is not None:
+                df = self._encode_membership_formula(pandas_df, df, fit=fit)
+            elif fit:
+                self.dem_varnames = (
+                    list(self.explicit_dem_varnames)
+                    if self.explicit_dem_varnames is not None
+                    else None
+                )
+
+            dem_vars = self.dem_varnames
+            if self.utility_formula is not None and (fit or require_choice):
+                y_array = self._choice_array_from_formula_or_column(
+                    df, y_df, fit=fit, require_choice=require_choice
+                )
 
         else:
             case_vars = self._encode_explicit_case_variables(
@@ -354,98 +326,12 @@ class ChoiceDataEncoder:
     def _has_formula_spec(self) -> bool:
         """Return whether any formula-based interface is active."""
         return any(
-            item is not None
-            for item in (self.formula, self.utility_formula, self.membership_formula)
+            item is not None for item in (self.utility_formula, self.membership_formula)
         )
 
     def _has_demographic_formula(self) -> bool:
         """Return whether raw external demographics may be needed for formulas."""
-        return self.formula is not None or self.membership_formula is not None
-
-    def _encode_legacy_formula(
-        self,
-        pandas_df: Any,
-        df: pl.DataFrame,
-        *,
-        fit: bool,
-        require_choice: bool,
-    ) -> tuple[Any, Any | None, pl.DataFrame]:
-        """Encode the backward-compatible ``choice ~ utility | membership`` formula."""
-        if fit:
-            f = _parse_formula(self.formula, "formula")
-            y_df = _get_model_matrix(
-                f.lhs,
-                pandas_df,
-                formula=self.formula,
-                label="formula left-hand side",
-            )
-            self.y_model_spec = y_df.model_spec
-
-            if isinstance(f.rhs, tuple):
-                raw_X_df = _get_model_matrix(
-                    f.rhs[0],
-                    pandas_df,
-                    formula=self.formula,
-                    label="formula utility design",
-                )
-                raw_dems_df = _get_model_matrix(
-                    f.rhs[1],
-                    pandas_df,
-                    formula=self.formula,
-                    label="formula membership design",
-                )
-                dems_df = _drop_formula_intercepts(raw_dems_df)
-                self.dem_model_spec = raw_dems_df.model_spec
-                self.dem_varnames = list(dems_df.columns) or None
-                if self.dem_varnames:
-                    df = df.with_columns(pl.from_pandas(dems_df))
-            else:
-                raw_X_df = _get_model_matrix(
-                    f.rhs,
-                    pandas_df,
-                    formula=self.formula,
-                    label="formula utility design",
-                )
-                self.dem_model_spec = None
-                self.dem_varnames = None
-
-            X_df = _drop_formula_intercepts(raw_X_df)
-            self.x_model_spec = raw_X_df.model_spec
-            self.case_varnames = list(X_df.columns)
-            self._validate_case_formula_columns()
-            return X_df, y_df, df
-
-        if self.x_model_spec is None:
-            raise ValueError("Formula encoder has not been fitted.")
-        X_df = _drop_formula_intercepts(
-            _get_model_matrix(
-                self.x_model_spec,
-                pandas_df,
-                formula=self.formula,
-                label="formula utility design",
-            )
-        )
-        if self.dem_model_spec is not None:
-            dems_df = _drop_formula_intercepts(
-                _get_model_matrix(
-                    self.dem_model_spec,
-                    pandas_df,
-                    formula=self.formula,
-                    label="formula membership design",
-                )
-            )
-            if self.dem_varnames:
-                df = df.with_columns(pl.from_pandas(dems_df))
-        if require_choice and self.y_model_spec is not None:
-            y_df = _get_model_matrix(
-                self.y_model_spec,
-                pandas_df,
-                formula=self.formula,
-                label="formula left-hand side",
-            )
-        else:
-            y_df = None
-        return X_df, y_df, df
+        return self.membership_formula is not None
 
     def _encode_utility_formula(
         self,
@@ -568,7 +454,7 @@ class ChoiceDataEncoder:
         del require_choice
         if self.explicit_case_varnames is None:
             raise ValueError(
-                "Must provide either utility_formula, formula, or explicit case_varnames."
+                "Must provide either utility_formula or explicit case_varnames."
             )
         case_vars = list(self.explicit_case_varnames)
         _require_columns(df, case_vars)

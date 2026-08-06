@@ -19,7 +19,13 @@ from lcl._demographics import _predict_class_membership_probs, _update_thetas
 from lcl._jax_compat import Mesh, NamedSharding, P, shard_map
 from lcl._kernels import _diff_log_kernels
 from lcl._optimize import exact_newton_minimize
-from lcl._struct import Data, DiffUnchosenChosen, EMAlgConfig, EMVars, MleConfig
+from lcl._struct import (
+    Data,
+    DiffUnchosenChosen,
+    EMVars,
+    FitOptions,
+    OptimizationOptions,
+)
 
 
 def _em_step(
@@ -27,8 +33,8 @@ def _em_step(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
     num_classes: int,
-    mle_config: MleConfig,
-    em_alg_config: EMAlgConfig,
+    optimization_options: OptimizationOptions,
+    fit_options: FitOptions,
     numeraire_idx: int | None = None,
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> EMVars:
@@ -47,10 +53,10 @@ def _em_step(
         Core choice data and metadata.
     num_classes : int
         Number of latent classes.
-    mle_config : :class:`~lcl._struct.MleConfig`
+    optimization_options : :class:`~lcl._struct.OptimizationOptions`
         Optimization settings for the exact-Newton MLE solver.
-    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
-        Configuration containing the JAX PRNG seed for reproducible partitioning.
+    fit_options : :class:`~lcl._struct.FitOptions`
+        EM settings, including device count and reproducible partition seed.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable.
     numeraire_min_abs : float, default=1e-5
@@ -88,8 +94,8 @@ def _em_step(
         latent_betas,
         updated_class_probs_by_choice,
         diff_unchosen_chosen,
-        mle_config,
-        em_alg_config,
+        optimization_options,
+        fit_options,
         numeraire_idx,
         numeraire_min_abs,
     )
@@ -119,7 +125,11 @@ def _em_step(
 
         # Update coefficients and recover unconditional class membership probabilities
         updated_thetas, unconditional_class_probs_by_panel = _update_thetas(
-            em_vars.thetas, updated_class_probs_by_panel, data, num_classes, mle_config
+            em_vars.thetas,
+            updated_class_probs_by_panel,
+            data,
+            num_classes,
+            optimization_options,
         )
         updated_shares = unconditional_class_probs_by_panel.mean(axis=0)
 
@@ -202,8 +212,8 @@ def _update_betas(
     betas: Float64[Array, "alt_vars classes"],
     class_probs_by_choice: Float64[Array, "cases classes"],
     diff_unchosen_chosen: DiffUnchosenChosen,
-    mle_config: MleConfig,
-    em_alg_config: EMAlgConfig,
+    optimization_options: OptimizationOptions,
+    fit_options: FitOptions,
     numeraire_idx: int | None,
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> Float64[Array, "alt_vars classes"]:
@@ -217,10 +227,10 @@ def _update_betas(
         Posterior class membership probabilities to act as case weights.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix.
-    mle_config : :class:`~lcl._struct.MleConfig`
+    optimization_options : :class:`~lcl._struct.OptimizationOptions`
         MLE solver configurations.
-    em_alg_config : :class:`~lcl._struct.EMAlgConfig`
-        Configuration containing the JAX PRNG seed for reproducible partitioning.
+    fit_options : :class:`~lcl._struct.FitOptions`
+        EM settings, including the number of devices.
     numeraire_idx : int | None
         Column index of the numeraire variable.
     numeraire_min_abs : float, default=1e-5
@@ -232,7 +242,7 @@ def _update_betas(
         Updated taste parameters optimized for the current EM step.
     """
     num_classes = betas.shape[1]
-    num_devices = em_alg_config.num_devices
+    num_devices = fit_options.num_devices
 
     # Pad classes so every selected accelerator receives the same workload.
     classes_per_device = math.ceil(num_classes / num_devices)
@@ -270,7 +280,7 @@ def _update_betas(
                 combine(dynamic_diff, static_diff),
                 numeraire_idx,
                 numeraire_min_abs,
-                mle_config,
+                optimization_options,
             ),
             mesh=mesh,
             in_specs=(
@@ -294,7 +304,7 @@ def _distributed_update(
     diff: DiffUnchosenChosen,
     numeraire_idx: int | None,
     numeraire_min_abs: float,
-    mle_config: MleConfig,
+    optimization_options: OptimizationOptions,
 ) -> Float64[Array, "... classes_per_device alt_vars"]:
     """Update class-specific betas on one shard.
 
@@ -311,7 +321,7 @@ def _distributed_update(
         Optional column index constrained through the softplus transform.
     numeraire_min_abs : float
         Minimum absolute value imposed on the numeraire coefficient.
-    mle_config : :class:`~lcl._struct.MleConfig`
+    optimization_options : :class:`~lcl._struct.OptimizationOptions`
         Newton optimization settings.
 
     Returns
@@ -375,12 +385,12 @@ def _distributed_update(
             b,
             dyn_diff,
             w,
-            maxiter=mle_config.maxiter,
-            tol=mle_config.ftol,
-            damping=mle_config.hessian_damping,
-            max_step_norm=mle_config.max_step_norm,
-            line_search_maxiter=mle_config.line_search_maxiter,
-            accept_any_decrease=mle_config.accept_any_decrease,
+            maxiter=optimization_options.maxiter,
+            tol=optimization_options.gradient_tol,
+            damping=optimization_options.hessian_damping,
+            max_step_norm=optimization_options.max_step_norm,
+            line_search_maxiter=optimization_options.line_search_maxiter,
+            accept_any_decrease=optimization_options.accept_any_decrease,
         )
         return optim_res.params
 

@@ -28,11 +28,8 @@ with install_import_hook("lcl", "beartype.beartype"):
     from lcl._results import LCLResults
     from lcl._struct import (
         DiagnosticsOptions,
-        EMAlgConfig,
-        ErrorConfig,
         FitOptions,
         InferenceOptions,
-        MleConfig,
         OptimizationOptions,
         PartitionType,
         PastChoicesData,
@@ -102,9 +99,6 @@ __all__ = [
     "OptimizationOptions",
     "InferenceOptions",
     "DiagnosticsOptions",
-    "EMAlgConfig",
-    "ErrorConfig",
-    "MleConfig",
     "LCLResults",
     "LCLPrediction",
     "WTPRequest",

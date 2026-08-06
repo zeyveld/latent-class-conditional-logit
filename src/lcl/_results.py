@@ -8,11 +8,12 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import hessian, jacfwd, jacrev
+from jax import jacrev
 from jax.tree_util import Partial
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float64
 
+from lcl._analytic_derivatives import _panel_scores_and_hessian
 from lcl._case_utils import _diff_unchosen_chosen
 from lcl._diagnostics import LCLDiagnostics
 from lcl._em_alg_steps import (
@@ -30,9 +31,8 @@ from lcl._struct import (
     Data,
     DiagnosticsOptions,
     DiffUnchosenChosen,
-    EMAlgConfig,
     EMVars,
-    ErrorConfig,
+    InferenceOptions,
     ParsedData,
     PastChoicesData,
 )
@@ -178,8 +178,7 @@ class LCLResults:
         estimation_data: Data,
         em_recursion: int,
         converged: bool,
-        em_alg_config: EMAlgConfig,
-        error_config: ErrorConfig | None,
+        inference: InferenceOptions | None,
         estim_time_sec: float,
         diagnostics_config: DiagnosticsOptions | None = None,
         em_history: list[dict[str, Any]] | None = None,
@@ -200,9 +199,7 @@ class LCLResults:
             Number of EM recursions completed before termination.
         converged : bool
             Whether the explicit EM stopping criterion was satisfied.
-        em_alg_config : :class:`~lcl._struct.EMAlgConfig`
-            EM convergence and iteration configuration.
-        error_config : :class:`~lcl._struct.ErrorConfig` | None
+        inference : :class:`~lcl._struct.InferenceOptions` | None
             Covariance and standard-error configuration.
         estim_time_sec : float
             Wall-clock estimation time in seconds.
@@ -219,7 +216,7 @@ class LCLResults:
         self.total_recursions = em_recursion
         self.converged = converged
         self.estim_time_sec = estim_time_sec
-        self.error_config = error_config if error_config is not None else ErrorConfig()
+        self.inference = inference if inference is not None else InferenceOptions()
         self.diagnostics_config = (
             diagnostics_config
             if diagnostics_config is not None
@@ -319,12 +316,17 @@ class LCLResults:
         """Compute covariance on CPU, optionally with clustered sandwich correction.
 
         The EM algorithm may leave fitted arrays committed to a GPU or sharded
-        accelerator placement.  Robust inference builds dense Hessians/Jacobians,
-        so this method explicitly moves only the inference inputs to CPU and runs
-        all derived differencing, Hessian, pseudo-inverse, and score-Jacobian work
-        there.  The robust score Jacobian maps parameters to panel contributions;
-        because that Jacobian is usually tall, forward-mode AD is the better default
-        than reverse-mode AD for this calculation.
+        accelerator placement, so this method explicitly moves the inference
+        inputs to CPU and runs the differencing, Hessian, pseudo-inverse, and
+        score work there.  Panel scores and the observed-information Hessian
+        come from the closed-form mixture derivatives in
+        :mod:`lcl._analytic_derivatives` (Fisher identity and Louis/Oakes
+        observed information), which match ``jax.hessian``/``jax.jacfwd`` of the
+        panel log likelihood to machine precision while touching the data once
+        instead of once per parameter.  The analytic path is much leaner than
+        autodiff but still holds all-class case statistics and the panel-by-
+        parameter score matrix at once, so its peak memory remains above the
+        class-local EM and M-step kernels; CPU placement is therefore intentional.
 
         Returns
         -------
@@ -332,7 +334,7 @@ class LCLResults:
             Covariance matrix aligned with the flattened parameter vector.
         """
         cpu = cpu_device()
-        if self.error_config.skip_std_errs:
+        if self.inference.skip:
             with jax.default_device(cpu):
                 return jnp.full((self.num_params, self.num_params), jnp.nan)
 
@@ -344,13 +346,14 @@ class LCLResults:
                 _diff_unchosen_chosen(data), cpu
             )
 
-            H = hessian(self._full_loglik_fn)(flat_params, diff_unchosen_chosen, data)
+            J, H = _panel_scores_and_hessian(
+                flat_params, diff_unchosen_chosen, data, self._param_packing
+            )
             H_inv = jax.device_put(onp.linalg.pinv(onp.asarray(-H)), cpu)
 
-            if not self.error_config.robust:
+            if self.inference.covariance == "unadjusted":
                 return _symmetrize(H_inv)
 
-            J = jacfwd(self._panel_loglik_fn)(flat_params, diff_unchosen_chosen, data)
             B = J.T @ J
 
             if data.num_panels is None:
@@ -358,7 +361,8 @@ class LCLResults:
                     "Panel identifiers are required for clustered covariance."
                 )
             G = data.num_panels
-            return _symmetrize((H_inv @ B @ H_inv) * (G / (G - 1)))
+            correction = G / (G - 1) if self.inference.finite_sample_correction else 1.0
+            return _symmetrize((H_inv @ B @ H_inv) * correction)
 
     def _panel_loglik_fn(
         self,
@@ -935,6 +939,7 @@ class LCLResults:
                 past_choices=past_choices,
                 past_choices_dems_data=past_choices_dems_data,
             )
+            _validate_past_choice_panels(parsed_past, parsed_predict)
             data_past = cast(Data, self.model._setup_data(parsed_past)[0])
             diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
             class_probs_by_panel, _ = _compute_conditional_class_probs(
@@ -1091,6 +1096,49 @@ def _parse_past_choices(
         past_choices,
         dems_data=past_choices_dems_data,
         require_choice=True,
+    )
+
+
+def _validate_past_choice_panels(
+    parsed_past: ParsedData, parsed_predict: ParsedData
+) -> None:
+    """Require past-choice panels to match prediction panels exactly.
+
+    Posterior class probabilities are indexed by each dataset's own sequential
+    panel IDs, assigned from unique panel labels in sorted order. The two
+    indexations only align when both datasets contain the same panel-label set.
+
+    Parameters
+    ----------
+    parsed_past : ParsedData
+        Encoded historical choices.
+    parsed_predict : ParsedData
+        Encoded prediction data.
+
+    Raises
+    ------
+    ValueError
+        If the unique panel labels of the two datasets differ.
+    """
+    past_panels = onp.unique(onp.asarray(parsed_past.original_panels))
+    predict_panels = onp.unique(onp.asarray(parsed_predict.original_panels))
+    if past_panels.shape == predict_panels.shape and onp.array_equal(
+        past_panels, predict_panels
+    ):
+        return
+
+    def _sample(values: onp.ndarray) -> str:
+        suffix = ", ..." if values.shape[0] > 5 else ""
+        return f"{values[:5].tolist()}{suffix}"
+
+    missing = onp.setdiff1d(predict_panels, past_panels)
+    extra = onp.setdiff1d(past_panels, predict_panels)
+    raise ValueError(
+        "past_choices must contain exactly the panels present in the "
+        "prediction data, because posterior class probabilities are matched "
+        "to prediction panels by sorted panel ID. "
+        f"Panels missing from past_choices: {_sample(missing)}; "
+        f"panels absent from the prediction data: {_sample(extra)}."
     )
 
 

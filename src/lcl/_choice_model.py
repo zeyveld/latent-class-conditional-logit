@@ -58,7 +58,6 @@ class ChoiceModel(ABC):
         alts_col: str,
         cases_col: str,
         panels_col: str,
-        formula: str | None,
         choice_col: str | None,
         case_varnames: Sequence[str] | None,
         dem_varnames: Sequence[str] | None,
@@ -82,9 +81,6 @@ class ChoiceModel(ABC):
             Name of the column grouping observations into distinct choice situations.
         panels_col : str
             Name of the column mapping observations to specific decision-makers.
-        formula : str | None
-            Backward-compatible combined Formulaic string such as
-            ``"choice ~ price + C(brand) | income"``.
         utility_formula : str | None, optional
             Formulaic string for the alternative-specific utility specification,
             such as ``"choice ~ price + C(brand)"``.  A right-hand-side-only
@@ -115,7 +111,6 @@ class ChoiceModel(ABC):
             alts_col=alts_col,
             cases_col=cases_col,
             panels_col=panels_col,
-            formula=formula,
             utility_formula=utility_formula,
             membership_formula=membership_formula,
             choice_col=choice_col,

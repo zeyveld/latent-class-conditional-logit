@@ -182,9 +182,8 @@ Travel mode: rail & 0.418 & 0.321 \\
 !!! note "Formulas or explicit lists?"
     `LCLSpec` also accepts `utility=[...]` and `membership=[...]` when the input
     columns are already model-ready. Use formulas for categorical expansion,
-    interactions, or transformations. The combined legacy `formula=` is
-    deprecated; separate utility and membership formulas are easier to audit and
-    reuse.
+    interactions, or transformations. Keep utility and class-membership designs
+    in their separate fields so each design remains easy to audit and reuse.
 
 !!! tip "Use several starts for reported mixture models"
     `FitOptions(starts=3, seed=42)` runs three independent panel-partition starts
@@ -364,6 +363,11 @@ The resulting `prediction.class_probs_by_panel` contains the updated class
 probabilities used for choice probabilities, elasticities, and welfare measures.
 Callers who already manage encoded arrays may pass `PastChoicesData` instead of a
 DataFrame.
+
+`past_choices` must contain exactly the same panel IDs as the counterfactual data.
+LCL validates that set before matching posterior class probabilities to prediction
+panels, preventing silent reassignment when one input contains missing or extra
+decision-makers.
 
 `LCLPrediction` also reports expected consumer surplus by choice situation and a
 panel-level willingness-to-pay frame for downstream welfare analysis.

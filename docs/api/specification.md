@@ -21,9 +21,9 @@ results = lcl.fit(
 )
 ```
 
-Use `utility_formula` and `membership_formula` for formula-based designs. The
-combined `formula` field is deprecated. `LCLSpec` is immutable, so it can be
-reused safely across fitting and cross-validation.
+Use separate `utility_formula` and `membership_formula` fields for formula-based
+designs. `LCLSpec` is immutable, so it can be reused safely across fitting and
+cross-validation.
 
 ## Fitting
 
@@ -46,18 +46,3 @@ reused safely across fitting and cross-validation.
 ::: lcl._struct.InferenceOptions
 
 ::: lcl._struct.DiagnosticsOptions
-
-## Compatibility objects
-
-`EMAlgConfig`, `MleConfig`, and `ErrorConfig` remain available while existing
-analyses migrate. Their corresponding keyword arguments emit deprecation warnings.
-Passing an old and new object for the same responsibility raises `ValueError`.
-
-| Deprecated | Preferred |
-| --- | --- |
-| `em_alg_config=EMAlgConfig(...)` | `fit_options=FitOptions(...)` |
-| `mle_config=MleConfig(ftol=...)` | `optimization_options=OptimizationOptions(gradient_tol=...)` |
-| `error_config=ErrorConfig(...)` | `inference=InferenceOptions(...)` |
-
-See [Best practices & migration](../guides/best_practices.md) for complete
-before-and-after examples.

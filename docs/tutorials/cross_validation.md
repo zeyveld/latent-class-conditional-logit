@@ -17,7 +17,7 @@ to both training and validation data.
 Reuse the labeled `LCLSpec` from the
 [estimation tutorial](estimation.md). `num_classes_list` replaces `spec.classes`
 for each candidate while leaving the rest of the empirical specification unchanged.
-Pass the specification with `spec=`; the older positional form is deprecated.
+Pass the specification with the explicit `spec=` keyword.
 
 Each fold fits its formula encoder on training data and uses that fitted encoder to
 score the holdout. This preserves training-time categorical coding and prevents a
