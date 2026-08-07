@@ -122,6 +122,10 @@ print(results)
 optimum. Use several starts for reported mixture models and fix `seed` for
 reproducibility.
 
+`FitOptions.max_em_iter` caps all complete EM recursions. One recursion is
+reserved for a strict final-refit phase; if that recursion moves the likelihood
+by more than `em_tol`, strict EM continues within the remaining iteration budget.
+
 The same fitted encoder is used for held-out scoring, preserving Formulaic
 categorical levels and expanded-column order:
 

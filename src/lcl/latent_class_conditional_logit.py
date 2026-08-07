@@ -298,11 +298,30 @@ class LatentClassConditionalLogit(ChoiceModel):
 
         logliks_list, em_recursion = [], 0
         converged = False
+        standard_converged = False
         em_history_rows: list[dict[str, Any]] = []
-        while em_recursion < fit_options.max_em_iter:
+        strict_optimization_options = OptimizationOptions(
+            gradient_tol=min(optimization_options.gradient_tol, 1e-8),
+            maxiter=max(optimization_options.maxiter, 500),
+            hessian_damping=optimization_options.hessian_damping,
+            max_step_norm=optimization_options.max_step_norm,
+            line_search_maxiter=optimization_options.line_search_maxiter,
+            accept_any_decrease=optimization_options.accept_any_decrease,
+        )
+
+        # Reserve one recursion for the strict phase so max_em_iter is a genuine
+        # cap over every complete EM update, including the final refit.
+        standard_em_limit = max(fit_options.max_em_iter - 1, 0)
+        while em_recursion < standard_em_limit:
             logger.info("EM recursion: %s", em_recursion)
             if progress_callback is not None:
-                progress_callback({"event": "em_step", "iteration": em_recursion})
+                progress_callback(
+                    {
+                        "event": "em_step",
+                        "iteration": em_recursion,
+                        "phase": "standard",
+                    }
+                )
 
             em_vars = _em_step(
                 em_vars,
@@ -316,7 +335,9 @@ class LatentClassConditionalLogit(ChoiceModel):
             )
 
             logliks_list.append(em_vars.unconditional_loglik)
-            em_history_rows.append(self._em_history_row(em_recursion, em_vars))
+            em_history_rows.append(
+                self._em_history_row(em_recursion, em_vars, phase="standard")
+            )
             em_recursion += 1
 
             # Force a host synchronization only at configured convergence checks.
@@ -326,43 +347,73 @@ class LatentClassConditionalLogit(ChoiceModel):
 
                 rel_change = abs(current_ll - past_ll) / max(abs(past_ll), 1.0)
                 if rel_change <= fit_options.em_tol:
-                    converged = True
+                    standard_converged = True
                     break
 
-        pre_refit_ll = float(em_vars.unconditional_loglik)
-        strict_optimization_options = OptimizationOptions(
-            gradient_tol=1e-8,
-            maxiter=500,
-            hessian_damping=optimization_options.hessian_damping,
-            max_step_norm=optimization_options.max_step_norm,
-            line_search_maxiter=optimization_options.line_search_maxiter,
-            accept_any_decrease=optimization_options.accept_any_decrease,
-        )
-        em_vars = _em_step(
-            em_vars,
-            diff_unchosen_chosen,
-            data_struct,
-            self.num_classes,
-            strict_optimization_options,
-            fit_options,
-            self.numeraire_idx,
-            self.numeraire_min_abs,
-        )
-        post_refit_ll = float(em_vars.unconditional_loglik)
-        refit_rel_change = abs(post_refit_ll - pre_refit_ll) / max(
-            abs(pre_refit_ll), 1.0
-        )
-        if converged and refit_rel_change > fit_options.em_tol:
-            converged = False
+        strict_recursions = 0
+        strict_rel_change: float | None = None
+        while em_recursion < fit_options.max_em_iter:
+            logger.info("Strict EM recursion: %s", em_recursion)
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "em_step",
+                        "iteration": em_recursion,
+                        "phase": "strict",
+                    }
+                )
+
+            pre_refit_ll = float(em_vars.unconditional_loglik)
+            em_vars = _em_step(
+                em_vars,
+                diff_unchosen_chosen,
+                data_struct,
+                self.num_classes,
+                strict_optimization_options,
+                fit_options,
+                self.numeraire_idx,
+                self.numeraire_min_abs,
+            )
+            post_refit_ll = float(em_vars.unconditional_loglik)
+            strict_rel_change = abs(post_refit_ll - pre_refit_ll) / max(
+                abs(pre_refit_ll), 1.0
+            )
+            em_history_rows.append(
+                self._em_history_row(em_recursion, em_vars, phase="strict")
+            )
+            em_recursion += 1
+            strict_recursions += 1
+
+            if strict_rel_change <= fit_options.em_tol:
+                converged = True
+                break
+
+            if (
+                standard_converged
+                and strict_recursions == 1
+                and em_recursion < fit_options.max_em_iter
+            ):
+                logger.info(
+                    "The strict final refit moved the log likelihood by %.3g "
+                    "relative units, above the EM tolerance %.3g; continuing "
+                    "strict EM with %s recursions remaining.",
+                    strict_rel_change,
+                    fit_options.em_tol,
+                    fit_options.max_em_iter - em_recursion,
+                )
+
+        if standard_converged and strict_rel_change is not None and not converged:
             logger.warning(
                 "The strict final refit moved the log likelihood by %.3g "
-                "relative units, above the EM tolerance %.3g.",
-                refit_rel_change,
+                "relative units, above the EM tolerance %.3g, and the maximum "
+                "of %s EM recursions was reached.",
+                strict_rel_change,
                 fit_options.em_tol,
+                fit_options.max_em_iter,
             )
-        em_history_rows.append(self._em_history_row(em_recursion, em_vars))
+        final_em_iter = max(em_recursion - 1, 0)
         optimization_history_rows = self._optimizer_snapshot(
-            em_vars, diff_unchosen_chosen, data_struct, em_recursion
+            em_vars, diff_unchosen_chosen, data_struct, final_em_iter
         )
 
         estim_time_sec = time() - self._fit_start_time
@@ -479,7 +530,9 @@ class LatentClassConditionalLogit(ChoiceModel):
         )
         return best_seed
 
-    def _em_history_row(self, em_iter: int, em_vars: Any) -> dict[str, Any]:
+    def _em_history_row(
+        self, em_iter: int, em_vars: Any, *, phase: str
+    ) -> dict[str, Any]:
         """Return one lazily evaluated EM-history row.
 
         Parameters
@@ -488,6 +541,8 @@ class LatentClassConditionalLogit(ChoiceModel):
             EM recursion index.
         em_vars : EMVars-like
             Current EM state.
+        phase : str
+            Either ``"standard"`` or ``"strict"`` for the M-step settings used.
 
         Returns
         -------
@@ -498,6 +553,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         """
         row: dict[str, Any] = {
             "em_iter": em_iter,
+            "phase": phase,
             "loglik": em_vars.unconditional_loglik,
         }
         if em_vars.shares is not None:

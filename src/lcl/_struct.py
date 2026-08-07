@@ -184,13 +184,17 @@ class FitOptions:
     seed : int, default=0
         Random seed used for panel-partition starts.
     max_em_iter : int, default=2000
-        Maximum number of EM recursions.
+        Maximum number of complete EM recursions, including strict final-refit
+        recursions. One recursion is reserved for the strict phase. If its
+        likelihood movement exceeds ``em_tol``, strict EM continues within the
+        remaining budget.
     em_tol : float, default=1e-6
-        Relative log-likelihood tolerance checked over the EM history.
+        Relative log-likelihood tolerance checked over the EM history and between
+        consecutive strict EM recursions.
     num_devices : int, default=device_count()
         Number of local JAX devices used for class-wise beta updates.
     check_interval : int, default=10
-        Frequency of convergence checks.
+        Frequency of convergence checks during the standard EM phase.
     starts : int, default=1
         Number of independent panel-partition starts.
     start_method : str, default="panel_partition"

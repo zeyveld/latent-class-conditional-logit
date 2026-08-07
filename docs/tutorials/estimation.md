@@ -136,6 +136,14 @@ summary = results.summarize_betas()
 print(results)
 ```
 
+`max_em_iter` is a hard cap on all complete EM recursions, including the strict
+final-refit phase. The estimator reserves one recursion for that phase. If the
+strict recursion moves the relative log likelihood by more than `em_tol`, it keeps
+running EM with the stricter M-step settings until a consecutive strict recursion
+moves by at most `em_tol` or the remaining recursion budget is exhausted. This
+usually adds only a few recursions near the optimum while preventing a loose
+M-step convergence check from being reported as final convergence.
+
 Representative output (the exact optimum can vary with the JAX version and
 available hardware):
 
