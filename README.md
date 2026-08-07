@@ -14,7 +14,7 @@ Although I'm an economist by training, this package is intended for all social s
 - **`LatentClassConditionalLogit`**: finite-mixture conditional logit with a fractional-response multinomial logit regression of class membership on demographics.
 - **`ConditionalLogit`**: standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
 - **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Folds are split at the decision-maker level, so no individuals' choices appear in both training and hold-out data.
-- **Counterfactual prediction**: out-of-sample choice and acceptance probabilities, Train-consistent present-trip welfare in utils and dollars, choice-set resampling without perfect store foresight, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
+- **Counterfactual prediction**: out-of-sample choice probabilities, expected consumer surplus, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
 - **Inference & diagnostics**: clustered sandwich covariance at the panel level, the Delta method for non-linear functions of the parameters (such as the value of time), and one-call diagnostic reports (`results.diagnostics()`, `convergence_report()`, `audit_report()`).
 
 Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped design matrix should raise a readable error at the call site rather than a cryptic XLA trace.
@@ -202,19 +202,6 @@ panel demographics; the same alignment field is available on `PastChoicesData`.
 `prediction.compute_wtp(..., show=False)` returns its dictionary of Polars tables
 without printing, and numeric quintile/custom-break groups follow numeric bin
 order.
-
-When present-trip anticipated and experienced attributes differ, pass both to
-`results.predict(data=anticipated_df, experienced_data=experienced_df)`. The
-returned welfare frame applies Train's (2015) anticipated-choice/experienced-utility
-formula in utility units and, when a numeraire is specified, dollars. Use
-`prediction.acceptance_probability(...)` for the directly interpretable probability
-of accepting the offered substitute.
-
-For future-profit counterfactuals, `lcl.simulate_future_choice_sets(...)` creates
-separate simulated worlds: store expectations sample only through the intervention
-date, while realized evaluation samples the full panel. The default uses 20 Monte
-Carlo draws and samples complete choice sets so prices, availability, costs, and
-other trip attributes remain jointly coherent.
 
 The tutorials document weight-key conventions, cross-validation failure
 semantics, panel alignment, and the current API patterns used above.

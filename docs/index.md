@@ -178,7 +178,6 @@ before they become opaque compiled-kernel failures.
 ## Next steps
 
 - Follow the [estimation and counterfactual tutorial](tutorials/estimation.md).
-- See [counterfactual future worlds and present-trip welfare](tutorials/counterfactual_simulation.md).
 - Compare class counts with [panel-blocked cross-validation](tutorials/cross_validation.md).
 - Review the [`LCLSpec` and options API](api/specification.md).
 

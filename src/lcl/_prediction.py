@@ -218,11 +218,7 @@ class LCLPrediction:
     predicted_probs : pl.DataFrame
         DataFrame of out-of-sample choice probabilities for each alternative.
     surplus : pl.DataFrame
-        Present-trip consumer welfare per choice situation.  Explicit columns report
-        anticipated, experienced, and perfect-foresight surplus in utility units and,
-        when a numeraire is defined, dollars.  ``foreknowledge_loss`` follows Train
-        (2015); the legacy ``surplus`` column equals experienced surplus in dollars
-        when available and utils otherwise.
+        DataFrame of expected consumer surplus (inclusive value) per choice situation.
     wtp_alt_vars_by_panel : pl.DataFrame
         DataFrame of expected marginal WTP for each alternative-specific characteristic,
         calculated at the individual decision-maker level.
@@ -282,44 +278,6 @@ class LCLPrediction:
         self.class_probs_by_panel = class_probs_by_panel
         self.class_probabilities_source = class_probabilities_source
         self.partition_data = partition_data_df
-
-    def acceptance_probability(
-        self, accepted_alternatives: object | Iterable[object]
-    ) -> pl.DataFrame:
-        """Aggregate predicted choice probability over acceptance alternatives.
-
-        Parameters
-        ----------
-        accepted_alternatives : object | Iterable[object]
-            One alternative ID, or a collection of IDs, that constitutes accepting
-            the offered substitute.  Remaining alternatives are treated as rejection
-            outcomes.
-
-        Returns
-        -------
-        pl.DataFrame
-            One row per choice situation with ``acceptance_probability``.  Cases with
-            no matching acceptance alternative receive zero.
-        """
-        if isinstance(accepted_alternatives, Iterable) and not isinstance(
-            accepted_alternatives, (str, bytes)
-        ):
-            accepted = list(accepted_alternatives)
-        else:
-            accepted = [accepted_alternatives]
-        if not accepted:
-            raise ValueError("accepted_alternatives must not be empty.")
-
-        keys = ["panels", "cases"]
-        cases = self.predicted_probs.select(keys).unique(maintain_order=True)
-        accepted_probs = (
-            self.predicted_probs.filter(pl.col("alts").is_in(accepted))
-            .group_by(keys, maintain_order=True)
-            .agg(pl.col("choice_probs").sum().alias("acceptance_probability"))
-        )
-        return cases.join(accepted_probs, on=keys, how="left").with_columns(
-            pl.col("acceptance_probability").fill_null(0.0)
-        )
 
     def elasticities(self, vars: str | Iterable[str]) -> pl.DataFrame:
         """Compute full matrices of own- and cross-elasticities for continuous features.

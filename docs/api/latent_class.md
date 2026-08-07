@@ -70,11 +70,3 @@ follow sorted unique panel-ID order.
 ::: lcl._struct.PartitionType
 
 ::: lcl._struct.PastChoicesData
-
-## Future-state simulation
-
-::: lcl.counterfactual.FutureSimulationConfig
-
-::: lcl.counterfactual.CounterfactualWorlds
-
-::: lcl.counterfactual.simulate_future_choice_sets

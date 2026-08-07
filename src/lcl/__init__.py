@@ -23,11 +23,6 @@ config.update("jax_enable_x64", True)
 # Ensure array arguments have mutually compatible shapes throughout the package.
 with install_import_hook("lcl", "beartype.beartype"):
     from lcl.constraints import NegativeCoefficient
-    from lcl.counterfactual import (
-        CounterfactualWorlds,
-        FutureSimulationConfig,
-        simulate_future_choice_sets,
-    )
     from lcl._cross_validation import cv_optimal_classes
     from lcl._prediction import LCLPrediction
     from lcl._results import LCLResults
@@ -109,9 +104,6 @@ __all__ = [
     "WTPRequest",
     "PartitionType",
     "PastChoicesData",
-    "FutureSimulationConfig",
-    "CounterfactualWorlds",
-    "simulate_future_choice_sets",
     "fit",
     "cv_optimal_classes",
 ]
