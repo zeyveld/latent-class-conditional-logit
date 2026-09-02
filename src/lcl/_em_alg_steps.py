@@ -373,7 +373,7 @@ def _distributed_update(
             (val, aux), grad, hessian = _loglik_gradient(p_struct, full_diff, w_inner)
 
             grad, aux, hessian = pullback_negative_derivatives(
-                p, numeraire_idx, grad, aux, hessian
+                p, numeraire_idx, grad, aux, hessian, numeraire_min_abs
             )
 
             scale = jnp.maximum(jnp.sum(w_inner), 1.0)

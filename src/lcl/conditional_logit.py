@@ -261,7 +261,10 @@ class CLResults:
             self.model.numeraire_min_abs,
         )
         self.hess_inv = optim_res.hess_inv
+        self.information_diagnostics = optim_res.information_diagnostics
 
+        # Both robust branches use uncentered scores and the same finite-sample
+        # multiplier; they differ only in the level at which scores are summed.
         if inference.skip:
             self.hess_inv = jnp.full_like(self.hess_inv, jnp.nan)
             self.covariance = self.hess_inv
@@ -272,23 +275,24 @@ class CLResults:
                 and data_struct.num_panels is not None
             ):
                 # Cluster-robust standard errors
-                grad_g = segment_sum(
-                    optim_res.grad_n,
-                    data_struct.panels_of_cases,
-                    num_segments=data_struct.num_panels,
-                )
-                B = grad_g.T @ grad_g
-                robust_cov = self.hess_inv @ B @ self.hess_inv
                 G = data_struct.num_panels
                 if G < 2:
                     raise ValueError(
                         "Cluster-robust covariance requires at least two panels."
                     )
-                correction = G / (G - 1) if inference.finite_sample_correction else 1.0
-                self.covariance = robust_cov * correction
+                grad_g = segment_sum(
+                    optim_res.grad_n,
+                    data_struct.panels_of_cases,
+                    num_segments=G,
+                )
+                self.covariance = _robust_covariance(
+                    self.hess_inv, grad_g, inference.finite_sample_correction
+                )
             else:
                 # Standard Huber-White Robust Standard Errors
-                self.covariance = _robust_covariance(self.hess_inv, optim_res.grad_n)
+                self.covariance = _robust_covariance(
+                    self.hess_inv, optim_res.grad_n, inference.finite_sample_correction
+                )
         else:
             self.covariance = self.hess_inv
 
@@ -309,9 +313,13 @@ class CLResults:
         else:
             self.stderr = jnp.sqrt(jnp.diag(self.covariance))
 
-        self.zvalues = self.coeff_ / self.stderr
+        self.zvalues = onp.array(self.coeff_ / self.stderr, dtype=onp.float64)
         self.pvalues = 2 * norm.cdf(-onp.abs(self.zvalues))
         if self.model.numeraire_idx is not None:
+            # The softplus transform makes the constrained coefficient strictly
+            # negative by construction, so a test against zero is vacuous: the
+            # null is excluded by the parameterization, not by the data.
+            self.zvalues[self.model.numeraire_idx] = onp.nan
             self.pvalues[self.model.numeraire_idx] = onp.nan
         self.loglikelihood = -optim_res.neg_loglik
         self.estimation_message = optim_res.message

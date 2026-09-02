@@ -1,0 +1,167 @@
+
+
+===============
+
+Details 
+
+===============
+
+The optimizer is not scale-invariant: rescaling one regressor changes the fitted coefficients, and the fit still reports success
+src/lcl/_optimize.py:110, :151, :96
+
+A conditional logit is exactly equivariant to rescaling a regressor — replacing x by x/s and β by βs must leave the fit identical. It does not. Three defaults are absolute constants applied to quantities that carry model units: the damping scale maximum(1.0, max|diag H|) floors at one, so for a small-curvature Hessian the 1e‑6 shift becomes an absolute shift that can exceed the curvature itself; max_step_norm=25.0 caps the Newton direction in parameter-space units, turning every step into a fixed-length walk; and gradient_tol=1e-5 tests the mean gradient, whose magnitude scales with the columns.
+
+My own run, 1500 cases × 3 alts, x0 rescaled by s, true MLE beta0*s = 1.0322:
+
+  scale     conv     beta0*s      beta1
+  1e+00     True    1.032207   -0.763289
+  1e-01     True    1.032206   -0.763288
+  1e-02     True    1.032073   -0.763252
+  1e-03     True    1.000954   -0.754932     <- 3% error
+  1e-05     True    0.000140   -0.603189     <- effect entirely lost
+The same mechanism breaks the class-membership model at ordinary data scales. With a demographic in dollars rather than standardized, an agent measured the fitted log likelihood moving 3.295 points and the membership slope changing by a factor of 2.03 — a quantity that is mathematically required to be invariant. Refitting with hessian_damping=1e-14 restores the standardized answer exactly.
+
+Fix. Attempt cho_factor(H_sym) with zero shift first and enter the escalation loop only on failure — which is what the comment at _optimize.py:99 already claims happens. If an initial shift is kept, size it in a diagonally preconditioned space (D⁻¹⃗²HD⁻¹⃗² + λI), which is scale-equivariant. Replace the absolute step cap with an adaptive trust radius, and stop on the Newton decrement √(g′H⁻¹g), which is invariant to column rescaling. Add an affine-equivariance regression test — it is four lines and it fails today.
+
+
+2. elasticities() is the only frame in the package keyed by internal IDs, so joining it to any sibling frame silently attaches the wrong row
+src/lcl/_prediction.py:340, :409
+
+The elasticity frame is built from the encoded Data struct, which holds contiguous zero-indexed IDs. Every other frame on the same LCLPrediction object — predicted_probs, surplus, wtp_alt_vars_by_panel — is built from ParsedData.original_* and carries the user’s labels. If the user’s IDs are strings the join raises; if they are 1-indexed integers, which is the common case, the join succeeds and attaches the wrong row.
+
+Same fitted object, user IDs panel 1..40, case 1..120, alt 1..3:
+
+  predicted_probs          panels (1,40)  cases (1,120)  alts (1,3)   Int64
+  surplus                  panels (1,40)  cases (1,120)               Int64
+  wtp_alt_vars_by_panel    panels (1,40)                              Int64
+  elasticities('quality')  panels (0,39)  cases (0,119)  alts (0,2)   UInt32
+
+  Joining the two: 58 of 360 rows survive, and the elasticity
+  attached reads -0.5289 where the truth is -0.2580.
+Three independent dimensions found this, and the package’s own tutorial prints the mismatch without comment (predicted_probs alts show air/rail; elasticities alts show u32). The elasticity arithmetic is verified correct to 1.7e‑14, which is precisely what makes a mislabeled row impossible to notice.
+
+Fix. Pass parsed_predict.original_panels/cases/alts into the LCLPrediction constructor and emit them from elasticities(), keeping the sequential IDs only as the internal join key. Add a test that fits on non-contiguous labels such as {10,20,30} and asserts the ID sets match — the current suite cannot catch this because every fixture uses 0-based contiguous IDs.
+
+
+
+3. Elasticities differentiate the design-matrix column, not the variable, so any transformed or interacted term breaks the chain rule
+src/lcl/_prediction.py:358
+
+var_idx = case_varnames.index(var) selects a single column and reads a single β. When the raw variable appears in more than one expanded column, the derivative ∑ₘ βₘ ∂Xₘ/∂x is truncated to the linear term.
+
+choice ~ price + I(price**2) + quality
+  reported own-price elasticity : -3.756
+  true value                    : -1.789      (204% error)
+
+A second draw with a stronger quadratic gave 1252% error with a sign
+reversal. For price:income the error is b_int*income/(b_price +
+b_int*income) -- data-dependent, measured between 0.27% and 13%.
+Fix. Differentiate the linear index with respect to the raw column, either by autodiff through the encoder or by walking Formulaic’s term structure to accumulate every column whose factor set contains the variable. Where the derivative cannot be constructed, refuse with a clear error rather than silently returning the linear term.
+
+
+
+4. An unseen categorical level at prediction time is silently encoded as the training reference level
+src/lcl/_encoding.py:686
+
+_get_model_matrix catches only FormulaicError. Formulaic does not raise for a category outside the fitted levels — it casts to NaN, and treatment contrasts then produce an all-zero dummy row, which is the encoding of the reference level. The package’s own null check cannot catch it because the corrupted encoding is 0.0, not null.
+
+Measured error from one unseen level:
+  class probabilities  0.148 absolute
+  choice probabilities 0.0538 absolute
+Warnings emitted across three successive predict() calls: 1
+  (formulaic's DataMismatchWarning, once per process by default)
+The same mechanism gives a brand-new alternative in a new-product simulation the base alternative’s ASC. A level renamed between the estimation and counterfactual extracts — a routine pipeline event — silently reassigns those panels to the omitted category. No test covers it.
+
+Fix. Record the raw level sets at fit time and validate them in _transform when fit=False, raising and naming the offending levels. The three-line version is warnings.simplefilter('error', DataMismatchWarning) inside _get_model_matrix, which converts the silent path into a hard failure.
+
+
+
+5. Consumer surplus levels are not identified, and the LCL path accepts the rank-deficient ASC spec that exposes it
+src/lcl/_results.py:964–1010
+
+Two observationally equivalent utility formulas, same data, same numeraire:
+
+"choice ~ price + quality + C(alt)"        (K-1 ASCs, identified)
+  loglik -353.9839884114  converged=True  mean surplus 3.894143
+"choice ~ price + quality + C(alt) - 1"    (K ASCs, deficient)
+  loglik -353.9839884111  converged=True  mean surplus 5.591469
+
+Identical loglik to 10 digits, zero warnings, 44% difference in
+reported mean consumer surplus. The ASC shift is absorbed exactly:
+  predicted gap 1.697326  vs  observed gap 1.697326
+
+Surplus CHANGES are identified:
+  mean change (cf - base):  -0.315204  vs  -0.315204   (gap 1.3e-10)
+The surplus formula itself is correct — it takes the expectation over the ratio Eₘ[logsumₘ/αₘ], matching a hand-built reference to 1.8e‑15, the same correct convention as WTP. Separately, the column silently switches units: with no numeraire declared, marginal_utility_income is set to ones and surplus reports utils rather than money, with nothing in the frame or the docs marking the difference.
+
+Fix. Extend the rank check from finding 02 to the LCL path, document that the level carries an arbitrary additive constant (the package omits even Euler’s γ, worth 2.60 money units in that run), add a surplus_change(baseline, counterfactual) helper, and label the units.
+
+
+6. Duplicate (case, alt) rows are silently accepted and shift the estimates by 11%
+src/lcl/_encoding.py:556
+
+No uniqueness check exists on the identifier pair. A duplicated row from a bad join is simply treated as another alternative in the choice set, which changes the denominator of every probability in that case. The fit reports success. Related, and in the same unguarded layer: non-finite values in X are never checked and produce a returned result object with loglik=nan and β=0; a user column literally named Intercept is silently deleted by _drop_formula_intercepts; and duplicate rows in dems_data build a mis-sized demographic matrix that surfaces only as a broadcasting TypeError.
+
+Fix. One validation pass where ParsedData is assembled — roughly forty lines — closes this finding and six others. Assert one chosen alternative per case, unique (case, alt), finite X and dems, non-null identifiers, unique dems_data panels, and no collision with the reserved _seq_* or Intercept names. Every one of these is a check the encoder already has the data for and discards.
+
+
+==================
+
+Recommended optimizer defaults
+
+======================
+
+
+Setting	Current	Recommended	Why
+hessian_damping	1e-6	0.0, escalating	Try undamped Cholesky first; the code comment already claims this. The max(1.0, ·) floor makes the shift absolute and breaks affine equivariance.
+max_step_norm	25.0	Adaptive trust radius	An absolute parameter-space cap that happens to equal large_coefficient_threshold. scipy’s trust region starts at 1.0 and expands to 1000; the adaptivity is the point.
+gradient_tol	1e-5	Newton decrement	√(g′H⁻¹g) is invariant to column rescaling and free — the Hessian is already computed. Keep 1e‑5 as the tolerance value.
+maxiter	75	75	Fine.
+line_search_maxiter	25	40	25 halvings bottom out at 3e‑8; on a badly scaled problem that is reachable.
+—	—	Secondary stopping rule	Battle-tested solvers stop on gradient and relative function change and step norm. Only the first exists here.
+check_interval	10	1–5	Overshoots by up to 9 recursions for no measurable benefit; the host sync it avoids is cheap relative to an EM step.
+
+===================================
+
+Even deeper details 
+
+===================================
+
+
+Inference and reporting
+
+Sev	Location	Finding	Consequence
+High	_results.py:507	No class-specific standard errors and no membership-coefficient table. Both are absent from the public API; cov_matrix is unindexable without importing lcl._params.	The two tables a referee asks for cannot be produced without reaching into private modules.
+High	conditional_logit.py	CLResults.covariance is left in latent space when a numeraire is declared, while coeff_ and stderr are structural.	Any user-computed delta-method WTP standard error off that covariance is wrong.
+High	utils.py:61	Case-level robust sandwich uses ∑w²ss′ instead of ∑wss′. The likelihood, Hessian SEs and clustered SEs are all replication-exact; this one is not.	Default standard errors inflated ~50% under case weights. Please, therefore, determine whether frequency or probabilities weights are the preferred interpretation in the context of latent-class conditional logit here, then implement the correct approach.
+High	utils.py:61	finite_sample_correction=False is silently ignored on the non-panel Huber–White path, which hard-codes n/(n−1).	HC1 regardless of what the user asked for; the docstring also claims the flag only affects reporting.
+High	_results.py:352	Covariance is computed from an indefinite observed information when EM has not converged, with no PD check and no warning.	Negative variances silently reported as SE = 0.
+High	_struct.py:262	covariance="robust" silently aliases to clustered whenever panels are present; InferenceOptions.cluster is a no-op.	Standard errors differ 12–15% from what was requested, with no way to get case-level Huber–White.
+High	conditional_logit.py:268	The default clustered/robust CL covariance branch is executed by no test. utils._robust_covariance sits at 44% coverage with its entire body missed.	Every conditional-logit standard error a user sees comes from untested code — where the two bugs above live.
+
+EM and optimization
+High	latent_class….py:622	optimization_history_.grad_norm reports the M-step gradient, not the observed-data score.	It read 6.7e‑9 at a point where the true score was 3.2e‑4 — the one diagnostic a user would consult is the wrong quantity. Should the observed-data score be reported separately? Or instead of the M-step gradient? Or is the M-step gradient all that's needed here?
+High	_optimize.py:151	max_step_norm=25.0 destroys the Newton unit step. On f = ½‖x−x*‖² with ‖x*‖=1e5, the solver walks 75×25 units and stops 98,120 short.	Convergence degrades from quadratic to linear with a fixed increment; iteration count scales as ‖β*‖/25.
+High	_demographics.py:120	Quasi-separation reports converged=True far from the optimum because the gradient-norm criterion ignores conditioning.	Returned θ=[1.111, 265.85], nll 0.3512, against a true optimum of [5.234, 1264.265], nll 0.0031 — 113× too high. The Newton decrement correctly rejects it (2900× discrepancy).
+
+Data, prediction, and API
+Sev	Location	Finding	Consequence
+High	_results.py:1259	Array-path dems row order is assumed, never validated when dem_panel_ids is omitted.	0.49–0.53 silent error in class probabilities when the documented ordering is violated.
+High	_encoding.py	dems_data is silently ignored when the main frame already has a column of the same name, and the two demographic paths resolve the collision in opposite directions.	The membership model is fit on the wrong column with no error.
+High	_case_utils.py:173	_diff_unchosen_chosen has an unwritten contract (sorted contiguous cases, exactly one chosen row each) that nothing asserts.	Violations produce wrong differences rather than an error. The public ingestion path guarantees it; hand-built Data structs do not.
+High	_prediction.py:169	Quintile labels Q1..Q5 are printed for unequal, non-quintile groups when the variable has ties — and PartitionType.QUINTILES hard-crashes with an opaque Polars DuplicateError on any discrete demographic.	Either a crash the user cannot diagnose, or mislabeled bins.
+High	_prediction.py:616	WTP breakdown never reports group sizes.	A WTP with a standard error was produced for an n=1 bin with nothing marking it.
+High	_prediction.py:403	No elasticity aggregation helper or guidance.	The naive mean a user reaches for differs from the policy-relevant share-weighted aggregate by 45–84%.
+High	conditional_logit.py:219	CLResults has no diagnostics, loglik, WTP or elasticities. Nine LCLResults methods have no counterpart, and no null loglik or McFadden ρ² is reported anywhere.	Conditional-logit users get none of the guardrails, by construction.
+High	__init__.py:43	lcl.fit cannot pass dems_data or progress_callback.	The entry point the README promotes cannot fit a membership model from a separate demographics frame.
+High	_struct.py:276	check_collinearity and check_separation are dead options — documented, defaulted to True, read by nothing.	A user who trusts the defaults is unprotected against exactly the failures in findings 02 and 06.
+High	tests/	No parameter-recovery test, no SE-coverage test, no prediction regression test, no malformed-input tests, and zero coverage of elasticities.	77 tests pass and would have caught none of the eight critical findings.
+
+Diagnostics to add
+Final observed-data score. The analytic gradient already exists in _analytic_derivatives. Report max|score| on the result object and warn above a threshold. This is the single most valuable addition — it makes premature EM stopping visible.
+A final Newton polish on the observed-data likelihood after EM converges. Standard practice, cheap given the exact Hessian, and it makes the reported observed information valid by construction.
+Rank and condition number of the differenced design and of the final Hessian, wired to the already-declared check_collinearity.
+Column-scale warning at encode time.
+Classification diagnostics: AIC, AIC3, entropy R², average posterior probability by class, odds of correct classification, modal class sizes. Two cautions from the runs: entropy R² was higher at the wrong K (0.698 at K=4 vs 0.375 at the true K=2) because near-degenerate classes inflate it, and AIC picked the wrong K where the BIC the package already reports picked correctly.
+Boundary flags: numeraire at min_abs, exploded membership coefficients, and a real threshold on min_effective_panels, which currently hard-codes status: "ok".
+Per-class coefficient SEs and a membership-coefficient table. Both are six lines on the existing _apply_delta_method.

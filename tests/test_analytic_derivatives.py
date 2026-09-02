@@ -14,8 +14,10 @@ import numpy as onp
 import polars as pl
 import pytest
 
+from lcl import _scheduling as scheduling
 from lcl._analytic_derivatives import _panel_scores_and_hessian
 from lcl._case_utils import _diff_unchosen_chosen
+from lcl._demographics import _compute_grouped_data_loglik_grad_hess
 from lcl._em_alg_steps import _compute_panel_logliks
 from lcl._params import ParamPacking
 from lcl._struct import Data, FitOptions, InferenceOptions
@@ -166,3 +168,114 @@ def test_fitted_covariance_matches_autodiff_formulation() -> None:
     results.inference = InferenceOptions(covariance="unadjusted")
     unadjusted = results._compute_covariance()
     onp.testing.assert_allclose(onp.asarray(unadjusted), bread, rtol=1e-8, atol=1e-10)
+
+
+@pytest.mark.parametrize("num_classes", [2, 3, 5])
+@pytest.mark.parametrize("num_dem_vars", [0, 4])
+@pytest.mark.parametrize("numeraire_idx", [None, 0])
+@pytest.mark.parametrize("param_scale", [0.3, 15.0])
+def test_batched_and_sequential_schedules_agree(
+    monkeypatch, num_classes, num_dem_vars, numeraire_idx, param_scale
+) -> None:
+    """Both contraction schedules must return the same score and Hessian.
+
+    The batched and sequential paths in ``lcl._analytic_derivatives`` differ
+    only in summation order, so forcing each one on identical inputs must give
+    results that agree to machine precision.
+    """
+    rng = onp.random.default_rng(
+        hash((num_classes, num_dem_vars, numeraire_idx, param_scale)) % 2**32
+    )
+    num_alt_vars = 4
+    data = _random_panel_data(rng, 16, num_alt_vars, num_dem_vars)
+    diff = _diff_unchosen_chosen(data)
+    packing = ParamPacking(
+        num_alt_vars=num_alt_vars,
+        num_classes=num_classes,
+        num_dem_vars=num_dem_vars,
+        numeraire_idx=numeraire_idx,
+    )
+    flat = jnp.asarray(rng.normal(size=packing.num_params) * param_scale)
+
+    monkeypatch.setattr(scheduling, "INFERENCE_THRESHOLD_BYTES", 2**62)
+    scores_batched, hessian_batched = _panel_scores_and_hessian(
+        flat, diff, data, packing
+    )
+
+    monkeypatch.setattr(scheduling, "INFERENCE_THRESHOLD_BYTES", 0)
+    scores_scan, hessian_scan = _panel_scores_and_hessian(flat, diff, data, packing)
+
+    score_scale = max(float(jnp.max(jnp.abs(scores_batched))), 1.0)
+    hessian_scale = max(float(jnp.max(jnp.abs(hessian_batched))), 1.0)
+    assert (
+        float(jnp.max(jnp.abs(scores_batched - scores_scan))) <= 1e-11 * score_scale
+    )
+    assert (
+        float(jnp.max(jnp.abs(hessian_batched - hessian_scan)))
+        <= 1e-11 * hessian_scale
+    )
+
+
+def test_sequential_schedule_still_matches_autodiff(monkeypatch) -> None:
+    """The sequential schedule must also reproduce autodiff of the likelihood."""
+    rng = onp.random.default_rng(17)
+    num_alt_vars, num_classes, num_dem_vars = 4, 3, 2
+    data = _random_panel_data(rng, 20, num_alt_vars, num_dem_vars)
+    diff = _diff_unchosen_chosen(data)
+    packing = ParamPacking(
+        num_alt_vars=num_alt_vars,
+        num_classes=num_classes,
+        num_dem_vars=num_dem_vars,
+        numeraire_idx=1,
+    )
+    flat = jnp.asarray(rng.normal(size=packing.num_params))
+
+    def panel_loglik(fp):
+        latent_betas, thetas = packing.unpack(fp)
+        structural_betas = packing.to_structural(latent_betas)
+        class_probs = packing.class_probs(thetas, data.dems, data.num_panels)
+        return _compute_panel_logliks(structural_betas, class_probs, diff, data)
+
+    scores_ad = jax.jacfwd(panel_loglik)(flat)
+    hessian_ad = jax.hessian(lambda fp: jnp.sum(panel_loglik(fp)))(flat)
+
+    monkeypatch.setattr(scheduling, "INFERENCE_THRESHOLD_BYTES", 0)
+    scores_an, hessian_an = _panel_scores_and_hessian(flat, diff, data, packing)
+
+    score_scale = max(float(jnp.max(jnp.abs(scores_ad))), 1.0)
+    hessian_scale = max(float(jnp.max(jnp.abs(hessian_ad))), 1.0)
+    assert float(jnp.max(jnp.abs(scores_ad - scores_an))) <= 1e-9 * score_scale
+    assert float(jnp.max(jnp.abs(hessian_ad - hessian_an))) <= 1e-9 * hessian_scale
+
+
+@pytest.mark.parametrize("num_classes", [2, 4])
+@pytest.mark.parametrize("num_dem_vars", [1, 5])
+def test_membership_mstep_schedules_agree(
+    monkeypatch, num_classes, num_dem_vars
+) -> None:
+    """The fractional-logit M-step must agree across contraction schedules."""
+    rng = onp.random.default_rng(hash((num_classes, num_dem_vars)) % 2**32)
+    num_panels = 40
+    data = _random_panel_data(rng, num_panels, 3, num_dem_vars)
+    targets = jnp.asarray(rng.dirichlet(onp.ones(num_classes), size=num_panels))
+    thetas = jnp.asarray(
+        rng.normal(size=(num_dem_vars + 1) * (num_classes - 1)) * 1.5
+    )
+
+    monkeypatch.setattr(scheduling, "ITERATION_THRESHOLD_BYTES", 2**62)
+    value_b, grad_b, hess_b = _compute_grouped_data_loglik_grad_hess(
+        thetas, targets, data, num_classes
+    )
+
+    monkeypatch.setattr(scheduling, "ITERATION_THRESHOLD_BYTES", 0)
+    value_s, grad_s, hess_s = _compute_grouped_data_loglik_grad_hess(
+        thetas, targets, data, num_classes
+    )
+
+    onp.testing.assert_allclose(value_s, value_b, rtol=0, atol=0)
+    onp.testing.assert_allclose(
+        onp.asarray(grad_s), onp.asarray(grad_b), rtol=1e-12, atol=1e-12
+    )
+    onp.testing.assert_allclose(
+        onp.asarray(hess_s), onp.asarray(hess_b), rtol=1e-12, atol=1e-12
+    )

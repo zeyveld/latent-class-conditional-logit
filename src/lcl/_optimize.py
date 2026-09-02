@@ -12,6 +12,7 @@ from lcl.constraints import (
 )
 from lcl._case_utils import _to_structural_betas
 from lcl._struct import OptimizationOptions, OptimizeResult
+from lcl.utils import _invert_information
 
 
 class NewtonState(NamedTuple):
@@ -305,7 +306,7 @@ def _minimize(
             p_struct, *inner_args
         )
         grad, _, hessian = pullback_negative_derivatives(
-            p, numeraire_idx, grad_struct, score_rows, hessian
+            p, numeraire_idx, grad_struct, score_rows, hessian, numeraire_min_abs
         )
         return val / scale_factor, grad / scale_factor, hessian / scale_factor
 
@@ -348,9 +349,11 @@ def _minimize(
     )
     (neg_loglik, grad_n), grad_struct, hessian = final_eval
     grad, grad_n, hessian = pullback_negative_derivatives(
-        params, numeraire_idx, grad_struct, grad_n, hessian
+        params, numeraire_idx, grad_struct, grad_n, hessian, numeraire_min_abs
     )
-    Hinv = jnp.linalg.pinv(0.5 * (hessian + hessian.T))
+    Hinv, information_diagnostics = _invert_information(
+        hessian, label="conditional-logit information matrix"
+    )
 
     return OptimizeResult(
         success=success,
@@ -363,4 +366,5 @@ def _minimize(
         nit=iterations,
         nfev=int(state.num_fun_eval + state.num_grad_hess_eval + 1),
         njev=int(state.num_grad_hess_eval + 1),
+        information_diagnostics=information_diagnostics,
     )

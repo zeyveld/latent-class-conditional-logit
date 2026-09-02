@@ -2,10 +2,12 @@ import logging
 
 import jax.numpy as jnp
 from equinox import filter_jit
+from jax import lax
 from jax.nn import log_softmax, softmax
 from jaxtyping import Array, Float64
 
 from lcl._optimize import exact_newton_minimize
+from lcl._scheduling import ITERATION_THRESHOLD_BYTES, use_sequential
 from lcl._struct import Data, OptimizationOptions
 
 logger = logging.getLogger(__name__)
@@ -151,6 +153,10 @@ def _compute_grouped_data_loglik_grad_hess(
     negative-loglik gradient contribution for panel ``n`` is
     ``z_n * (sum(w_n) * p_n - w_n)``. The corresponding Hessian block for classes
     ``k`` and ``l`` is ``sum(w_n) * p_nk * (1[k=l] - p_nl) * z_n z_n'``.
+
+    The gradient is contracted as a single matrix product rather than by summing
+    a per-panel tensor, and the Hessian follows whichever schedule
+    :mod:`~lcl._scheduling` selects for the problem size.
     """
     thetas = thetas.reshape(data.num_dem_vars + 1, num_classes - 1)
     logits = _class_membership_logits(thetas, data)
@@ -161,22 +167,86 @@ def _compute_grouped_data_loglik_grad_hess(
 
     dem_design = _demographic_design_matrix(data)
     row_weights = class_probs_by_panel.sum(axis=1)
-    grad_n = dem_design[:, :, None] * (
-        row_weights[:, None, None] * predicted_nonbaseline[:, None, :]
-        - class_probs_by_panel[:, None, 1:]
-    )
-    grad = grad_n.sum(axis=0).ravel()
 
-    class_cov = predicted_nonbaseline[:, :, None] * (
-        jnp.eye(num_classes - 1, dtype=thetas.dtype)[None, :, :]
-        - predicted_nonbaseline[:, None, :]
-    )
-    class_cov = row_weights[:, None, None] * class_cov
-    hess = jnp.einsum("ni,nj,nkl->ikjl", dem_design, dem_design, class_cov).reshape(
-        thetas.size, thetas.size
-    )
+    # z_n (W_n p_n - w_n) summed over panels, as one GEMM.  Building the
+    # (panels, dems + 1, classes - 1) tensor only to reduce it away is the
+    # single largest avoidable allocation in this M-step.
+    residual = (
+        row_weights[:, None] * predicted_nonbaseline - class_probs_by_panel[:, 1:]
+    )  # (panels, classes - 1)
+    grad = (dem_design.T @ residual).ravel()
+
+    hess = _class_covariance_gram(
+        dem_design, row_weights, predicted_nonbaseline
+    ).reshape(thetas.size, thetas.size)
 
     return neg_loglik, grad, hess
+
+
+def _class_covariance_gram(
+    Z: Float64[Array, "panels dem_vars_plus_one"],
+    row_weights: Float64[Array, "panels"],
+    probs: Float64[Array, "panels classes_minus_one"],
+) -> Float64[
+    Array, "dem_vars_plus_one classes_minus_one dem_vars_plus_one classes_minus_one"
+]:
+    """Contract ``sum_n Z_ni Z_nj W_n p_nk (d_kl - p_nl)`` into an ``(i,k,j,l)`` block.
+
+    A three-operand ``einsum`` contracts pairwise and materializes a
+    ``(panels, dem_vars_plus_one, dem_vars_plus_one)`` intermediate, which at
+    large panel counts dominates peak memory for the whole M-step.  Above the
+    :mod:`~lcl._scheduling` threshold the class pairs are scanned instead, each
+    recomputing its scalar coefficient from the ``(panels, classes_minus_one)``
+    probabilities and contributing one ``Z' diag(c_kl) Z`` Gram matrix.  Neither
+    the dense per-panel covariance nor the ``(panels, dem, dem)`` intermediate
+    is then built.  The two orders are mathematically identical.
+
+    Parameters
+    ----------
+    Z : Float64[Array, "panels dem_vars_plus_one"]
+        Intercept-augmented demographic design matrix.
+    row_weights : Float64[Array, "panels"]
+        Total fractional weight on each panel, ``sum_c w_nc``.
+    probs : Float64[Array, "panels classes_minus_one"]
+        Predicted class probabilities, non-baseline classes only.
+
+    Returns
+    -------
+    Array
+        Block with axes ordered ``(dem, class, dem, class)`` to match the
+        row-major flattening of the coefficient matrix.
+    """
+    num_panels, num_dem = Z.shape
+    num_tail = probs.shape[1]
+    eye_tail = jnp.eye(num_tail, dtype=Z.dtype)
+
+    if not use_sequential(
+        num_panels, num_dem, num_dem, threshold=ITERATION_THRESHOLD_BYTES
+    ):
+        class_cov = (
+            row_weights[:, None, None]
+            * probs[:, :, None]
+            * (eye_tail[None, :, :] - probs[:, None, :])
+        )
+        return jnp.einsum("ni,nj,nkl->ikjl", Z, Z, class_cov)
+
+    pairs = jnp.stack(
+        jnp.meshgrid(jnp.arange(num_tail), jnp.arange(num_tail), indexing="ij"),
+        axis=-1,
+    ).reshape(-1, 2)
+
+    def one_block(carry: None, pair: Array) -> tuple[None, Array]:
+        """Contract one (k, l) class pair into a (dem, dem) Gram matrix."""
+        row, col = pair[0], pair[1]
+        delta = jnp.where(row == col, 1.0, 0.0)
+        coefficient = row_weights * probs[:, row] * (delta - probs[:, col])
+        return carry, (Z * coefficient[:, None]).T @ Z
+
+    _, blocks = lax.scan(one_block, None, pairs)  # (tail * tail, dem, dem)
+    # (k, l, i, j) -> (i, k, j, l)
+    return jnp.transpose(
+        blocks.reshape(num_tail, num_tail, num_dem, num_dem), (2, 0, 3, 1)
+    )
 
 
 @filter_jit

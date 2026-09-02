@@ -289,6 +289,13 @@ class OptimizeResult:
         Matt Haberland, Tyler Reddy, David Cournapeau, Evgeni Burovski et al.
         "SciPy 1.0: fundamental algorithms for scientific computing in Python."
         Nature methods 17, no. 3 (2020): 261-272.
+
+    Attributes
+    ----------
+    information_diagnostics : lcl.utils.InformationDiagnostics | None
+        Rank and conditioning summary for the information matrix that produced
+        ``hess_inv``.  Typed loosely to keep this module free of package
+        imports.
     """
 
     success: bool
@@ -301,6 +308,7 @@ class OptimizeResult:
     nit: int
     nfev: int
     njev: int
+    information_diagnostics: Any = None
 
 
 class EMVars(NamedTuple):

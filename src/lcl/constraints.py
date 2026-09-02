@@ -117,11 +117,31 @@ def pullback_negative_gradient(
     raw_params: Float64[Array, "..."],
     index: int | None,
     grad_struct: Float64[Array, "..."],
+    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> Float64[Array, "..."]:
-    """Pull a structural gradient back to unconstrained parameter space."""
+    """Pull a structural gradient back to unconstrained parameter space.
+
+    Parameters
+    ----------
+    raw_params : Array
+        Unconstrained optimizer parameters.
+    index : int | None
+        Index of the constrained variable.  If ``None``, ``grad_struct`` is
+        returned unchanged.
+    grad_struct : Array
+        Structural gradient evaluated at the transformed parameters.
+    min_abs : float, default=1e-5
+        Minimum absolute magnitude used by the forward transform.  Must match
+        the value used to produce ``grad_struct``.
+
+    Returns
+    -------
+    Array
+        Gradient in unconstrained parameter space.
+    """
     if index is None:
         return grad_struct
-    derivative = NegativeCoefficient().jacobian_diag(raw_params[index])
+    derivative = NegativeCoefficient(min_abs=min_abs).jacobian_diag(raw_params[index])
     return grad_struct.at[index].multiply(derivative)
 
 
@@ -129,11 +149,31 @@ def pullback_negative_score_rows(
     raw_params: Float64[Array, "..."],
     index: int | None,
     score_rows: Float64[Array, "..."],
+    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> Float64[Array, "..."]:
-    """Pull case-level score rows back to unconstrained parameter space."""
+    """Pull case-level score rows back to unconstrained parameter space.
+
+    Parameters
+    ----------
+    raw_params : Array
+        Unconstrained optimizer parameters.
+    index : int | None
+        Index of the constrained variable.  If ``None``, ``score_rows`` is
+        returned unchanged.
+    score_rows : Array
+        Structural per-observation score contributions.
+    min_abs : float, default=1e-5
+        Minimum absolute magnitude used by the forward transform.  Must match
+        the value used to produce ``score_rows``.
+
+    Returns
+    -------
+    Array
+        Score rows in unconstrained parameter space.
+    """
     if index is None:
         return score_rows
-    derivative = NegativeCoefficient().jacobian_diag(raw_params[index])
+    derivative = NegativeCoefficient(min_abs=min_abs).jacobian_diag(raw_params[index])
     return score_rows.at[:, index].multiply(derivative)
 
 
@@ -142,6 +182,7 @@ def pullback_negative_hessian(
     index: int | None,
     grad_struct: Float64[Array, "..."],
     hessian_struct: Float64[Array, "..."],
+    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> Float64[Array, "..."]:
     """Pull a structural Hessian back to unconstrained parameter space.
 
@@ -156,6 +197,9 @@ def pullback_negative_hessian(
         Structural gradient evaluated at the transformed parameters.
     hessian_struct : Array
         Structural Hessian evaluated at the transformed parameters.
+    min_abs : float, default=1e-5
+        Minimum absolute magnitude used by the forward transform.  Must match
+        the value used to produce ``grad_struct`` and ``hessian_struct``.
 
     Returns
     -------
@@ -164,7 +208,7 @@ def pullback_negative_hessian(
     """
     if index is None:
         return hessian_struct
-    constraint = NegativeCoefficient()
+    constraint = NegativeCoefficient(min_abs=min_abs)
     derivative = constraint.jacobian_diag(raw_params[index])
     hessian = hessian_struct.at[index, :].multiply(derivative)
     hessian = hessian.at[:, index].multiply(derivative)
@@ -178,15 +222,45 @@ def pullback_negative_derivatives(
     grad_struct: Float64[Array, "..."],
     score_rows_struct: Float64[Array, "..."],
     hessian_struct: Float64[Array, "..."],
+    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
 ) -> tuple[
     Float64[Array, "..."],
     Float64[Array, "..."],
     Float64[Array, "..."],
 ]:
-    """Pull gradient, score rows, and Hessian through a negative constraint."""
-    grad = pullback_negative_gradient(raw_params, index, grad_struct)
-    score_rows = pullback_negative_score_rows(raw_params, index, score_rows_struct)
-    hessian = pullback_negative_hessian(raw_params, index, grad_struct, hessian_struct)
+    """Pull gradient, score rows, and Hessian through a negative constraint.
+
+    Parameters
+    ----------
+    raw_params : Array
+        Unconstrained optimizer parameters.
+    index : int | None
+        Index of the constrained variable.
+    grad_struct : Array
+        Structural gradient evaluated at the transformed parameters.
+    score_rows_struct : Array
+        Structural per-observation score contributions.
+    hessian_struct : Array
+        Structural Hessian evaluated at the transformed parameters.
+    min_abs : float, default=1e-5
+        Minimum absolute magnitude used by the forward transform.  Must match
+        the value used to produce the structural derivatives.  The current
+        transform's derivatives do not depend on it, but passing the caller's
+        value keeps the chain rule correct for any constraint whose derivatives
+        do.
+
+    Returns
+    -------
+    tuple[Array, Array, Array]
+        Gradient, score rows, and Hessian in unconstrained parameter space.
+    """
+    grad = pullback_negative_gradient(raw_params, index, grad_struct, min_abs)
+    score_rows = pullback_negative_score_rows(
+        raw_params, index, score_rows_struct, min_abs
+    )
+    hessian = pullback_negative_hessian(
+        raw_params, index, grad_struct, hessian_struct, min_abs
+    )
     return grad, score_rows, hessian
 
 

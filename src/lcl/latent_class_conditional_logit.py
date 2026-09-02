@@ -611,7 +611,12 @@ class LatentClassConditionalLogit(ChoiceModel):
                 structural_beta, diff_unchosen_chosen, weights
             )
             grad_raw, _, _ = pullback_negative_derivatives(
-                raw_beta, self.numeraire_idx, grad, score_rows, hessian
+                raw_beta,
+                self.numeraire_idx,
+                grad,
+                score_rows,
+                hessian,
+                self.numeraire_min_abs,
             )
             gradient_scale = jnp.maximum(jnp.sum(weights), 1.0)
             rows.append(

@@ -36,6 +36,7 @@ from lcl._struct import (
     ParsedData,
     PastChoicesData,
 )
+from lcl.utils import _invert_information
 
 logger = logging.getLogger(__name__)
 
@@ -242,6 +243,8 @@ class LCLResults:
         )
         self.flat_params = self._pack_params()
         self.num_params = self._param_packing.num_params
+        # Populated by _compute_covariance; stays None when inference is skipped.
+        self.information_diagnostics: Any = None
         self.cov_matrix = self._compute_covariance()
 
         # Compute information criteria
@@ -349,7 +352,11 @@ class LCLResults:
             J, H = _panel_scores_and_hessian(
                 flat_params, diff_unchosen_chosen, data, self._param_packing
             )
-            H_inv = jax.device_put(onp.linalg.pinv(onp.asarray(-H)), cpu)
+            H_inv, diagnostics = _invert_information(
+                -H, label="latent-class observed information matrix"
+            )
+            self.information_diagnostics = diagnostics
+            H_inv = jax.device_put(H_inv, cpu)
 
             if self.inference.covariance == "unadjusted":
                 return _symmetrize(H_inv)
@@ -701,6 +708,52 @@ class LCLResults:
                 "message": "Number of choice situations.",
             },
         ]
+
+        if self.information_diagnostics is not None:
+            info = self.information_diagnostics
+            rows.append(
+                {
+                    "section": "inference",
+                    "check": "information_rank",
+                    "value": float(info.rank),
+                    "status": "warning" if info.rank_deficient else "ok",
+                    "message": (
+                        f"Numerical rank of the observed information out of "
+                        f"{info.num_params} parameters. A deficient rank means "
+                        "some standard errors are not identified."
+                    ),
+                }
+            )
+            rows.append(
+                {
+                    "section": "inference",
+                    "check": "information_condition_number",
+                    "value": float(info.condition_number),
+                    "status": (
+                        "warning"
+                        if not info.positive_definite or info.condition_number > 1e12
+                        else "ok"
+                    ),
+                    "message": (
+                        "Ratio of largest to smallest eigenvalue of the observed "
+                        "information. Large values indicate weakly identified "
+                        "parameter directions."
+                    ),
+                }
+            )
+            rows.append(
+                {
+                    "section": "inference",
+                    "check": "information_min_eigenvalue",
+                    "value": float(info.smallest_eigenvalue),
+                    "status": "ok" if info.positive_definite else "warning",
+                    "message": (
+                        "Smallest eigenvalue of the observed information. Values "
+                        "at or below zero indicate a saddle point rather than a "
+                        "maximum."
+                    ),
+                }
+            )
 
         if self.em_res.class_probs_by_panel is not None:
             posterior = onp.asarray(self.em_res.class_probs_by_panel)

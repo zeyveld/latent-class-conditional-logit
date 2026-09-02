@@ -94,7 +94,7 @@ def _get_starting_vals(
             )
 
             grad, aux, hessian = pullback_negative_derivatives(
-                p, numeraire_idx, grad, aux, hessian
+                p, numeraire_idx, grad, aux, hessian, numeraire_min_abs
             )
             return (
                 val / objective_scale,
