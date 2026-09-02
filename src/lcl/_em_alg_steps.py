@@ -19,13 +19,8 @@ from lcl._demographics import _predict_class_membership_probs, _update_thetas
 from lcl._jax_compat import Mesh, NamedSharding, P, shard_map
 from lcl._kernels import _diff_log_kernels
 from lcl._optimize import exact_newton_minimize
-from lcl._struct import (
-    Data,
-    DiffUnchosenChosen,
-    EMVars,
-    FitOptions,
-    OptimizationOptions,
-)
+from lcl.options import FitOptions, OptimizationOptions
+from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
 
 def _em_step(
@@ -53,9 +48,9 @@ def _em_step(
         Core choice data and metadata.
     num_classes : int
         Number of latent classes.
-    optimization_options : :class:`~lcl._struct.OptimizationOptions`
+    optimization_options : :class:`~lcl.options.OptimizationOptions`
         Optimization settings for the exact-Newton MLE solver.
-    fit_options : :class:`~lcl._struct.FitOptions`
+    fit_options : :class:`~lcl.options.FitOptions`
         EM settings, including device count and reproducible partition seed.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable.
@@ -227,9 +222,9 @@ def _update_betas(
         Posterior class membership probabilities to act as case weights.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix.
-    optimization_options : :class:`~lcl._struct.OptimizationOptions`
+    optimization_options : :class:`~lcl.options.OptimizationOptions`
         MLE solver configurations.
-    fit_options : :class:`~lcl._struct.FitOptions`
+    fit_options : :class:`~lcl.options.FitOptions`
         EM settings, including the number of devices.
     numeraire_idx : int | None
         Column index of the numeraire variable.
@@ -321,7 +316,7 @@ def _distributed_update(
         Optional column index constrained through the softplus transform.
     numeraire_min_abs : float
         Minimum absolute value imposed on the numeraire coefficient.
-    optimization_options : :class:`~lcl._struct.OptimizationOptions`
+    optimization_options : :class:`~lcl.options.OptimizationOptions`
         Newton optimization settings.
 
     Returns

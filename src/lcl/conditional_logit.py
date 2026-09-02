@@ -1,6 +1,7 @@
 """Estimation and prediction for conditional logit."""
 
 import logging
+import warnings
 from collections.abc import Mapping, Sequence
 from time import time
 from typing import Any
@@ -24,17 +25,21 @@ with install_import_hook("lcl", "beartype.beartype"):
         _to_structural_betas,
     )
     from lcl._choice_model import ChoiceModel
-    from lcl._kernels import _choice_probabilities_and_logsum
+    from lcl._diagnostics import LCLDiagnostics
+    from lcl._encoding import _coerce_frame
+    from lcl._kernels import _choice_probabilities_and_logsum, _diff_logit_components
+    from lcl._inference import _robust_covariance
     from lcl._logging import log_or_print
     from lcl._optimize import _minimize
-    from lcl._presentation import format_cl_coefficients
-    from lcl._struct import (
-        Data,
+    from lcl.options import (
         InferenceOptions,
+        Options,
         OptimizationOptions,
-        OptimizeResult,
+        _resolve_options,
     )
-from lcl.utils import _robust_covariance
+    from lcl._presentation import format_cl_coefficients
+    from lcl._prediction import CLPrediction, resolve_panel_weights
+    from lcl._struct import Data, OptimizeResult
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +92,7 @@ class ConditionalLogit(ChoiceModel):
             | None
         ) = None,
         init_beta: ArrayLike | None = None,
+        options: Options | None = None,
         optimization_options: OptimizationOptions | None = None,
         inference: InferenceOptions | None = None,
     ) -> "CLResults":
@@ -134,10 +140,13 @@ class ConditionalLogit(ChoiceModel):
         :class:`~lcl.conditional_logit.CLResults`
             Results container housing coefficients, robust standard errors, and fit statistics.
         """
-        if optimization_options is None:
-            optimization_options = OptimizationOptions()
-        if inference is None:
-            inference = InferenceOptions()
+        resolved_options = _resolve_options(
+            options,
+            optimization_options=optimization_options,
+            inference=inference,
+        )
+        optimization_options = resolved_options.optimization
+        inference = resolved_options.inference
 
         # If no panels are provided, we substitute cases for panels purely to satisfy
         # the contiguity checks in the ingestion engine.
@@ -213,6 +222,7 @@ class ConditionalLogit(ChoiceModel):
             inference=inference,
             estim_time_sec=estim_time_sec,
             has_panels=panels_col is not None,
+            case_weights=weights_arr,
         )
 
 
@@ -231,6 +241,7 @@ class CLResults:
         inference: InferenceOptions,
         estim_time_sec: float,
         has_panels: bool,
+        case_weights: ArrayLike,
     ) -> None:
         """Compute inference summaries from a fitted conditional-logit model.
 
@@ -242,16 +253,21 @@ class CLResults:
             Optimizer output containing parameters, gradients, and Hessian inverse.
         data_struct : :class:`~lcl._struct.Data`
             Encoded estimation data.
-        inference : :class:`~lcl._struct.InferenceOptions`
+        inference : :class:`~lcl.options.InferenceOptions`
             Covariance and standard-error configuration.
         estim_time_sec : float
             Wall-clock estimation time in seconds.
         has_panels : bool
             Whether robust covariance should cluster scores at the panel level.
+        case_weights : ArrayLike
+            Frequency weights aligned with encoded choice situations.
         """
         self.model = model_spec
         self.data = data_struct
-        self.convergence = optim_res.success
+        self.inference = inference
+        self.has_panels = has_panels
+        self.case_weights = jnp.asarray(case_weights)
+        self.converged = optim_res.success
         self.latent_coeff_ = optim_res.params
 
         # Recover structural parameters if numeraire was applied
@@ -267,10 +283,11 @@ class CLResults:
         # multiplier; they differ only in the level at which scores are summed.
         if inference.skip:
             self.hess_inv = jnp.full_like(self.hess_inv, jnp.nan)
-            self.covariance = self.hess_inv
-        elif inference.covariance == "clustered":
+            self.cov_matrix = self.hess_inv
+        elif inference.covariance in {"clustered", "robust"}:
             if (
-                has_panels
+                inference.covariance == "clustered"
+                and has_panels
                 and data_struct.panels_of_cases is not None
                 and data_struct.num_panels is not None
             ):
@@ -281,20 +298,23 @@ class CLResults:
                         "Cluster-robust covariance requires at least two panels."
                     )
                 grad_g = segment_sum(
-                    optim_res.grad_n,
+                    optim_res.grad_n * jnp.asarray(case_weights)[:, None],
                     data_struct.panels_of_cases,
                     num_segments=G,
                 )
-                self.covariance = _robust_covariance(
+                self.cov_matrix = _robust_covariance(
                     self.hess_inv, grad_g, inference.finite_sample_correction
                 )
             else:
                 # Standard Huber-White Robust Standard Errors
-                self.covariance = _robust_covariance(
-                    self.hess_inv, optim_res.grad_n, inference.finite_sample_correction
+                self.cov_matrix = _robust_covariance(
+                    self.hess_inv,
+                    optim_res.grad_n,
+                    inference.finite_sample_correction,
+                    weights=case_weights,
                 )
         else:
-            self.covariance = self.hess_inv
+            self.cov_matrix = self.hess_inv
 
         # Apply delta method for standard errors if numeraire (softplus) is used
         if self.model.numeraire_idx is not None:
@@ -308,10 +328,11 @@ class CLResults:
                 )
 
             jac = jacrev(struct_fn)(self.latent_coeff_)
-            struct_cov = jac @ self.covariance @ jac.T
+            struct_cov = jac @ self.cov_matrix @ jac.T
+            self.cov_matrix = 0.5 * (struct_cov + struct_cov.T)
             self.stderr = jnp.sqrt(jnp.diag(struct_cov))
         else:
-            self.stderr = jnp.sqrt(jnp.diag(self.covariance))
+            self.stderr = jnp.sqrt(jnp.diag(self.cov_matrix))
 
         self.zvalues = onp.array(self.coeff_ / self.stderr, dtype=onp.float64)
         self.pvalues = 2 * norm.cdf(-onp.abs(self.zvalues))
@@ -333,6 +354,11 @@ class CLResults:
         )
         self.total_fun_eval = optim_res.nfev
         self.grad_n = optim_res.grad_n
+        self.observed_score_max = float(
+            jnp.max(
+                jnp.abs(jnp.sum(optim_res.grad_n * self.case_weights[:, None], axis=0))
+            )
+        )
 
         # Information criteria
         self.aic = 2 * len(self.coeff_) - 2 * self.loglikelihood
@@ -344,13 +370,20 @@ class CLResults:
             jnp.log(self.information_criterion_sample_size) * len(self.coeff_)
             - 2 * self.loglikelihood
         )
-        self.abic = (
+        self.adjusted_bic = (
             jnp.log((self.information_criterion_sample_size + 2) / 24)
             * len(self.coeff_)
             - 2 * self.loglikelihood
         )
+        alternatives_per_case = jnp.bincount(
+            data_struct.cases, length=data_struct.num_cases
+        )
+        self.null_loglikelihood = -jnp.sum(
+            self.case_weights * jnp.log(alternatives_per_case)
+        )
+        self.mcfadden_r2 = 1.0 - self.loglikelihood / self.null_loglikelihood
 
-        if not self.convergence:
+        if not self.converged:
             logger.warning(
                 "The optimization did not converge after %s iterations. Message: %s",
                 self.total_iter,
@@ -379,6 +412,40 @@ class CLResults:
                 }
             )
         return pl.DataFrame(rows)
+
+    def parameter_names(self) -> list[str]:
+        """Return names aligned with covariance rows and columns."""
+        return list(self.model.case_varnames)
+
+    @property
+    def convergence(self) -> bool:
+        """Deprecated alias for :attr:`converged`."""
+        warnings.warn(
+            "CLResults.convergence is deprecated; use converged.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.converged
+
+    @property
+    def covariance(self) -> Array:
+        """Deprecated alias for :attr:`cov_matrix`."""
+        warnings.warn(
+            "CLResults.covariance is deprecated; use cov_matrix.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.cov_matrix
+
+    @property
+    def abic(self) -> Array:
+        """Deprecated alias for :attr:`adjusted_bic`."""
+        warnings.warn(
+            "CLResults.abic is deprecated; use adjusted_bic.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.adjusted_bic
 
     def summarize_betas(
         self,
@@ -418,13 +485,93 @@ class CLResults:
         """Alias for :meth:`summarize_betas`."""
         return self.summarize_betas(num_decimals=num_decimals, show=show)
 
+    def loglik(self, data: Any, *, per_case: bool = False) -> float | pl.DataFrame:
+        """Score observed choices with the fitted conditional-logit encoder."""
+        parsed = self.model._transform_data(data, require_choice=True)
+        data_struct, weights, _ = self.model._setup_data(parsed)
+        differenced = _diff_unchosen_chosen(data_struct)
+        log_probabilities, _ = _diff_logit_components(
+            differenced.X,
+            self.coeff_,
+            differenced.cases,
+            differenced.num_cases,
+        )
+        if not per_case:
+            return float(jnp.sum(log_probabilities * weights))
+        if parsed.original_cases is None:
+            raise ValueError("Original case identifiers are unavailable.")
+        first_case_rows = onp.asarray(data_struct.cases) != onp.roll(
+            onp.asarray(data_struct.cases), 1
+        )
+        first_case_rows[0] = True
+        return pl.DataFrame(
+            {
+                "case": onp.asarray(parsed.original_cases[first_case_rows]),
+                "log_likelihood": onp.asarray(log_probabilities),
+            }
+        )
+
+    def diagnostics(self) -> LCLDiagnostics:
+        """Return convergence, fit, score, and information diagnostics."""
+        rows: list[dict[str, object]] = [
+            {
+                "section": "fit",
+                "check": "converged",
+                "value": bool(self.converged),
+                "status": "ok" if self.converged else "warning",
+                "message": "Conditional-logit optimizer convergence flag.",
+            },
+            {
+                "section": "fit",
+                "check": "observed_score_max",
+                "value": self.observed_score_max,
+                "status": "warning" if self.observed_score_max > 1e-4 else "ok",
+                "message": "Maximum absolute component of the weighted score.",
+            },
+            {
+                "section": "fit",
+                "check": "mcfadden_r2",
+                "value": float(self.mcfadden_r2),
+                "status": "ok",
+                "message": "McFadden pseudo-R-squared against equal choice shares.",
+            },
+        ]
+        if self.information_diagnostics is not None:
+            info = self.information_diagnostics
+            rows.extend(
+                [
+                    {
+                        "section": "inference",
+                        "check": "information_rank",
+                        "value": info.rank,
+                        "status": "warning" if info.rank_deficient else "ok",
+                        "message": "Numerical rank of the information matrix.",
+                    },
+                    {
+                        "section": "inference",
+                        "check": "information_condition_number",
+                        "value": info.condition_number,
+                        "status": (
+                            "warning"
+                            if not info.positive_definite
+                            or info.condition_number > 1e12
+                            else "ok"
+                        ),
+                        "message": "Condition number of the information matrix.",
+                    },
+                ]
+            )
+        return LCLDiagnostics(pl.DataFrame(rows))
+
     def predict(
         self,
         data: Any,
-        alts_col: str,
-        cases_col: str,
+        *,
+        alts_col: str | None = None,
+        cases_col: str | None = None,
         panels_col: str | None = None,
-    ) -> pl.DataFrame:
+        panel_weights: str | Mapping[object, float] | Sequence[float] | None = None,
+    ) -> CLPrediction:
         """Predict conditional choice probabilities for a given set of alternatives.
 
         Parameters
@@ -444,21 +591,97 @@ class CLResults:
         pl.DataFrame
             DataFrame containing the computed out-of-sample choice probabilities.
         """
+        if alts_col is not None or cases_col is not None:
+            warnings.warn(
+                "alts_col and cases_col are no longer needed by predict(); the "
+                "fitted encoder supplies identifier columns.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         parsed = self.model._transform_data(data)
-        probs, _ = _choice_probabilities_and_logsum(
-            parsed.X,
+        if (
+            parsed.original_alts is None
+            or parsed.original_cases is None
+            or parsed.original_panels is None
+        ):
+            raise ValueError("Original prediction identifiers are unavailable.")
+        data_struct, _, _ = self.model._setup_data(parsed)
+        probs, logsum = _choice_probabilities_and_logsum(
+            data_struct.X,
             self.coeff_[:, None],
-            parsed.cases,
-            int(jnp.max(parsed.cases)) + 1,
+            data_struct.cases,
+            data_struct.num_cases,
         )
-
-        result_dict = {
-            "cases": parsed.original_cases,
-            "alts": parsed.original_alts,
-            "choice_probs": onp.array(probs[:, 0], dtype=onp.float64),
-        }
-
-        if panels_col is not None:
-            result_dict["panels"] = parsed.original_panels
-
-        return pl.DataFrame(result_dict)
+        predicted_probs = pl.DataFrame(
+            {
+                "panels": parsed.original_panels,
+                "cases": parsed.original_cases,
+                "alts": parsed.original_alts,
+                "choice_probs": onp.asarray(probs[:, 0], dtype=onp.float64),
+            }
+        )
+        first_case_rows = onp.asarray(data_struct.cases) != onp.roll(
+            onp.asarray(data_struct.cases), 1
+        )
+        first_case_rows[0] = True
+        marginal_utility_income = (
+            1.0
+            if self.model.numeraire_idx is None
+            else float(-self.coeff_[self.model.numeraire_idx])
+        )
+        surplus = pl.DataFrame(
+            {
+                "panels": onp.asarray(parsed.original_panels[first_case_rows]),
+                "cases": onp.asarray(parsed.original_cases[first_case_rows]),
+                "surplus": onp.asarray(logsum[:, 0] / marginal_utility_income),
+            }
+        )
+        if data_struct.panels is None or data_struct.num_panels is None:
+            raise ValueError("Panel identifiers are required for prediction.")
+        first_panel_rows = onp.asarray(data_struct.panels) != onp.roll(
+            onp.asarray(data_struct.panels), 1
+        )
+        first_panel_rows[0] = True
+        panel_ids = onp.asarray(parsed.original_panels[first_panel_rows])
+        wtp_variables = [
+            variable
+            for idx, variable in enumerate(self.model.case_varnames)
+            if idx != self.model.numeraire_idx
+        ]
+        if self.model.numeraire_idx is None:
+            wtp_values = onp.empty((data_struct.num_panels, 0))
+            wtp_variables = []
+        else:
+            ratios = (
+                onp.delete(onp.asarray(self.coeff_), self.model.numeraire_idx)
+                / marginal_utility_income
+            )
+            wtp_values = onp.repeat(ratios[None, :], data_struct.num_panels, axis=0)
+        wtp_by_panel = pl.DataFrame(wtp_values, schema=wtp_variables).with_columns(
+            pl.Series("panels", panel_ids)
+        )
+        encoder = self.model._encoder
+        if encoder is None:
+            raise ValueError("The fitted data encoder is unavailable.")
+        raw_data = _coerce_frame(data).sort(
+            list(
+                dict.fromkeys([encoder.panels_col, encoder.cases_col, encoder.alts_col])
+            )
+        )
+        resolved_panel_weights = resolve_panel_weights(
+            panel_weights, panel_ids, raw_data, encoder.panels_col
+        )
+        return CLPrediction(
+            predicted_probs_df=predicted_probs,
+            surplus_df=surplus,
+            wtp_alt_vars_by_panel_df=wtp_by_panel,
+            predict_data=data_struct,
+            results=self,
+            class_probs_by_panel=jnp.ones((data_struct.num_panels, 1)),
+            partition_data_df=None,
+            original_alts=parsed.original_alts,
+            original_cases=parsed.original_cases,
+            original_panels=parsed.original_panels,
+            raw_prediction_data=raw_data,
+            panel_weights=resolved_panel_weights,
+        )

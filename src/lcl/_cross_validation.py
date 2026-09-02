@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from typing import Any
 
 import numpy as onp
 import polars as pl
 
-from lcl._struct import (
+from lcl.options import (
     FitOptions,
     InferenceOptions,
+    Options,
     OptimizationOptions,
+    _resolve_options,
 )
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 from lcl.spec import LCLSpec, resolve_lcl_spec
@@ -34,10 +36,11 @@ def cv_optimal_classes(
     dem_varnames: Sequence[str] | None = None,
     dems_data: Any | None = None,
     numeraire: str | None = None,
-    folds: int = 5,
+    folds: int | Sequence[Sequence[object]] | Mapping[object, object] = 5,
     seed: int = 42,
     *,
     spec: LCLSpec | None = None,
+    options: Options | None = None,
     fit_options: FitOptions | None = None,
     optimization_options: OptimizationOptions | None = None,
     inference: InferenceOptions | None = None,
@@ -95,7 +98,7 @@ def cv_optimal_classes(
     """
     if num_classes_list is None:
         raise ValueError("num_classes_list is required.")
-    if folds < 2:
+    if isinstance(folds, int) and folds < 2:
         raise ValueError("folds must be at least 2.")
 
     base_spec = resolve_lcl_spec(
@@ -111,12 +114,18 @@ def cv_optimal_classes(
         numeraire=numeraire,
         numeraire_min_abs=numeraire_min_abs,
     )
-    if fit_options is None:
-        fit_options = FitOptions()
-    if optimization_options is None:
-        optimization_options = OptimizationOptions()
-    if inference is None:
-        inference = InferenceOptions(skip=True)
+    inference_for_resolution = inference
+    if options is None and inference_for_resolution is None:
+        inference_for_resolution = InferenceOptions(skip=True)
+    resolved_options = _resolve_options(
+        options,
+        fit_options=fit_options,
+        optimization_options=optimization_options,
+        inference=inference_for_resolution,
+    )
+    fit_options = resolved_options.fit
+    optimization_options = resolved_options.optimization
+    inference = resolved_options.inference
 
     if isinstance(data, pl.DataFrame):
         df = data
@@ -129,14 +138,8 @@ def cv_optimal_classes(
     if panel_col not in df.columns:
         raise ValueError(f"Panel column {panel_col!r} was not found in data.")
     unique_panels = df[panel_col].unique(maintain_order=True).to_numpy()
-    if folds > len(unique_panels):
-        raise ValueError(
-            f"folds={folds} exceeds the number of unique panels ({len(unique_panels)})."
-        )
-
-    rng = onp.random.default_rng(seed)
-    shuffled_panels = rng.permutation(unique_panels)
-    fold_panel_lists = onp.array_split(shuffled_panels, folds)
+    fold_panel_lists = _resolve_panel_folds(folds, unique_panels, seed)
+    num_folds = len(fold_panel_lists)
     rows: list[dict[str, object]] = []
 
     for num_classes in num_classes_list:
@@ -150,6 +153,8 @@ def cv_optimal_classes(
         logger.info("Evaluating model with %s latent classes.", num_classes)
         fold_lls: list[float] = []
         fold_mean_lls: list[float] = []
+        fold_se_lls: list[float] = []
+        held_out_panel_scores: list[float] = []
         fold_converged: list[bool | None] = []
         fold_train_panels: list[int] = []
         fold_test_panels: list[int] = []
@@ -189,8 +194,16 @@ def cv_optimal_classes(
                     )
                 total_ll = float(panel_scores["log_likelihood"].sum())
                 mean_ll = total_ll / test_panel_count
+                panel_values = panel_scores["log_likelihood"].to_numpy()
+                fold_se = (
+                    float(onp.std(panel_values, ddof=1) / onp.sqrt(test_panel_count))
+                    if test_panel_count > 1
+                    else float("nan")
+                )
                 fold_lls.append(total_ll)
                 fold_mean_lls.append(mean_ll)
+                fold_se_lls.append(fold_se)
+                held_out_panel_scores.extend(panel_values.tolist())
                 fold_converged.append(bool(result.converged))
                 fold_errors.append(None)
             except Exception as exc:
@@ -202,12 +215,13 @@ def cv_optimal_classes(
                 )
                 fold_lls.append(float("nan"))
                 fold_mean_lls.append(float("nan"))
+                fold_se_lls.append(float("nan"))
                 fold_converged.append(None)
                 fold_errors.append(str(exc))
 
         successful = onp.isfinite(onp.asarray(fold_lls))
         successful_folds = int(successful.sum())
-        failed_folds = folds - successful_folds
+        failed_folds = num_folds - successful_folds
         converged_folds = sum(value is True for value in fold_converged)
         nonconverged_folds = sum(value is False for value in fold_converged)
         successful_total_ll = float(onp.nansum(onp.asarray(fold_lls, dtype=float)))
@@ -222,11 +236,20 @@ def cv_optimal_classes(
             else float("nan")
         )
         complete_mean = successful_mean if failed_folds == 0 else float("nan")
+        pooled_se = (
+            float(
+                onp.std(held_out_panel_scores, ddof=1)
+                / onp.sqrt(len(held_out_panel_scores))
+            )
+            if failed_folds == 0 and len(held_out_panel_scores) > 1
+            else float("nan")
+        )
 
         rows.append(
             {
                 "Num_Classes": num_classes,
                 "Avg_OOS_LL": complete_mean,
+                "SE_OOS_LL": pooled_se,
                 "Avg_Successful_OOS_LL": successful_mean,
                 "Total_OOS_LL": (
                     successful_total_ll if failed_folds == 0 else float("nan")
@@ -235,9 +258,10 @@ def cv_optimal_classes(
                 "Failed_Folds": failed_folds,
                 "Converged_Folds": converged_folds,
                 "Nonconverged_Folds": nonconverged_folds,
-                "Fold": list(range(1, folds + 1)),
+                "Fold": list(range(1, num_folds + 1)),
                 "Fold_OOS_LL": fold_lls,
                 "Fold_Mean_Panel_LL": fold_mean_lls,
+                "Fold_SE_Panel_LL": fold_se_lls,
                 "Fold_Converged": fold_converged,
                 "Fold_Train_Panels": fold_train_panels,
                 "Fold_Test_Panels": fold_test_panels,
@@ -245,4 +269,72 @@ def cv_optimal_classes(
             }
         )
 
-    return pl.DataFrame(rows)
+    return _annotate_cv_selection(pl.DataFrame(rows))
+
+
+def _annotate_cv_selection(result: pl.DataFrame) -> pl.DataFrame:
+    """Mark the best and parsimonious one-standard-error class counts."""
+    if result.is_empty():
+        return result
+    complete = result.filter(pl.col("Avg_OOS_LL").is_finite())
+    if complete.is_empty():
+        return result.with_columns(
+            pl.lit(False).alias("Selected_Best"),
+            pl.lit(False).alias("Selected_One_SE"),
+        )
+    best = complete.sort("Avg_OOS_LL", descending=True).row(0, named=True)
+    threshold = float(best["Avg_OOS_LL"]) - float(best["SE_OOS_LL"])
+    eligible = complete.filter(pl.col("Avg_OOS_LL") >= threshold)
+    selected_one_se = int(eligible.sort("Num_Classes").item(0, "Num_Classes"))
+    best_classes = int(best["Num_Classes"])
+    return result.with_columns(
+        (pl.col("Num_Classes") == best_classes).alias("Selected_Best"),
+        (pl.col("Num_Classes") == selected_one_se).alias("Selected_One_SE"),
+    )
+
+
+def _resolve_panel_folds(
+    folds: int | Sequence[Sequence[object]] | Mapping[object, object],
+    unique_panels: onp.ndarray,
+    seed: int,
+) -> list[onp.ndarray]:
+    """Return validated, user-controlled test-panel folds."""
+    if isinstance(folds, int):
+        if folds > len(unique_panels):
+            raise ValueError(
+                f"folds={folds} exceeds the number of unique panels "
+                f"({len(unique_panels)})."
+            )
+        shuffled = onp.random.default_rng(seed).permutation(unique_panels)
+        return [onp.asarray(group) for group in onp.array_split(shuffled, folds)]
+
+    if isinstance(folds, Mapping):
+        missing = [panel for panel in unique_panels if panel not in folds]
+        extra = [panel for panel in folds if panel not in set(unique_panels.tolist())]
+        if missing or extra:
+            raise ValueError(
+                f"User fold mapping must cover exactly the panel IDs; missing={missing[:5]}, "
+                f"extra={extra[:5]}."
+            )
+        labels = list(dict.fromkeys(folds[panel] for panel in unique_panels))
+        groups = [
+            onp.asarray([panel for panel in unique_panels if folds[panel] == label])
+            for label in labels
+        ]
+    else:
+        groups = [onp.asarray(group) for group in folds]
+
+    if len(groups) < 2 or any(len(group) == 0 for group in groups):
+        raise ValueError("User folds must contain at least two nonempty folds.")
+    flattened = [panel for group in groups for panel in group.tolist()]
+    expected = unique_panels.tolist()
+    if len(flattened) != len(set(flattened)):
+        raise ValueError("A panel ID appears in more than one user fold.")
+    if set(flattened) != set(expected):
+        missing = [panel for panel in expected if panel not in flattened]
+        extra = [panel for panel in flattened if panel not in set(expected)]
+        raise ValueError(
+            f"User folds must cover exactly the panel IDs; missing={missing[:5]}, "
+            f"extra={extra[:5]}."
+        )
+    return groups

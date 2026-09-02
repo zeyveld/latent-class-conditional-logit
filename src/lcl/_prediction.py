@@ -1,212 +1,33 @@
 """Out-of-sample prediction, elasticities, and willingness-to-pay (WTP) analysis."""
 
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal
 
+import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jaxtyping import Array, Float64, Int
 
-from lcl._encoding import _coerce_frame
-from lcl._kernels import _choice_probabilities_and_logsum
+from lcl._elasticities import compute_elasticities, elasticity_design_derivative
 from lcl._logging import log_or_print
 from lcl._presentation import format_wtp_table
-from lcl._struct import Data, PartitionType, WTPRequest
+from lcl.options import PartitionType, WTPRequest
+from lcl._struct import Data
+from lcl._wtp_partitions import (
+    _apply_wtp_partition,
+    _coerce_partition_data,
+    _flatten_wtp_requests,
+    _partition_columns,
+    _partition_label,
+)
 
 logger = logging.getLogger(__name__)
 
 
-def _flatten_wtp_requests(
-    items: Iterable[WTPRequest | Iterable[WTPRequest]],
-) -> list[WTPRequest]:
-    """Return a flat list from a variadic mix of requests and request iterables."""
-    requests: list[WTPRequest] = []
-    for item in items:
-        if isinstance(item, WTPRequest):
-            requests.append(item)
-        elif isinstance(item, Iterable) and not isinstance(item, (str, bytes, dict)):
-            for req in item:
-                if not isinstance(req, WTPRequest):
-                    raise TypeError(
-                        "compute_wtp expects WTPRequest objects or iterables of "
-                        f"WTPRequest objects, not {type(req).__name__}."
-                    )
-                requests.append(req)
-        else:
-            hint = (
-                " Did you pass the dictionary returned by an earlier compute_wtp call?"
-                if isinstance(item, dict)
-                else ""
-            )
-            raise TypeError(
-                "compute_wtp expects WTPRequest objects or iterables of WTPRequest "
-                f"objects, not {type(item).__name__}.{hint}"
-            )
-    return requests
-
-
-def _partition_columns(requests: Sequence[WTPRequest]) -> list[str]:
-    """Return unique column names needed to build all WTP partitions."""
-    columns: list[str] = []
-    for req in requests:
-        requested = (
-            req.dummy_vars if req.dummy_vars is not None else [req.demographic_var]
-        )
-        for col in requested:
-            if col not in columns:
-                columns.append(col)
-    return columns
-
-
-def _coerce_partition_data(
-    partition_data: object,
-    panel_col: str,
-    partition_cols: Sequence[str],
-) -> pl.DataFrame:
-    """Return one panel-level partition row per panel.
-
-    Parameters
-    ----------
-    partition_data : object
-        Tabular panel-level or long-format data containing the requested partition
-        variables.
-    panel_col : str
-        Column in ``partition_data`` identifying decision-makers.
-    partition_cols : Sequence[str]
-        Partition columns to keep and validate.
-
-    Returns
-    -------
-    pl.DataFrame
-        A panel-level frame keyed by ``"panels"``.
-
-    Raises
-    ------
-    ValueError
-        If required columns are absent or a requested partition value is not constant
-        within panel.
-    """
-    df = _coerce_frame(partition_data)
-    required_cols = list(dict.fromkeys([panel_col, *partition_cols]))
-    missing = [col for col in required_cols if col not in df.columns]
-    if missing:
-        raise ValueError(f"partition_data is missing required columns: {missing}")
-
-    unique_df = df.select(required_cols).unique(maintain_order=True)
-    duplicate_panels = (
-        unique_df.group_by(panel_col).len().filter(pl.col("len") > 1).select(panel_col)
-    )
-    if duplicate_panels.height:
-        sample = duplicate_panels.head(5)[panel_col].to_list()
-        raise ValueError(
-            "partition_data must have one unique value per panel for each requested "
-            f"partition column. Conflicting panels include: {sample}"
-        )
-
-    if panel_col != "panels":
-        unique_df = unique_df.rename({panel_col: "panels"})
-    return unique_df
-
-
-def _apply_dummy_partition(df: pl.DataFrame, req: WTPRequest) -> pl.DataFrame:
-    """Attach a categorical partition column from a one-hot dummy bundle."""
-    dummy_vars = req.dummy_vars
-    if dummy_vars is None:
-        raise ValueError("Dummy-coded WTP partitions require dummy_vars.")
-
-    missing = [col for col in dummy_vars if col not in df.columns]
-    if missing:
-        raise ValueError(f"WTP dummy partition columns were not found: {missing}")
-
-    dummy_values = df.select(dummy_vars).to_numpy()
-    valid_dummy_values = (dummy_values == 0) | (dummy_values == 1)
-    if not onp.all(valid_dummy_values):
-        raise ValueError("WTP dummy partition columns must contain only 0/1 values.")
-
-    active = dummy_values.astype(bool)
-    active_counts = active.sum(axis=1)
-    if onp.any(active_counts > 1):
-        raise ValueError(
-            "WTP dummy partition columns must be mutually exclusive within panel."
-        )
-
-    dummy_labels = req.dummy_labels if req.dummy_labels is not None else dummy_vars
-    partition = onp.full(df.height, req.base_category, dtype=object)
-    partition_order = onp.zeros(df.height, dtype=onp.int64)
-    for idx, label in enumerate(dummy_labels):
-        mask = active[:, idx]
-        partition[mask] = label
-        partition_order[mask] = idx + 1
-
-    return df.with_columns(
-        pl.Series("Partition", partition),
-        pl.Series("_partition_order", partition_order),
-    )
-
-
-def _apply_wtp_partition(df: pl.DataFrame, req: WTPRequest) -> pl.DataFrame:
-    """Attach a ``Partition`` column according to a WTP request."""
-    if req.dummy_vars is not None:
-        return _apply_dummy_partition(df, req)
-
-    if req.demographic_var not in df.columns:
-        raise ValueError(
-            f"WTP partition variable '{req.demographic_var}' was not found. "
-            "Pass partition_data=... to compute_wtp for variables outside the "
-            "fitted demographic specification."
-        )
-
-    partition_type = req.partition_type
-    if not isinstance(partition_type, PartitionType):
-        partition_type = PartitionType(partition_type)
-
-    demo_col = pl.col(req.demographic_var)
-    if partition_type == PartitionType.CATEGORICAL:
-        group_expr = demo_col
-    elif partition_type == PartitionType.QUINTILES:
-        group_expr = demo_col.qcut(5, labels=["Q1", "Q2", "Q3", "Q4", "Q5"])
-    elif partition_type == PartitionType.CUSTOM_BREAKS:
-        if not isinstance(req.bins, list):
-            raise ValueError(
-                "Custom WTP partitions require bins as a list of breakpoints."
-            )
-        group_expr = demo_col.cut(req.bins)
-    else:
-        raise ValueError(f"Unsupported partition type: {partition_type}")
-
-    partitioned = df.with_columns(group_expr.alias("Partition"))
-    if partition_type == PartitionType.QUINTILES:
-        partitioned = partitioned.with_columns(
-            pl.col("Partition")
-            .cast(pl.String)
-            .replace_strict({"Q1": 0, "Q2": 1, "Q3": 2, "Q4": 3, "Q5": 4})
-            .alias("_partition_order")
-        )
-    elif partition_type == PartitionType.CUSTOM_BREAKS:
-        if not isinstance(req.bins, list):
-            raise ValueError(
-                "Custom WTP partitions require bins as a list of breakpoints."
-            )
-        bin_order = onp.digitize(
-            df[req.demographic_var].to_numpy(),
-            onp.asarray(req.bins, dtype=float),
-            right=True,
-        )
-        partitioned = partitioned.with_columns(pl.Series("_partition_order", bin_order))
-    return partitioned
-
-
-def _partition_label(partition_name: object) -> object:
-    """Extract a scalar label from Polars group-by keys."""
-    if isinstance(partition_name, tuple):
-        return partition_name[0]
-    return partition_name
-
-
-class LCLPrediction:
-    """Container for counterfactual inference, consumer surplus, and willingness-to-pay (WTP).
+class _PredictionBase:
+    """Shared probability, surplus, and elasticity prediction behavior.
 
     Provides methods to analyze decision-maker behavior under new choice sets or
     policy changes. Utilizes the Delta Method to compute rigorous analytical standard
@@ -246,6 +67,11 @@ class LCLPrediction:
         class_probs_by_panel: Float64[Array, "panels classes"] | None = None,
         class_probabilities_source: str = "prior",
         partition_data_df: pl.DataFrame | None = None,
+        original_alts: Any | None = None,
+        original_cases: Any | None = None,
+        original_panels: Any | None = None,
+        raw_prediction_data: pl.DataFrame | None = None,
+        panel_weights: Sequence[float] | onp.ndarray | None = None,
     ) -> None:
         """Store prediction outputs and references needed for post-processing.
 
@@ -271,13 +97,63 @@ class LCLPrediction:
             Panel-level raw prediction columns available for WTP partitions.
         """
         self.predicted_probs = predicted_probs_df
-        self.surplus = surplus_df
+        self.surplus_units = (
+            "money"
+            if getattr(results.model, "numeraire_idx", None) is not None
+            else "utils"
+        )
+        self.surplus = surplus_df.with_columns(
+            pl.lit(self.surplus_units).alias("surplus_units")
+        )
         self.wtp_alt_vars_by_panel = wtp_alt_vars_by_panel_df
         self.predict_data = predict_data
         self.results = results
         self.class_probs_by_panel = class_probs_by_panel
         self.class_probabilities_source = class_probabilities_source
         self.partition_data = partition_data_df
+        self.original_alts = (
+            onp.asarray(original_alts)
+            if original_alts is not None
+            else onp.asarray(predict_data.alts)
+        )
+        self.original_cases = (
+            onp.asarray(original_cases)
+            if original_cases is not None
+            else onp.asarray(predict_data.cases)
+        )
+        self.original_panels = (
+            onp.asarray(original_panels)
+            if original_panels is not None
+            else (
+                None
+                if predict_data.panels is None
+                else onp.asarray(predict_data.panels)
+            )
+        )
+        self.raw_prediction_data = raw_prediction_data
+        num_panels = predict_data.num_panels
+        if num_panels is None:
+            raise ValueError("Panel identifiers are required for prediction.")
+        weights = (
+            onp.ones(num_panels, dtype=onp.float64)
+            if panel_weights is None
+            else onp.asarray(panel_weights, dtype=onp.float64)
+        )
+        if weights.shape != (num_panels,):
+            raise ValueError(
+                "panel_weights must contain one value per prediction panel."
+            )
+        if not onp.all(onp.isfinite(weights)) or onp.any(weights < 0.0):
+            raise ValueError("panel_weights must be finite and nonnegative.")
+        if not onp.any(weights > 0.0):
+            raise ValueError("At least one panel weight must be positive.")
+        self.panel_weights = weights
+
+    def _elasticity_design_derivative(
+        self, variable: str
+    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+        """Return raw values and row-wise derivatives of every design column."""
+        return elasticity_design_derivative(self, variable)
 
     def elasticities(self, vars: str | Iterable[str]) -> pl.DataFrame:
         """Compute full matrices of own- and cross-elasticities for continuous features.
@@ -308,118 +184,105 @@ class LCLPrediction:
             If latent class probabilities are missing, or if a requested variable
             is not found in the estimated model specification.
         """
-        if isinstance(vars, str):
-            vars = [vars]
+        return compute_elasticities(self, vars)
 
+    def market_shares(self) -> pl.DataFrame:
+        """Return panel-weighted predicted market shares by alternative."""
         data = self.predict_data
-        is_lc = hasattr(self.results, "em_res")
-
-        if is_lc:
-            betas = self.results.em_res.structural_betas  # (K, C)
-            if self.class_probs_by_panel is None:
-                raise ValueError(
-                    "class_probs_by_panel must be available to compute LC elasticities."
-                )
-            if data.panels is None:
-                raise ValueError("Panel identifiers are required for LC elasticities.")
-            S_ic = self.class_probs_by_panel[data.panels]  # (N, C)
-        else:
-            betas = self.results.coeff_[:, None]  # (K, 1)
-            S_ic = jnp.ones((data.X.shape[0], 1))  # (N, 1)
-
-        num_classes = betas.shape[1]
-
-        P_ij_c, _ = _choice_probabilities_and_logsum(
-            data.X, betas, data.cases, data.num_cases
+        if data.panels is None:
+            raise ValueError("Panel identifiers are required for market shares.")
+        row_weights = self.panel_weights[onp.asarray(data.panels)]
+        first_case_rows = onp.asarray(data.cases) != onp.roll(
+            onp.asarray(data.cases), 1
         )
-        P_ij = jnp.sum(S_ic * P_ij_c, axis=1)  # (N,)
+        first_case_rows[0] = True
+        denominator = float(row_weights[first_case_rows].sum())
+        frame = self.predicted_probs.with_columns(
+            pl.Series("_panel_weight", row_weights)
+        ).with_columns(
+            (pl.col("choice_probs") * pl.col("_panel_weight")).alias("_demand")
+        )
+        return (
+            frame.group_by("alts", maintain_order=True)
+            .agg(pl.col("_demand").sum())
+            .with_columns((pl.col("_demand") / denominator).alias("market_share"))
+            .select("alts", "market_share")
+            .sort("alts")
+        )
 
-        base_dict_j = {
-            "cases": onp.array(data.cases),
-            "alts": onp.array(data.alts),
-            "P_j": onp.array(jnp.maximum(P_ij, 1e-250)),
-        }
-        base_dict_k = {
-            "cases": onp.array(data.cases),
-            "target_alts": onp.array(data.alts),
-        }
+    def surplus_change(self, counterfactual: "_PredictionBase") -> pl.DataFrame:
+        """Return identified counterfactual-minus-baseline surplus changes."""
+        if self.surplus_units != counterfactual.surplus_units:
+            raise ValueError("Baseline and counterfactual surplus units do not match.")
+        keys = ["cases"]
+        if "panels" in self.surplus.columns:
+            keys.insert(0, "panels")
+        baseline = self.surplus.select(
+            *keys, pl.col("surplus").alias("_baseline_surplus")
+        )
+        changed = counterfactual.surplus.select(
+            *keys, pl.col("surplus").alias("_counterfactual_surplus")
+        )
+        joined = baseline.join(changed, on=keys, how="inner", validate="1:1")
+        if joined.height != baseline.height or joined.height != changed.height:
+            raise ValueError(
+                "Baseline and counterfactual predictions must contain identical cases."
+            )
+        return joined.select(
+            *keys,
+            (pl.col("_counterfactual_surplus") - pl.col("_baseline_surplus")).alias(
+                "surplus_change"
+            ),
+            pl.lit(self.surplus_units).alias("surplus_units"),
+        )
 
-        for c in range(num_classes):
-            base_dict_j[f"P_jc_{c}"] = onp.array(P_ij_c[:, c])
-            base_dict_k[f"P_kc_{c}"] = onp.array(P_ij_c[:, c])
-
-        df_j = pl.DataFrame(base_dict_j)
-        df_k_base = pl.DataFrame(base_dict_k)
-
-        res_dfs = []
-
-        for var in vars:
-            try:
-                var_idx = self.results.model.case_varnames.index(var)
-            except ValueError:
-                raise ValueError(f"Variable '{var}' not found in model specification.")
-
-            X_v = data.X[:, var_idx]
-            beta_v = betas[var_idx, :]
-
-            # A_{jc} = S_{ic} * beta_{vc} * P_{ij|c}
-            A_jc = S_ic * beta_v[None, :] * P_ij_c
-            U_j = jnp.sum(A_jc, axis=1)
-
-            df_j_var = df_j.with_columns(pl.Series("U_j", onp.array(U_j)))
-            for c in range(num_classes):
-                df_j_var = df_j_var.with_columns(
-                    pl.Series(f"A_jc_{c}", onp.array(A_jc[:, c]))
+    def aggregate_elasticities(self, vars: str | Iterable[str]) -> pl.DataFrame:
+        """Aggregate elasticities using each row's weighted demand contribution."""
+        variables = [vars] if isinstance(vars, str) else list(vars)
+        elasticities = self.elasticities(variables)
+        join_keys = ["cases", "alts"]
+        if "panels" in elasticities.columns:
+            join_keys.insert(0, "panels")
+        probability_columns = self.predicted_probs.select([*join_keys, "choice_probs"])
+        if self.original_panels is None:
+            raise ValueError("Panel identifiers are required for aggregation.")
+        panel_first_rows = onp.asarray(self.predict_data.panels) != onp.roll(
+            onp.asarray(self.predict_data.panels), 1
+        )
+        panel_first_rows[0] = True
+        panel_frame = pl.DataFrame(
+            {
+                "panels": self.original_panels[panel_first_rows],
+                "_panel_weight": self.panel_weights,
+            }
+        )
+        joined = elasticities.join(probability_columns, on=join_keys).join(
+            panel_frame, on="panels"
+        )
+        demand_weight = pl.col("choice_probs") * pl.col("_panel_weight")
+        aggregations = [demand_weight.sum().alias("_demand")]
+        for variable in variables:
+            column = f"elasticity_{variable}"
+            aggregations.append(
+                (demand_weight * pl.col(column)).sum().alias(f"_{column}_total")
+            )
+        result = joined.group_by(["alts", "target_alts"], maintain_order=True).agg(
+            aggregations
+        )
+        return result.select(
+            "alts",
+            "target_alts",
+            *(
+                (pl.col(f"_elasticity_{variable}_total") / pl.col("_demand")).alias(
+                    f"elasticity_{variable}"
                 )
+                for variable in variables
+            ),
+        ).sort(["alts", "target_alts"])
 
-            df_k_var = df_k_base.with_columns(pl.Series("X_k", onp.array(X_v)))
-            cross_df = df_j_var.join(df_k_var, on="cases", how="inner")
 
-            # V_{jk} = sum_c A_{jc} P_{kc}
-            cross_df = cross_df.with_columns(
-                V_jk=pl.sum_horizontal(
-                    [
-                        pl.col(f"A_jc_{c}") * pl.col(f"P_kc_{c}")
-                        for c in range(num_classes)
-                    ]
-                )
-            )
-
-            # D_{jk} = U_j * (j == k) - V_{jk}
-            cross_df = cross_df.with_columns(
-                is_own=pl.col("alts") == pl.col("target_alts")
-            ).with_columns(
-                D_jk=pl.when(pl.col("is_own"))
-                .then(pl.col("U_j") - pl.col("V_jk"))
-                .otherwise(-pl.col("V_jk"))
-            )
-
-            # E_{jk} = D_{jk} * X_k / P_j
-            elas_name = f"elasticity_{var}"
-            cross_df = cross_df.with_columns(
-                (pl.col("D_jk") * pl.col("X_k") / pl.col("P_j")).alias(elas_name)
-            )
-
-            res_dfs.append(cross_df.select(["cases", "alts", "target_alts", elas_name]))
-
-        final_df = res_dfs[0]
-        for i in range(1, len(res_dfs)):
-            final_df = final_df.join(res_dfs[i], on=["cases", "alts", "target_alts"])
-
-        if data.panels is not None:
-            panel_df = pl.DataFrame(
-                {"cases": onp.array(data.cases), "panels": onp.array(data.panels)}
-            ).unique()
-            final_df = panel_df.join(final_df, on="cases")
-            final_cols = ["panels", "cases", "alts", "target_alts"] + [
-                f"elasticity_{v}" for v in vars
-            ]
-        else:
-            final_cols = ["cases", "alts", "target_alts"] + [
-                f"elasticity_{v}" for v in vars
-            ]
-
-        return final_df.select(final_cols).sort(["cases", "alts", "target_alts"])
+class LCLPrediction(_PredictionBase):
+    """Latent-class prediction with partitioned WTP inference."""
 
     def compute_wtp(
         self,
@@ -428,7 +291,9 @@ class LCLPrediction:
         panel_col: str = "panels",
         num_decimals: int = 4,
         class_probabilities: Literal["stored", "prior", "posterior"] = "stored",
-        se: Literal["delta", "none"] = "delta",
+        se: Literal["delta", "bootstrap", "none"] = "delta",
+        bootstrap_draws: int = 500,
+        bootstrap_seed: int = 0,
         show: bool = True,
     ) -> dict[str, pl.DataFrame]:
         """Compute the Marginal Willingness-to-Pay (WTP) across demographic partitions.
@@ -460,11 +325,15 @@ class LCLPrediction:
             ``past_choices``. ``"prior"`` recomputes demographics-only class
             probabilities. ``"posterior"`` requires that prediction was created
             with ``past_choices``.
-        se : {"delta", "none"}, default="delta"
-            Standard-error method.  Delta-method standard errors are available for
-            prior class probabilities.  Posterior-updated WTP through
-            ``past_choices`` requires differentiating through the Bayesian class
-            update and is therefore refused unless ``se="none"``.
+        se : {"delta", "bootstrap", "none"}, default="delta"
+            Standard-error method. Delta-method and asymptotic parametric-bootstrap
+            standard errors are available for prior class probabilities.
+            Posterior-updated WTP through ``past_choices`` requires differentiating
+            through the Bayesian class update and is refused unless ``se="none"``.
+        bootstrap_draws : int, default=500
+            Number of asymptotic parameter draws for ``se="bootstrap"``.
+        bootstrap_seed : int, default=0
+            Reproducible random seed for parametric-bootstrap draws.
         show : bool, default=True
             Emit LaTeX and terminal renderings for each request.
 
@@ -480,8 +349,8 @@ class LCLPrediction:
         ValueError
             If the parent model was not estimated with a specified numeraire constraint.
         """
-        if se not in {"delta", "none"}:
-            raise ValueError("se must be either 'delta' or 'none'.")
+        if se not in {"delta", "bootstrap", "none"}:
+            raise ValueError("se must be 'delta', 'bootstrap', or 'none'.")
         if class_probabilities not in {"stored", "prior", "posterior"}:
             raise ValueError(
                 "class_probabilities must be 'stored', 'prior', or 'posterior'."
@@ -494,12 +363,12 @@ class LCLPrediction:
                 "class_probabilities='posterior' requires predict(..., past_choices=...)."
             )
         if (
-            se == "delta"
+            se in {"delta", "bootstrap"}
             and class_probabilities in {"stored", "posterior"}
             and self.class_probabilities_source == "posterior"
         ):
             raise NotImplementedError(
-                "Delta-method WTP after past_choices requires differentiating "
+                "WTP uncertainty after past_choices requires differentiating "
                 "through the posterior class update. Use se='none' or "
                 "class_probabilities='prior'."
             )
@@ -590,6 +459,9 @@ class LCLPrediction:
                 subset_panel_indices = jnp.array(
                     subset_df["panel_idx"].to_numpy(), dtype=jnp.int32
                 )
+                subset_panel_weights = jnp.asarray(
+                    self.panel_weights[onp.asarray(subset_panel_indices)]
+                )
 
                 if se == "delta":
                     mean_wtp, se_val = self.results._apply_delta_method(
@@ -598,8 +470,32 @@ class LCLPrediction:
                         target_idx=target_idx,
                         cost_idx=cost_idx,
                         subset_panel_indices=subset_panel_indices,
+                        subset_panel_weights=subset_panel_weights,
                         dems=self.predict_data.dems,
                         num_panels=self.predict_data.num_panels,
+                    )
+                    se_float = float(se_val)
+                elif se == "bootstrap":
+                    mean_wtp = self._compute_subset_mean_wtp(
+                        self.results.flat_params,
+                        target_idx=target_idx,
+                        cost_idx=cost_idx,
+                        subset_panel_indices=subset_panel_indices,
+                        subset_panel_weights=subset_panel_weights,
+                        dems=self.predict_data.dems,
+                        num_panels=self.predict_data.num_panels,
+                    )
+                    se_val = self.results._parametric_bootstrap_se(
+                        self._compute_subset_mean_wtp,
+                        self.results.flat_params,
+                        target_idx=target_idx,
+                        cost_idx=cost_idx,
+                        subset_panel_indices=subset_panel_indices,
+                        subset_panel_weights=subset_panel_weights,
+                        dems=self.predict_data.dems,
+                        num_panels=self.predict_data.num_panels,
+                        draws=bootstrap_draws,
+                        seed=bootstrap_seed,
                     )
                     se_float = float(se_val)
                 else:
@@ -609,6 +505,7 @@ class LCLPrediction:
                         target_idx=target_idx,
                         cost_idx=cost_idx,
                         subset_panel_indices=subset_panel_indices,
+                        subset_panel_weights=subset_panel_weights,
                         class_probs=selected_class_probs,
                     )
                     se_float = float("nan")
@@ -624,6 +521,10 @@ class LCLPrediction:
                         "Standard_Error": se_float,
                         "Class_Probabilities": class_probabilities,
                         "SE_Method": se,
+                        "Panel_Count": subset_df.height,
+                        "Effective_Panel_Weight": float(
+                            onp.asarray(subset_panel_weights).sum()
+                        ),
                     }
                 )
 
@@ -763,13 +664,17 @@ class LCLPrediction:
         target_idx: int,
         cost_idx: int,
         subset_panel_indices: Int[Array, "subset_panels"],
+        subset_panel_weights: Float64[Array, "subset_panels"],
         class_probs: Float64[Array, "panels classes"],
     ) -> Float64[Array, ""]:
         """Compute a subset mean WTP using fixed class probabilities."""
         structural_betas = self.results.em_res.structural_betas
         if structural_betas is None:
             raise ValueError("Structural betas are required.")
-        subset_shares = jnp.mean(class_probs[subset_panel_indices], axis=0)
+        weights = subset_panel_weights / jnp.sum(subset_panel_weights)
+        subset_shares = jnp.sum(
+            class_probs[subset_panel_indices] * weights[:, None], axis=0
+        )
         wtp_by_class = structural_betas[target_idx, :] / (
             -structural_betas[cost_idx, :]
         )
@@ -781,46 +686,171 @@ class LCLPrediction:
         target_idx: int,
         cost_idx: int,
         subset_panel_indices: Int[Array, "subset_panels"],
+        subset_panel_weights: Float64[Array, "subset_panels"],
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
     ) -> Float64[Array, ""]:
-        """Evaluate the subset WTP objective used by the delta method.
-
-        Computes the expected WTP for a specific demographic subset by weighting the
-        class-specific WTP ratios by the subset's average posterior class membership
-        probabilities.
-
-        Parameters
-        ----------
-        flat_params : Float64[Array, "all_params"]
-            The flattened vector of unconstrained structural and demographic parameters.
-        target_idx : int
-            The column index of the target alternative-specific variable.
-        cost_idx : int
-            The column index of the numeraire (cost) variable.
-        subset_panel_indices : Array
-            The row indices corresponding to the decision-makers in the current partition.
-        dems : Array | None
-            The matrix of demographic variables for the full sample.
-        num_panels : int
-            The total number of unique decision-makers in the sample.
-
-        Returns
-        -------
-        Float64[Array, ""]
-            The scalar expected WTP for the defined demographic subset.
-        """
+        """Evaluate panel-weighted subset WTP for delta/bootstrap inference."""
         latent_betas, thetas = self.results._unpack_params(flat_params)
         class_probs = self.results._get_class_probs(thetas, dems, num_panels)
-
-        subset_class_probs = class_probs[subset_panel_indices]
-        subset_shares = jnp.mean(subset_class_probs, axis=0)
-
+        weights = subset_panel_weights / jnp.sum(subset_panel_weights)
+        subset_shares = jnp.sum(
+            class_probs[subset_panel_indices] * weights[:, None], axis=0
+        )
         structural_betas = self.results._param_packing.to_structural(latent_betas)
-
-        # Express the target coefficient in units of positive marginal utility of
-        # income, -beta_cost. The target coefficient determines the resulting sign.
         wtp_by_class = structural_betas[target_idx, :] / (
             -structural_betas[cost_idx, :]
         )
         return jnp.sum(subset_shares * wtp_by_class)
+
+
+class CLPrediction(_PredictionBase):
+    """Conditional-logit prediction with WTP and elasticity diagnostics."""
+
+    def wtp(
+        self,
+        target: str | None = None,
+        *,
+        se: Literal["delta", "bootstrap", "none"] = "delta",
+        bootstrap_draws: int = 500,
+        bootstrap_seed: int = 0,
+    ) -> pl.DataFrame:
+        """Return homogeneous WTP ratios with delta or parametric-bootstrap SEs."""
+        if se not in {"delta", "bootstrap", "none"}:
+            raise ValueError("se must be 'delta', 'bootstrap', or 'none'.")
+        cost_idx = getattr(self.results.model, "numeraire_idx", None)
+        if cost_idx is None:
+            raise ValueError("A numeraire must be defined to compute WTP.")
+        target_indices = [
+            idx
+            for idx, variable in enumerate(self.results.model.case_varnames)
+            if idx != cost_idx and (target is None or variable == target)
+        ]
+        if target is not None and not target_indices:
+            raise ValueError(
+                f"Variable {target!r} was not found in the utility design."
+            )
+
+        def ratio_function(params: Array) -> Array:
+            return params[jnp.asarray(target_indices)] / (-params[cost_idx])
+
+        coefficients = jnp.asarray(self.results.coeff_)
+        ratios = ratio_function(coefficients)
+        if se == "none":
+            standard_errors = jnp.full_like(ratios, jnp.nan)
+        elif se == "delta":
+            jacobian = jax.jacrev(ratio_function)(coefficients)
+            standard_errors = jnp.sqrt(
+                jnp.maximum(
+                    jnp.einsum(
+                        "ip,pq,iq->i",
+                        jacobian,
+                        self.results.cov_matrix,
+                        jacobian,
+                    ),
+                    0.0,
+                )
+            )
+        else:
+            if bootstrap_draws < 2:
+                raise ValueError("bootstrap_draws must be at least 2.")
+            covariance = onp.asarray(self.results.cov_matrix, dtype=onp.float64)
+            if not onp.all(onp.isfinite(covariance)):
+                raise ValueError(
+                    "A finite covariance matrix is required for bootstrap SEs."
+                )
+            eigenvalues, eigenvectors = onp.linalg.eigh(
+                0.5 * (covariance + covariance.T)
+            )
+            tolerance = (
+                onp.finfo(onp.float64).eps
+                * max(1.0, float(onp.max(onp.abs(eigenvalues))))
+                * covariance.shape[0]
+            )
+            if float(eigenvalues.min()) < -tolerance:
+                raise ValueError("The covariance matrix is not positive semidefinite.")
+            root = eigenvectors * onp.sqrt(onp.maximum(eigenvalues, 0.0))[None, :]
+            rng = onp.random.default_rng(bootstrap_seed)
+            draws = (
+                onp.asarray(coefficients)
+                + rng.standard_normal((bootstrap_draws, coefficients.size)) @ root.T
+            )
+            draw_ratios = jax.vmap(ratio_function)(jnp.asarray(draws))
+            standard_errors = jnp.std(draw_ratios, axis=0, ddof=1)
+
+        rows = []
+        for output_idx, variable_idx in enumerate(target_indices):
+            variable = self.results.model.case_varnames[variable_idx]
+            rows.append(
+                {
+                    "variable": variable,
+                    "label": self.results.model.variable_label(variable),
+                    "denominator": self.results.model.numeraire,
+                    "tradeoff": float(ratios[output_idx]),
+                    "std_error": float(standard_errors[output_idx]),
+                    "se_method": se,
+                }
+            )
+        return pl.DataFrame(rows)
+
+    def compute_wtp(self, target: str | None = None, **kwargs: Any) -> pl.DataFrame:
+        """Alias for :meth:`wtp`."""
+        return self.wtp(target, **kwargs)
+
+    def wtp_by_class(self, target: str | None = None) -> pl.DataFrame:
+        """Return WTP with a single homogeneous class label."""
+        return self.wtp(target, se="none").with_columns(pl.lit(0).alias("class"))
+
+    def denominator_diagnostics(self) -> pl.DataFrame:
+        """Report the homogeneous WTP denominator and configured floor."""
+        cost_idx = getattr(self.results.model, "numeraire_idx", None)
+        if cost_idx is None:
+            raise ValueError("A numeraire must be defined to compute diagnostics.")
+        denominator = float(-self.results.coeff_[cost_idx])
+        return pl.DataFrame(
+            {
+                "class": [0],
+                "denominator": [self.results.model.numeraire],
+                "denominator_value": [denominator],
+                "abs_denominator": [abs(denominator)],
+                "min_abs_floor": [self.results.model.numeraire_min_abs],
+            }
+        )
+
+
+def resolve_panel_weights(
+    panel_weights: str | Mapping[object, float] | Sequence[float] | None,
+    panel_ids: onp.ndarray,
+    raw_data: pl.DataFrame | None,
+    panel_col: str,
+) -> onp.ndarray:
+    """Resolve user panel weights into unique-panel order."""
+    if panel_weights is None:
+        return onp.ones(len(panel_ids), dtype=onp.float64)
+    if isinstance(panel_weights, str):
+        if raw_data is None or panel_weights not in raw_data.columns:
+            raise ValueError(
+                f"Panel-weight column {panel_weights!r} was not found in prediction data."
+            )
+        grouped = raw_data.group_by(panel_col, maintain_order=True).agg(
+            pl.col(panel_weights).n_unique().alias("_n_unique"),
+            pl.col(panel_weights).first().alias("_weight"),
+        )
+        if grouped["_n_unique"].max() != 1:
+            raise ValueError("Panel weights must be constant within each panel.")
+        weight_map = dict(zip(grouped[panel_col], grouped["_weight"]))
+        values = onp.asarray([weight_map[panel] for panel in panel_ids], dtype=float)
+    elif isinstance(panel_weights, Mapping):
+        missing = [panel for panel in panel_ids if panel not in panel_weights]
+        if missing:
+            raise ValueError(f"panel_weights is missing panel IDs: {missing[:5]}.")
+        values = onp.asarray([panel_weights[panel] for panel in panel_ids], dtype=float)
+    else:
+        values = onp.asarray(panel_weights, dtype=float)
+    if values.shape != (len(panel_ids),):
+        raise ValueError("panel_weights must contain one value per prediction panel.")
+    if not onp.all(onp.isfinite(values)) or onp.any(values < 0.0):
+        raise ValueError("panel_weights must be finite and nonnegative.")
+    if not onp.any(values > 0.0):
+        raise ValueError("At least one panel weight must be positive.")
+    return values

@@ -20,6 +20,11 @@ cv_results = lcl.cv_optimal_classes(
 )
 ```
 
+`folds=` may be an integer, an explicit sequence of test-panel groups, or a
+mapping from panel ID to a user fold label. Explicit folds must cover every panel
+exactly once. This makes externally defined geographic, temporal, or grouped
+splits reproducible without row leakage.
+
 Inference is skipped by default because covariance estimation does not affect
 held-out likelihood. Every validation fold is transformed with its training
 fold's fitted encoder.
@@ -29,5 +34,9 @@ fails, `Avg_OOS_LL` and `Total_OOS_LL` are `NaN`; use
 `Avg_Successful_OOS_LL` and `Fold_Errors` for diagnosis, not model ranking.
 Convergence is reported independently in `Converged_Folds`,
 `Nonconverged_Folds`, and `Fold_Converged`.
+`Fold_SE_Panel_LL` contains within-fold standard errors and `SE_OOS_LL` is the
+pooled panel-level standard error. `Selected_Best` marks the largest mean score;
+`Selected_One_SE` marks the smallest class count within one best-model standard
+error of it.
 
-::: lcl._cross_validation.cv_optimal_classes
+::: lcl.cv_optimal_classes

@@ -10,32 +10,42 @@ covariance estimators, fractional-response demographic regressions, and delta-me
 willingness-to-pay (WTP) distributions.
 """
 
-from collections.abc import Mapping
+from __future__ import annotations
 
-from jax import config
-from jaxtyping import install_import_hook
+from collections.abc import Callable as _Callable
+from collections.abc import Mapping as _Mapping
+
+from jax import config as _jax_config
+from jaxtyping import install_import_hook as _install_import_hook
 
 # Adopt 64-bit precision before any JAX arrays are created.
 # Discrete choice models are highly sensitive to vanishing gradients
 # in the denominator of the logit probability.
-config.update("jax_enable_x64", True)
+_jax_config.update("jax_enable_x64", True)
 
 # Ensure array arguments have mutually compatible shapes throughout the package.
-with install_import_hook("lcl", "beartype.beartype"):
+with _install_import_hook("lcl", "beartype.beartype"):
     from lcl.constraints import NegativeCoefficient
     from lcl._cross_validation import cv_optimal_classes
-    from lcl._prediction import LCLPrediction
-    from lcl._results import LCLResults
-    from lcl._struct import (
+    from lcl.options import (
         DiagnosticsOptions,
         FitOptions,
         InferenceOptions,
+        Options,
         OptimizationOptions,
         PartitionType,
         PastChoicesData,
         WTPRequest,
     )
-    from lcl.conditional_logit import CLResults, ConditionalLogit
+    from lcl.results import (
+        CLResults,
+        CLPrediction,
+        LCLDiagnostics,
+        LCLPrediction,
+        LCLResults,
+        ResultsProtocol,
+    )
+    from lcl.conditional_logit import ConditionalLogit
     from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
     from lcl.spec import ChoiceIds, LCLSpec
 
@@ -44,11 +54,14 @@ def fit(
     data: object,
     spec: LCLSpec,
     *,
+    options: Options | None = None,
     fit_options: FitOptions | None = None,
     optimization_options: OptimizationOptions | None = None,
     inference: InferenceOptions | None = None,
     diagnostics: DiagnosticsOptions | None = None,
-    variable_labels: Mapping[str, str] | None = None,
+    variable_labels: _Mapping[str, str] | None = None,
+    dems_data: object | None = None,
+    progress_callback: _Callable[[dict[str, object]], None] | None = None,
 ) -> LCLResults:
     """Fit a latent-class conditional-logit model from an :class:`LCLSpec`.
 
@@ -79,11 +92,14 @@ def fit(
     model = LatentClassConditionalLogit(spec=spec)
     return model.fit(
         data=data,
+        options=options,
         fit_options=fit_options,
         optimization_options=optimization_options,
         inference=inference,
         diagnostics=diagnostics,
         variable_labels=variable_labels,
+        dems_data=dems_data,
+        progress_callback=progress_callback,
     )
 
 
@@ -92,20 +108,31 @@ __all__ = [
     "LatentClassConditionalLogit",
     "ConditionalLogit",
     "CLResults",
+    "CLPrediction",
     "ChoiceIds",
     "LCLSpec",
     "NegativeCoefficient",
     "FitOptions",
     "OptimizationOptions",
     "InferenceOptions",
+    "Options",
     "DiagnosticsOptions",
     "LCLResults",
     "LCLPrediction",
+    "LCLDiagnostics",
+    "ResultsProtocol",
     "WTPRequest",
     "PartitionType",
     "PastChoicesData",
     "fit",
     "cv_optimal_classes",
 ]
+
+# Imported submodules are implementation details of package initialization.  Keep
+# ``dir(lcl)`` honest: every public, non-underscore name is declared in ``__all__``.
+for _imported_name in tuple(globals()):
+    if not _imported_name.startswith("_") and _imported_name not in __all__:
+        globals().pop(_imported_name)
+del _imported_name
 
 # EOF

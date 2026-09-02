@@ -8,7 +8,8 @@ from jaxtyping import Array, Float64
 
 from lcl._optimize import exact_newton_minimize
 from lcl._scheduling import ITERATION_THRESHOLD_BYTES, use_sequential
-from lcl._struct import Data, OptimizationOptions
+from lcl.options import OptimizationOptions
+from lcl._struct import Data
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +44,7 @@ def _update_thetas(
         Estimation data containing the panel-level demographic matrix.
     num_classes : int
         Total number of latent classes, including the baseline class.
-    optimization_options : :class:`~lcl._struct.OptimizationOptions` | None, optional
+    optimization_options : :class:`~lcl.options.OptimizationOptions` | None, optional
         Newton optimizer configuration for the fractional-response M-step.
 
     Returns
@@ -91,8 +92,8 @@ def _perform_frac_response_reg(
         Estimation data containing demographics and dimensional metadata.
     num_classes : int
         Total number of latent classes, including the baseline class.
-    optimization_options : :class:`~lcl._struct.OptimizationOptions` | None, optional
-        Optimizer settings. Defaults to :class:`~lcl._struct.OptimizationOptions`.
+    optimization_options : :class:`~lcl.options.OptimizationOptions` | None, optional
+        Optimizer settings. Defaults to :class:`~lcl.options.OptimizationOptions`.
 
     Returns
     -------

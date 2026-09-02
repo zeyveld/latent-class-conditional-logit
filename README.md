@@ -10,7 +10,7 @@ Although I'm an economist by training, this package is intended for all social s
 
 ## Key features
 
-- **A declarative, high-level API**: describe the model once with an `LCLSpec` and fit it with `lcl.fit`. Estimation, optimizer, inference, and diagnostic behaviour are each tuned through a single grouped options object (`FitOptions`, `OptimizationOptions`, `InferenceOptions`, `DiagnosticsOptions`).
+- **A declarative, high-level API**: describe the model once with an `LCLSpec` and fit it with `lcl.fit`. `Options` groups the focused `FitOptions`, `OptimizationOptions`, `InferenceOptions`, and `DiagnosticsOptions` objects for every fitting entry point.
 - **`LatentClassConditionalLogit`**: finite-mixture conditional logit with a fractional-response multinomial logit regression of class membership on demographics.
 - **`ConditionalLogit`**: standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
 - **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Folds are split at the decision-maker level, so no individuals' choices appear in both training and hold-out data.
@@ -47,6 +47,7 @@ from lcl import (
     InferenceOptions,
     LCLSpec,
     NegativeCoefficient,
+    Options,
     OptimizationOptions,
 )
 
@@ -101,17 +102,16 @@ spec = LCLSpec(
 results = lcl.fit(
     df,
     spec,
-    fit_options=FitOptions(
-        seed=7,
-        starts=3,
-        max_em_iter=50,
-        num_devices=1,
+    options=Options(
+        fit=FitOptions(
+            seed=7,
+            starts=3,
+            max_em_iter=50,
+            num_devices=1,
+        ),
+        optimization=OptimizationOptions(maxiter=40, gradient_tol=1e-5),
+        inference=InferenceOptions(covariance="clustered"),
     ),
-    optimization_options=OptimizationOptions(
-        maxiter=40,
-        gradient_tol=1e-5,
-    ),
-    inference=InferenceOptions(covariance="clustered"),
 )
 
 summary = results.summarize_betas()
@@ -147,8 +147,8 @@ cv = lcl.cv_optimal_classes(
 ```
 
 `Avg_OOS_LL` is mean held-out log likelihood per panel. The returned frame also
-contains per-fold likelihoods, train/test panel counts, convergence flags, and
-failure messages. If any fold fails, `Avg_OOS_LL` is `NaN` rather than silently
+contains per-fold likelihoods and standard errors, train/test panel counts,
+convergence flags, `Selected_Best`/`Selected_One_SE`, and failure messages. If any fold fails, `Avg_OOS_LL` is `NaN` rather than silently
 averaging only successful folds; `Avg_Successful_OOS_LL` remains available for
 diagnosis.
 
@@ -165,13 +165,15 @@ cl_results = lcl.ConditionalLogit().fit(
     choice_col="choice",
     case_varnames=["price", "quality"],
     weights="survey_weight",
-    optimization_options=OptimizationOptions(gradient_tol=1e-5),
-    inference=InferenceOptions(covariance="clustered"),
+    options=Options(
+        optimization=OptimizationOptions(gradient_tol=1e-5),
+        inference=InferenceOptions(covariance="clustered"),
+    ),
 )
 ```
 
-The configuration objects are `FitOptions`, `OptimizationOptions`, and
-`InferenceOptions`. Keep utility and membership formulas in their separate
+The `Options` bundle contains `FitOptions`, `OptimizationOptions`,
+`InferenceOptions`, and `DiagnosticsOptions`. Keep utility and membership formulas in their separate
 fields, and pass specifications to lower-level entry points by keyword:
 `LatentClassConditionalLogit(spec=spec)` and
 `cv_optimal_classes(..., spec=spec)`.
@@ -197,15 +199,18 @@ version of the table, elided here):
 The parentheses enclose Delta-method standard errors of the population moments.
 `summarize_betas()` also returns those moments as a tidy Polars frame; pass
 `show=False` for computation without terminal or LaTeX output. The class-specific
-β's are available with `results.class_coefficients()`. Both frames preserve raw
+β's and their standard errors are available with `results.class_coefficients()`;
+use `membership_coefficients()` for membership logits and
+`classification_diagnostics()` for posterior separation. All frames preserve raw
 variable names and include a `label` column for publication-ready tables.
 
 For prediction, prefer `results.predict(data=counterfactual_df)`. Array-oriented
 callers should pass `dem_panel_ids` with `dems` so LCL can validate and reorder
 panel demographics; the same alignment field is available on `PastChoicesData`.
 `prediction.compute_wtp(..., show=False)` returns its dictionary of Polars tables
-without printing, and numeric quintile/custom-break groups follow numeric bin
-order.
+without printing and supports delta or parametric-bootstrap SEs. Prediction also
+provides `market_shares()` and demand-weighted `aggregate_elasticities()`; tied
+quantile values are never split across bins.
 
 The tutorials document weight-key conventions, cross-validation failure
 semantics, panel alignment, and the current API patterns used above.

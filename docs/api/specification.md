@@ -1,25 +1,27 @@
 # Specification & options
 
-Define a model with [`LCLSpec`][lcl.spec.LCLSpec], then estimate it with
-[`lcl.fit`][lcl.fit]. Three option objects configure the EM loop, Newton
-optimizer, and inference without expanding the fitting signature.
-`DiagnosticsOptions` separately controls diagnostic thresholds.
+Define a model with [`LCLSpec`][lcl.LCLSpec], then estimate it with
+[`lcl.fit`][lcl.fit]. The four focused option objects can be collected in one
+[`Options`][lcl.options.Options] bundle shared by every fitting entry point.
 
 ```python
 import lcl
-from lcl import FitOptions, InferenceOptions, OptimizationOptions
+from lcl import FitOptions, InferenceOptions, OptimizationOptions, Options
 
 results = lcl.fit(
     data,
     spec,
-    fit_options=FitOptions(seed=42, starts=3, max_em_iter=500),
-    optimization_options=OptimizationOptions(
-        maxiter=75,
-        gradient_tol=1e-5,
+    options=Options(
+        fit=FitOptions(seed=42, starts=3, max_em_iter=500),
+        optimization=OptimizationOptions(maxiter=75, gradient_tol=1e-5),
+        inference=InferenceOptions(covariance="clustered"),
     ),
-    inference=InferenceOptions(covariance="clustered"),
 )
 ```
+
+The legacy `fit_options=`, `optimization_options=`, `inference=`, and
+`diagnostics=` keywords remain available, but do not mix them with `options=`;
+ambiguous partial merges raise an error.
 
 Use separate `utility_formula` and `membership_formula` fields for formula-based
 designs. `LCLSpec` is immutable, so it can be reused safely across fitting and
@@ -31,18 +33,20 @@ cross-validation.
 
 ## Model specification
 
-::: lcl.spec.LCLSpec
+::: lcl.LCLSpec
 
-::: lcl.spec.ChoiceIds
+::: lcl.ChoiceIds
 
-::: lcl.constraints.NegativeCoefficient
+::: lcl.NegativeCoefficient
 
 ## Options
 
-::: lcl._struct.FitOptions
+::: lcl.options.FitOptions
 
-::: lcl._struct.OptimizationOptions
+::: lcl.options.OptimizationOptions
 
-::: lcl._struct.InferenceOptions
+::: lcl.options.InferenceOptions
 
-::: lcl._struct.DiagnosticsOptions
+::: lcl.options.DiagnosticsOptions
+
+::: lcl.options.Options

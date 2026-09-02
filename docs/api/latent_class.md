@@ -9,24 +9,25 @@ class remains available for direct use.
 
 ```python
 import lcl
-from lcl import FitOptions
+from lcl import FitOptions, Options
 
-results = lcl.fit(data, spec, fit_options=FitOptions(starts=3))
+options = Options(fit=FitOptions(starts=3))
+results = lcl.fit(data, spec, options=options)
 
 # Lower-level orchestration when a persistent model object is useful:
 model = lcl.LatentClassConditionalLogit(spec=spec)
-results = model.fit(data, fit_options=FitOptions(starts=3))
+results = model.fit(data, options=options)
 ```
 
 Pass `spec` by keyword to the lower-level constructor.
 
 ## Model
 
-::: lcl.latent_class_conditional_logit.LatentClassConditionalLogit
+::: lcl.LatentClassConditionalLogit
 
 ## Results
 
-::: lcl._results.LCLResults
+::: lcl.results.LCLResults
 
 ### Held-out scoring
 
@@ -45,11 +46,18 @@ and terminal renderings:
 
 ```python
 summary = results.summarize_betas(show=False)
+class_coefficients = results.class_coefficients()  # includes std_error
+membership = results.membership_coefficients()    # class 0 is the reference
+classification = results.classification_diagnostics()
 ```
+
+`parameter_names()` labels covariance rows and columns exactly. `converged`,
+`cov_matrix`, and `adjusted_bic` are the canonical names shared with conditional
+logit; `convergence`, `covariance`, and `abic` are deprecated aliases.
 
 ## Diagnostics
 
-::: lcl._diagnostics.LCLDiagnostics
+::: lcl.results.LCLDiagnostics
 
 ## Prediction and counterfactuals
 
@@ -57,16 +65,28 @@ Tabular prediction is preferred because it reuses the fitted encoder:
 
 ```python
 prediction = results.predict(data=counterfactual_data)
+shares = prediction.market_shares()
+aggregate = prediction.aggregate_elasticities(["cost", "time"])
 ```
+
+Pass `panel_weights=` to `predict` as a panel-keyed mapping, a prediction-data
+column name, or a vector in sorted prediction-panel order. WTP supports
+`se="delta"`, `se="bootstrap"` (an asymptotic parametric bootstrap), and
+`se="none"`. Posterior-conditioned WTP uncertainty is refused because the
+current implementation does not differentiate through the Bayesian update.
+
+Surplus frames include `surplus_units` (`money` with a numeraire, otherwise
+`utils`). Use `baseline_prediction.surplus_change(counterfactual_prediction)`
+for the identified welfare change rather than comparing unnormalised levels.
 
 For array-style prediction, supply `dem_panel_ids` with `dems` so demographic
 rows can be validated and reordered. Without those IDs, demographic rows must
 follow sorted unique panel-ID order.
 
-::: lcl._prediction.LCLPrediction
+::: lcl.results.LCLPrediction
 
-::: lcl._struct.WTPRequest
+::: lcl.options.WTPRequest
 
-::: lcl._struct.PartitionType
+::: lcl.options.PartitionType
 
-::: lcl._struct.PastChoicesData
+::: lcl.options.PastChoicesData

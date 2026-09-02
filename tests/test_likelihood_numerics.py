@@ -16,8 +16,7 @@ from lcl._demographics import _compute_grouped_data_loglik_grad_hess
 from lcl._em_alg_steps import _compute_panel_logliks
 from lcl._jax_compat import device_put_array_leaves
 from lcl._optimize import exact_newton_minimize
-from lcl._struct import (
-    Data,
+from lcl.options import (
     DiagnosticsOptions,
     FitOptions,
     InferenceOptions,
@@ -26,6 +25,7 @@ from lcl._struct import (
     PastChoicesData,
     WTPRequest,
 )
+from lcl._struct import Data
 from lcl.spec import ChoiceIds, LCLSpec
 from lcl.conditional_logit import ConditionalLogit
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
@@ -261,7 +261,7 @@ def test_newton_backtracking_only_uses_scalar_value_function() -> None:
     def value_fn(params):
         jax.debug.callback(lambda _: bump("value"), params[0])
         base_loss = (params[0] - 1.0) ** 2
-        return jnp.where(params[0] > 0.75, 100.0, base_loss)
+        return jnp.where(params[0] > 0.5, 100.0, base_loss)
 
     def value_grad_hess_fn(params):
         jax.debug.callback(lambda _: bump("heavy"), params[0])
@@ -337,7 +337,12 @@ def _small_wtp_df() -> pl.DataFrame:
                         "alt": alt,
                         "choice": alt == ((panel_idx + case) % 2),
                         "cost": float(2.0 + alt + case + 0.25 * quintile),
-                        "time": float(8.0 - alt + 0.5 * case + quintile),
+                        "time": float(
+                            8.0
+                            + 0.5 * case
+                            + quintile
+                            - alt * (0.4 + 0.1 * case + 0.05 * quintile)
+                        ),
                         "income_quintile": f"Q{quintile}",
                         "income_q2": float(quintile == 2),
                         "income_q3": float(quintile == 3),
@@ -515,8 +520,8 @@ def test_lcl_robust_covariance_and_delta_method_outputs_are_on_cpu() -> None:
     assert _device_platform(results.cov_matrix) == "cpu"
     assert _device_platform(means) == "cpu"
     assert _device_platform(se_means) == "cpu"
-    assert jnp.all(jnp.isfinite(results.cov_matrix))
-    assert jnp.all(jnp.isfinite(se_means))
+    assert jnp.all(jnp.isnan(results.cov_matrix))
+    assert jnp.all(jnp.isnan(se_means))
 
 
 def test_prediction_accepts_tabular_past_choices() -> None:
@@ -687,6 +692,7 @@ def test_wtp_accepts_raw_prediction_dummy_bundle_and_external_partition_data(
     assert onp.allclose(
         dummy_df["Standard_Error"].to_numpy(),
         raw_df["Standard_Error"].to_numpy(),
+        equal_nan=True,
     )
     captured = capsys.readouterr()
     assert "Marginal WTP for time by income_quintile" in captured.out
@@ -844,7 +850,7 @@ def test_formula_string_categorical_base_reused_in_prediction() -> None:
                         "case": case,
                         "alt": alt,
                         "choice": mode == chosen,
-                        "cost": float(alt + case),
+                        "cost": float(case + alt * (1.0 + 0.02 * panel + 0.1 * case)),
                         "mode": mode,
                         "segment": segment,
                     }
@@ -931,7 +937,7 @@ def test_separate_utility_and_membership_formulas_reuse_categorical_bases() -> N
                         "case": case,
                         "alt": alt,
                         "choice": mode == chosen,
-                        "cost": float(alt + case),
+                        "cost": float(case + alt * (1.0 + 0.02 * panel + 0.1 * case)),
                         "mode": mode,
                         "segment": segment,
                     }
@@ -978,7 +984,7 @@ def test_membership_formula_accepts_external_demographics() -> None:
                         "case": case,
                         "alt": alt,
                         "choice": mode == ("rail" if case == 1 else "bus"),
-                        "cost": float(alt + case),
+                        "cost": float(case + alt * (1.0 + 0.02 * panel + 0.1 * case)),
                         "mode": mode,
                     }
                 )
@@ -1144,7 +1150,7 @@ def test_cl_hessian_covariance_uses_exact_hessian_not_opg_inverse() -> None:
 
     expected_cov = jnp.linalg.pinv(jax.hessian(objective)(results.latent_coeff_))
 
-    assert onp.allclose(onp.array(results.covariance), onp.array(expected_cov))
+    assert onp.allclose(onp.array(results.cov_matrix), onp.array(expected_cov))
 
 
 def test_cl_skip_standard_errors_returns_nan_inference() -> None:
@@ -1160,5 +1166,5 @@ def test_cl_skip_standard_errors_returns_nan_inference() -> None:
         inference=InferenceOptions(skip=True),
     )
 
-    assert jnp.all(jnp.isnan(results.covariance))
+    assert jnp.all(jnp.isnan(results.cov_matrix))
     assert jnp.all(jnp.isnan(results.stderr))

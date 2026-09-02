@@ -4,7 +4,7 @@ The class count controls both fit and interpretability. LCL reports BIC, CAIC, a
 adjusted BIC; panel-blocked cross-validation supplies a complementary measure of
 out-of-sample performance.
 
-[`cv_optimal_classes`][lcl._cross_validation.cv_optimal_classes] assigns each
+[`cv_optimal_classes`][lcl.cv_optimal_classes] assigns each
 decision-maker's complete choice history to one fold. No panel contributes choices
 to both training and validation data.
 
@@ -70,6 +70,8 @@ print(
     cv_results.select(
         "Num_Classes",
         "Avg_OOS_LL",
+        "SE_OOS_LL",
+        "Selected_One_SE",
         "Successful_Folds",
         "Failed_Folds",
         "Converged_Folds",
@@ -117,7 +119,7 @@ level inference is genuinely needed.
 
 The result contains aggregate metrics and equal-length list columns for the folds:
 
-- `Fold_OOS_LL` and `Fold_Mean_Panel_LL`
+- `Fold_OOS_LL`, `Fold_Mean_Panel_LL`, and `Fold_SE_Panel_LL`
 - `Fold_Converged`
 - `Fold_Train_Panels` and `Fold_Test_Panels`
 - `Fold_Errors`
@@ -132,6 +134,7 @@ fold_details = (
         "Fold",
         "Fold_OOS_LL",
         "Fold_Mean_Panel_LL",
+        "Fold_SE_Panel_LL",
         "Fold_Converged",
         "Fold_Train_Panels",
         "Fold_Test_Panels",
@@ -141,6 +144,7 @@ fold_details = (
         "Fold",
         "Fold_OOS_LL",
         "Fold_Mean_Panel_LL",
+        "Fold_SE_Panel_LL",
         "Fold_Converged",
         "Fold_Train_Panels",
         "Fold_Test_Panels",
@@ -158,6 +162,20 @@ aid, and `Fold_Errors` records the error text.
 Nonconvergence is reported separately from failure. A fold can produce a finite
 held-out score while `Fold_Converged` is false; do not use that candidate as a
 final estimate until its optimization settings are adequate.
+
+`Selected_Best` marks the largest complete mean held-out score.
+`Selected_One_SE` applies the parsimonious rule: it marks the smallest class count
+whose mean is no more than the best model's `SE_OOS_LL` below the best mean.
+
+To reuse an external split, pass every panel exactly once as explicit test groups
+or as a panel-to-fold mapping:
+
+```python
+user_folds = {panel_id: region_by_panel[panel_id] for panel_id in panel_ids}
+cv_results = lcl.cv_optimal_classes(
+    df_long, spec=spec, num_classes_list=[2, 3, 4], folds=user_folds
+)
+```
 
 ## Plot the comparison
 

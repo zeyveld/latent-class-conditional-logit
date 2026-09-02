@@ -152,7 +152,8 @@ cv_results = lcl.cv_optimal_classes(
 ```
 
 Cross-validation reports pooled mean held-out log likelihood per panel, fold
-convergence, panel counts, and explicit failure diagnostics.
+standard errors, best and one-SE selections, convergence, panel counts, and
+explicit failure diagnostics. User-defined panel folds are supported.
 
 ## What the package covers
 
@@ -161,10 +162,11 @@ convergence, panel counts, and explicit failure diagnostics.
 - **Standard conditional logit.** Fit a homogeneous benchmark with the same
   data-ingestion and inference conventions.
 - **Inference and diagnostics.** Request panel-clustered sandwich covariance,
-  delta-method standard errors, convergence summaries, and structured audit
-  output.
-- **Counterfactuals.** Reuse the fitted encoder for new choice sets and, when
-  useful, update class probabilities with observed choice histories. 
+  class/membership and nonlinear ratio standard errors, classification metrics,
+  convergence summaries, and structured audit output.
+- **Counterfactuals.** Reuse the fitted encoder for new choice sets, weighted
+  market shares, aggregate elasticities, and explicitly unit-labeled welfare
+  changes; optionally update class probabilities with observed choice histories.
 - **Model selection.** Compare class counts using blocked cross-validation that
   keeps each decision-maker entirely within one fold.
 

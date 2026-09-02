@@ -22,15 +22,84 @@ from lcl._choice_model import ChoiceModel
 from lcl._em_alg_startup import _get_starting_vals
 from lcl._em_alg_steps import _em_step
 from lcl._results import LCLResults
-from lcl._struct import (
+from lcl.options import (
     DiagnosticsOptions,
     FitOptions,
     InferenceOptions,
+    Options,
     OptimizationOptions,
+    _resolve_options,
 )
+from lcl._struct import EMVars
 from lcl.spec import LCLSpec, resolve_lcl_spec
 
 logger = logging.getLogger(__name__)
+
+
+def _canonicalize_classes(em_vars: EMVars) -> tuple[EMVars, tuple[int, ...]]:
+    """Return an observationally equivalent EM state in deterministic class order."""
+    if (
+        em_vars.latent_betas is None
+        or em_vars.structural_betas is None
+        or em_vars.shares is None
+    ):
+        return em_vars, ()
+
+    structural = onp.asarray(em_vars.structural_betas)
+    shares = onp.asarray(em_vars.shares)
+    num_classes = structural.shape[1]
+    permutation = tuple(
+        sorted(
+            range(num_classes),
+            key=lambda class_idx: (
+                *structural[:, class_idx].tolist(),
+                float(shares[class_idx]),
+                class_idx,
+            ),
+        )
+    )
+    perm = jnp.asarray(permutation, dtype=jnp.int32)
+
+    thetas = em_vars.thetas
+    if thetas is not None:
+        full_membership = jnp.concatenate(
+            [jnp.zeros((thetas.shape[0], 1), dtype=thetas.dtype), thetas], axis=1
+        )
+        reordered = full_membership[:, perm]
+        thetas = reordered[:, 1:] - reordered[:, :1]
+
+    posterior = em_vars.class_probs_by_panel
+    if posterior is not None:
+        posterior = posterior[:, perm]
+
+    return (
+        EMVars(
+            latent_betas=em_vars.latent_betas[:, perm],
+            structural_betas=em_vars.structural_betas[:, perm],
+            thetas=thetas,
+            shares=em_vars.shares[perm],
+            unconditional_loglik=em_vars.unconditional_loglik,
+            class_probs_by_panel=posterior,
+        ),
+        permutation,
+    )
+
+
+def _permute_em_history(
+    rows: list[dict[str, Any]], permutation: tuple[int, ...]
+) -> list[dict[str, Any]]:
+    """Align class-indexed EM history columns with the canonical final order."""
+    if not permutation:
+        return rows
+    aligned: list[dict[str, Any]] = []
+    for row in rows:
+        new_row = dict(row)
+        old_shares = [row.get(f"class_{idx}_share") for idx in range(len(permutation))]
+        for new_idx, old_idx in enumerate(permutation):
+            if old_shares[old_idx] is not None:
+                new_row[f"class_{new_idx}_share"] = old_shares[old_idx]
+        aligned.append(new_row)
+    return aligned
 
 
 class LatentClassConditionalLogit(ChoiceModel):
@@ -110,6 +179,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         dem_varnames: Sequence[str] | None = None,
         variable_labels: Mapping[str, str] | None = None,
         dems_data: Any | None = None,
+        options: Options | None = None,
         fit_options: FitOptions | None = None,
         optimization_options: OptimizationOptions | None = None,
         inference: InferenceOptions | None = None,
@@ -214,14 +284,17 @@ class LatentClassConditionalLogit(ChoiceModel):
         self.numeraire = self.spec.numeraire
         self.numeraire_min_abs = self.spec.numeraire_min_abs
 
-        if fit_options is None:
-            fit_options = FitOptions()
-        if optimization_options is None:
-            optimization_options = OptimizationOptions()
-        if inference is None:
-            inference = InferenceOptions()
-        if diagnostics is None:
-            diagnostics = DiagnosticsOptions()
+        resolved_options = _resolve_options(
+            options,
+            fit_options=fit_options,
+            optimization_options=optimization_options,
+            inference=inference,
+            diagnostics=diagnostics,
+        )
+        fit_options = resolved_options.fit
+        optimization_options = resolved_options.optimization
+        inference = resolved_options.inference
+        diagnostics = resolved_options.diagnostics
 
         if fit_options.starts > 1:
             best_seed = self._select_best_start(
@@ -411,6 +484,8 @@ class LatentClassConditionalLogit(ChoiceModel):
                 fit_options.em_tol,
                 fit_options.max_em_iter,
             )
+        em_vars, class_permutation = _canonicalize_classes(em_vars)
+        em_history_rows = _permute_em_history(em_history_rows, class_permutation)
         final_em_iter = max(em_recursion - 1, 0)
         optimization_history_rows = self._optimizer_snapshot(
             em_vars, diff_unchosen_chosen, data_struct, final_em_iter

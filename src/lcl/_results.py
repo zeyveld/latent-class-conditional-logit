@@ -1,8 +1,9 @@
 """In-sample estimation results and inference."""
 
 import logging
-from collections.abc import Callable
-from typing import Any, Protocol, cast, runtime_checkable
+import warnings
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, cast
 
 import jax
 import jax.numpy as jnp
@@ -22,135 +23,23 @@ from lcl._em_alg_steps import (
 )
 from lcl._encoding import _coerce_frame
 from lcl._jax_compat import cpu_device, device_put_array_leaves
+from lcl._inference import _invert_information, _symmetrize
 from lcl._kernels import _choice_probabilities_and_logsum
 from lcl._logging import log_or_print
 from lcl._params import ParamPacking
-from lcl._prediction import LCLPrediction
-from lcl._presentation import format_lcl_beta_summary
-from lcl._struct import (
-    Data,
-    DiagnosticsOptions,
-    DiffUnchosenChosen,
-    EMVars,
-    InferenceOptions,
-    ParsedData,
-    PastChoicesData,
+from lcl._prediction import LCLPrediction, resolve_panel_weights
+from lcl._predict_inputs import (
+    _parse_past_choices,
+    _parsed_prediction_arrays,
+    _prediction_partition_data,
+    _validate_past_choice_panels,
 )
-from lcl.utils import _invert_information
+from lcl._reporting import _history_frame, _model_variable_label
+from lcl._presentation import format_lcl_beta_summary
+from lcl.options import DiagnosticsOptions, InferenceOptions
+from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
 logger = logging.getLogger(__name__)
-
-
-def _symmetrize(
-    matrix: Float64[Array, "all_params all_params"],
-) -> Float64[Array, "all_params all_params"]:
-    """Remove tiny numerical asymmetry from covariance-style matrices."""
-    return 0.5 * (matrix + matrix.T)
-
-
-def _history_frame(rows: list[dict[str, Any]] | None) -> pl.DataFrame:
-    """Convert diagnostic history rows containing JAX scalars to Polars."""
-    if not rows:
-        return pl.DataFrame()
-    clean_rows: list[dict[str, object]] = []
-    for row in rows:
-        clean_row: dict[str, object] = {}
-        for key, value in row.items():
-            arr = onp.asarray(value)
-            clean_row[key] = arr.item() if arr.shape == () else arr.tolist()
-        clean_rows.append(clean_row)
-    return pl.DataFrame(clean_rows)
-
-
-def _model_variable_label(model: Any, variable: str) -> str:
-    """Return a fitted model's display label for ``variable`` when available."""
-    labeler = getattr(model, "variable_label", None)
-    if callable(labeler):
-        return str(labeler(variable))
-    return variable
-
-
-def _panel_constant_columns(data: object, panel_col: str) -> pl.DataFrame:
-    """Return raw columns that are constant within each prediction panel.
-
-    Parameters
-    ----------
-    data : object
-        Tabular prediction data.
-    panel_col : str
-        Column identifying decision-makers.
-
-    Returns
-    -------
-    pl.DataFrame
-        One row per panel, keyed by ``"panels"``, containing only columns whose
-        values do not vary within panel.
-    """
-    df = _coerce_frame(data)
-    candidate_cols = [col for col in df.columns if col != panel_col]
-    if not candidate_cols:
-        return (
-            df.select(panel_col)
-            .unique(maintain_order=True)
-            .rename({panel_col: "panels"})
-        )
-
-    max_unique_by_col = (
-        df.group_by(panel_col)
-        .agg([pl.col(col).n_unique().alias(col) for col in candidate_cols])
-        .select(pl.exclude(panel_col).max())
-        .row(0)
-    )
-    constant_cols = [
-        col
-        for col, max_unique in zip(candidate_cols, max_unique_by_col)
-        if max_unique <= 1
-    ]
-    return (
-        df.select([panel_col, *constant_cols])
-        .unique(subset=[panel_col], maintain_order=True)
-        .rename({panel_col: "panels"})
-    )
-
-
-def _prediction_partition_data(
-    data: object,
-    dems_data: object | None,
-    panel_col: str,
-) -> pl.DataFrame:
-    """Build panel-level WTP partition data from raw prediction inputs."""
-    partition_df = _panel_constant_columns(data, panel_col)
-    if dems_data is None:
-        return partition_df
-
-    dems_partition_df = _panel_constant_columns(dems_data, panel_col)
-    dems_cols = [
-        col
-        for col in dems_partition_df.columns
-        if col == "panels" or col not in partition_df.columns
-    ]
-    if len(dems_cols) == 1:
-        return partition_df
-    return partition_df.join(
-        dems_partition_df.select(dems_cols), on="panels", how="left"
-    )
-
-
-@runtime_checkable
-class _PastChoicesParser(Protocol):
-    """Fitted model interface needed to encode historical choices."""
-
-    case_varnames: list[str]
-    dem_varnames: list[str] | None
-
-    def _transform_data(
-        self,
-        data: object,
-        dems_data: object | None = None,
-        require_choice: bool = False,
-    ) -> ParsedData:
-        """Transform raw choice data with the fitted empirical specification."""
-        ...
 
 
 class LCLResults:
@@ -200,11 +89,11 @@ class LCLResults:
             Number of EM recursions completed before termination.
         converged : bool
             Whether the explicit EM stopping criterion was satisfied.
-        inference : :class:`~lcl._struct.InferenceOptions` | None
+        inference : :class:`~lcl.options.InferenceOptions` | None
             Covariance and standard-error configuration.
         estim_time_sec : float
             Wall-clock estimation time in seconds.
-        diagnostics_config : :class:`~lcl._struct.DiagnosticsOptions` | None
+        diagnostics_config : :class:`~lcl.options.DiagnosticsOptions` | None
             Thresholds and switches for public diagnostics.
         em_history : list[dict[str, Any]] | None
             EM log-likelihood and class-share history.
@@ -245,10 +134,13 @@ class LCLResults:
         self.num_params = self._param_packing.num_params
         # Populated by _compute_covariance; stays None when inference is skipped.
         self.information_diagnostics: Any = None
+        self.observed_score_max = float("nan")
         self.cov_matrix = self._compute_covariance()
 
         # Compute information criteria
         num_panels = self.data.num_panels
+        self.aic = 2 * self.num_params - 2 * self.em_res.unconditional_loglik
+        self.aic3 = 3 * self.num_params - 2 * self.em_res.unconditional_loglik
         self.caic = (
             jnp.log(num_panels) + 1
         ) * self.num_params - 2 * self.em_res.unconditional_loglik
@@ -285,6 +177,55 @@ class LCLResults:
                 f"Adj. BIC: {self.adjusted_bic:.1f}>",
             ]
         )
+
+    def parameter_names(self) -> list[str]:
+        """Return names aligned with rows and columns of ``cov_matrix``."""
+        names = [
+            f"class_{class_idx}:{variable}"
+            for variable in self.model.case_varnames
+            for class_idx in range(self.model.num_classes)
+        ]
+        membership_rows = ["Intercept", *(self.model.dem_varnames or [])]
+        names.extend(
+            f"membership_class_{class_idx}:{variable}"
+            for variable in membership_rows
+            for class_idx in range(1, self.model.num_classes)
+        )
+        if len(names) != self.num_params:
+            raise RuntimeError(
+                "Parameter-name layout does not match covariance packing."
+            )
+        return names
+
+    @property
+    def convergence(self) -> bool:
+        """Deprecated alias for :attr:`converged`."""
+        warnings.warn(
+            "LCLResults.convergence is deprecated; use converged.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.converged
+
+    @property
+    def covariance(self) -> Array:
+        """Deprecated alias for :attr:`cov_matrix`."""
+        warnings.warn(
+            "LCLResults.covariance is deprecated; use cov_matrix.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.cov_matrix
+
+    @property
+    def abic(self) -> Array:
+        """Deprecated alias for :attr:`adjusted_bic`."""
+        warnings.warn(
+            "LCLResults.abic is deprecated; use adjusted_bic.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        return self.adjusted_bic
 
     def _pack_params(self) -> Float64[Array, "all_params"]:
         """Flatten structural parameters and class memberships for Hessian calculation."""
@@ -340,6 +281,12 @@ class LCLResults:
         if self.inference.skip:
             with jax.default_device(cpu):
                 return jnp.full((self.num_params, self.num_params), jnp.nan)
+        if self.inference.covariance == "robust":
+            raise ValueError(
+                "Case-level robust covariance is not valid for an LCL likelihood "
+                "whose latent class is shared within panel. Use covariance='clustered' "
+                "for panel-clustered inference or 'unadjusted'."
+            )
 
         logger.info("Computing LCL covariance matrix.")
         with jax.default_device(cpu):
@@ -352,6 +299,7 @@ class LCLResults:
             J, H = _panel_scores_and_hessian(
                 flat_params, diff_unchosen_chosen, data, self._param_packing
             )
+            self.observed_score_max = float(jnp.max(jnp.abs(jnp.sum(J, axis=0))))
             H_inv, diagnostics = _invert_information(
                 -H, label="latent-class observed information matrix"
             )
@@ -476,6 +424,39 @@ class LCLResults:
 
             return val, jnp.sqrt(jnp.maximum(variance, 0.0))
 
+    def _parametric_bootstrap_se(
+        self,
+        func: Callable[..., Float64[Array, "..."]],
+        flat_params: Float64[Array, "all_params"],
+        *args: object,
+        draws: int = 500,
+        seed: int = 0,
+        **kwargs: object,
+    ) -> Float64[Array, "..."]:
+        """Estimate nonlinear standard errors from asymptotic parameter draws."""
+        if draws < 2:
+            raise ValueError("bootstrap_draws must be at least 2.")
+        covariance = onp.asarray(self.cov_matrix, dtype=onp.float64)
+        if not onp.all(onp.isfinite(covariance)):
+            raise ValueError(
+                "A finite covariance matrix is required for bootstrap SEs."
+            )
+        eigenvalues, eigenvectors = onp.linalg.eigh(0.5 * (covariance + covariance.T))
+        tolerance = (
+            onp.finfo(onp.float64).eps
+            * max(1.0, float(onp.max(onp.abs(eigenvalues))))
+            * covariance.shape[0]
+        )
+        if float(eigenvalues.min()) < -tolerance:
+            raise ValueError("The covariance matrix is not positive semidefinite.")
+        root = eigenvectors * onp.sqrt(onp.maximum(eigenvalues, 0.0))[None, :]
+        rng = onp.random.default_rng(seed)
+        standard_normal = rng.standard_normal((draws, flat_params.size))
+        parameter_draws = onp.asarray(flat_params) + standard_normal @ root.T
+        target = Partial(func, *args, **kwargs)
+        values = jax.vmap(target)(jnp.asarray(parameter_draws))
+        return jnp.std(values, axis=0, ddof=1)
+
     def _calc_population_mean_betas(
         self,
         flat_params: Float64[Array, "all_params"],
@@ -511,6 +492,30 @@ class LCLResults:
 
         return jnp.sqrt(jnp.maximum(var_betas, 1e-250))
 
+    def _calc_structural_betas(
+        self, flat_params: Float64[Array, "all_params"]
+    ) -> Float64[Array, "alt_vars classes"]:
+        """Transform packed utility coefficients to their reported scale."""
+        latent_betas, _ = self._unpack_params(flat_params)
+        return self._param_packing.to_structural(latent_betas)
+
+    def _calc_membership_coefficients(
+        self, flat_params: Float64[Array, "all_params"]
+    ) -> Float64[Array, "dem_vars_plus_one classes_minus_one"]:
+        """Extract nonbaseline membership logits from packed parameters."""
+        _, thetas = self._unpack_params(flat_params)
+        return thetas
+
+    def _calc_class_shares(
+        self,
+        flat_params: Float64[Array, "all_params"],
+        dems: Float64[Array, "panels dem_vars"] | None,
+        num_panels: int,
+    ) -> Float64[Array, "classes"]:
+        """Average prior membership probabilities across the sample."""
+        _, thetas = self._unpack_params(flat_params)
+        return jnp.mean(self._get_class_probs(thetas, dems, num_panels), axis=0)
+
     def class_coefficients(self) -> pl.DataFrame:
         """Return class-specific structural coefficients.
 
@@ -521,11 +526,12 @@ class LCLResults:
             ``variable`` column preserves raw model names; ``label`` contains
             human-readable presentation labels.
         """
-        structural_betas = self.em_res.structural_betas
-        if structural_betas is None:
-            raise ValueError("Structural betas are required.")
+        structural_betas, standard_errors = self._apply_delta_method(
+            self._calc_structural_betas, self.flat_params
+        )
         rows = []
         beta_array = onp.asarray(structural_betas)
+        se_array = onp.asarray(standard_errors)
         for var_idx, variable in enumerate(self.model.case_varnames):
             for class_idx in range(self.model.num_classes):
                 rows.append(
@@ -534,7 +540,37 @@ class LCLResults:
                         "label": _model_variable_label(self.model, variable),
                         "class": class_idx,
                         "coefficient": float(beta_array[var_idx, class_idx]),
+                        "std_error": float(se_array[var_idx, class_idx]),
                         "constrained": variable == self.model.numeraire,
+                    }
+                )
+        return pl.DataFrame(rows)
+
+    def membership_coefficients(self) -> pl.DataFrame:
+        """Return nonbaseline class-membership coefficients with standard errors.
+
+        Class 0 is the reference category and therefore has no separately
+        estimated membership coefficients.
+        """
+        coefficients, standard_errors = self._apply_delta_method(
+            self._calc_membership_coefficients, self.flat_params
+        )
+        coefficient_array = onp.asarray(coefficients)
+        se_array = onp.asarray(standard_errors)
+        variables = ["Intercept", *(self.model.dem_varnames or [])]
+        rows = []
+        for variable_idx, variable in enumerate(variables):
+            for class_idx in range(1, self.model.num_classes):
+                rows.append(
+                    {
+                        "variable": variable,
+                        "label": _model_variable_label(self.model, variable),
+                        "class": class_idx,
+                        "reference_class": 0,
+                        "coefficient": float(
+                            coefficient_array[variable_idx, class_idx - 1]
+                        ),
+                        "std_error": float(se_array[variable_idx, class_idx - 1]),
                     }
                 )
         return pl.DataFrame(rows)
@@ -548,17 +584,68 @@ class LCLResults:
             One row per latent class with aggregate class share and effective
             panel mass.
         """
-        if self.em_res.shares is None:
-            raise ValueError("Class shares are required.")
-        shares = onp.asarray(self.em_res.shares)
+        if self.data.num_panels is None:
+            raise ValueError("Panel identifiers are required for class shares.")
+        shares, share_se = self._apply_delta_method(
+            self._calc_class_shares,
+            self.flat_params,
+            dems=self.data.dems,
+            num_panels=self.data.num_panels,
+        )
+        shares_array = onp.asarray(shares)
+        share_se_array = onp.asarray(share_se)
         rows = []
         posterior = self.em_res.class_probs_by_panel
         posterior_arr = onp.asarray(posterior) if posterior is not None else None
-        for class_idx, share in enumerate(shares):
-            row = {"class": class_idx, "share": float(share)}
+        for class_idx, share in enumerate(shares_array):
+            row = {
+                "class": class_idx,
+                "share": float(share),
+                "std_error": float(share_se_array[class_idx]),
+            }
             if posterior_arr is not None:
                 row["effective_panels"] = float(posterior_arr[:, class_idx].sum())
             rows.append(row)
+        return pl.DataFrame(rows)
+
+    def classification_diagnostics(self) -> pl.DataFrame:
+        """Summarize posterior separation and modal classification by class."""
+        posterior = self.em_res.class_probs_by_panel
+        if posterior is None:
+            raise ValueError("Posterior class probabilities are required.")
+        probabilities = onp.asarray(posterior, dtype=onp.float64)
+        modal = onp.argmax(probabilities, axis=1)
+        entropy = -onp.sum(probabilities * onp.log(onp.maximum(probabilities, 1e-300)))
+        entropy_r2 = 1.0 - entropy / (
+            probabilities.shape[0] * onp.log(self.model.num_classes)
+        )
+        prior_shares = probabilities.mean(axis=0)
+        rows = []
+        for class_idx in range(self.model.num_classes):
+            selected = modal == class_idx
+            modal_count = int(selected.sum())
+            average_posterior = (
+                float(probabilities[selected, class_idx].mean())
+                if modal_count
+                else float("nan")
+            )
+            prior = float(prior_shares[class_idx])
+            if modal_count and 0.0 < average_posterior < 1.0 and 0.0 < prior < 1.0:
+                occ = (average_posterior / (1.0 - average_posterior)) / (
+                    prior / (1.0 - prior)
+                )
+            else:
+                occ = float("nan")
+            rows.append(
+                {
+                    "class": class_idx,
+                    "modal_panels": modal_count,
+                    "modal_share": modal_count / probabilities.shape[0],
+                    "average_posterior": average_posterior,
+                    "odds_correct_classification": occ,
+                    "entropy_r2": float(entropy_r2),
+                }
+            )
         return pl.DataFrame(rows)
 
     def beta_summary(self) -> pl.DataFrame:
@@ -692,6 +779,21 @@ class LCLResults:
                 "value": float(self.em_res.unconditional_loglik),
                 "status": "ok",
                 "message": "Final unconditional log likelihood.",
+            },
+            {
+                "section": "fit",
+                "check": "observed_score_max",
+                "value": self.observed_score_max,
+                "status": (
+                    "warning"
+                    if onp.isfinite(self.observed_score_max)
+                    and self.observed_score_max > 1e-4
+                    else "ok"
+                ),
+                "message": (
+                    "Maximum absolute component of the final observed-data score; "
+                    "this checks stationarity of the mixture likelihood itself."
+                ),
             },
             {
                 "section": "data",
@@ -876,6 +978,8 @@ class LCLResults:
 
     def predict(
         self,
+        data: object | None = None,
+        *,
         X: ArrayLike | None = None,
         alts: ArrayLike | None = None,
         cases: ArrayLike | None = None,
@@ -883,9 +987,9 @@ class LCLResults:
         dems: ArrayLike | None = None,
         dem_panel_ids: ArrayLike | None = None,
         past_choices: object | None = None,
-        data: object | None = None,
         dems_data: object | None = None,
         past_choices_dems_data: object | None = None,
+        panel_weights: str | Mapping[object, float] | Sequence[float] | None = None,
     ) -> LCLPrediction:
         """Generate out-of-sample latent-class predictions.
 
@@ -946,10 +1050,18 @@ class LCLResults:
                 "past_choices_dems_data can only be used when past_choices is provided."
             )
         partition_data_df = None
+        raw_prediction_data = None
         if data is not None:
             parsed_predict = self.model._transform_data(data, dems_data=dems_data)
             encoder = getattr(self.model, "_encoder", None)
             if encoder is not None:
+                raw_prediction_data = _coerce_frame(data).sort(
+                    list(
+                        dict.fromkeys(
+                            [encoder.panels_col, encoder.cases_col, encoder.alts_col]
+                        )
+                    )
+                )
                 partition_data_df = _prediction_partition_data(
                     data, dems_data, encoder.panels_col
                 )
@@ -1044,6 +1156,13 @@ class LCLResults:
         panel_first_rows = predict_data.panels != jnp.roll(predict_data.panels, shift=1)
         panel_first_rows = panel_first_rows.at[0].set(True)
         panels_unique = onp.array(parsed_predict.original_panels[panel_first_rows])
+        encoder = getattr(self.model, "_encoder", None)
+        resolved_panel_weights = resolve_panel_weights(
+            panel_weights,
+            panels_unique,
+            raw_prediction_data,
+            encoder.panels_col if encoder is not None else "panels",
+        )
         wtp_alt_vars_by_panel_df = pl.DataFrame(
             onp.array(wtp_alt_vars_by_panel), schema=schema
         ).with_columns(pl.Series("panels", panels_unique))
@@ -1095,234 +1214,9 @@ class LCLResults:
             class_probs_by_panel=class_probs_by_panel,
             class_probabilities_source=class_probabilities_source,
             partition_data_df=partition_data_df,
+            original_alts=parsed_predict.original_alts,
+            original_cases=parsed_predict.original_cases,
+            original_panels=parsed_predict.original_panels,
+            raw_prediction_data=raw_prediction_data,
+            panel_weights=resolved_panel_weights,
         )
-
-
-def _parse_past_choices(
-    model: _PastChoicesParser,
-    past_choices: object,
-    past_choices_dems_data: object | None,
-) -> ParsedData:
-    """Parse historical choices for prediction-time class updating.
-
-    Parameters
-    ----------
-    model : _PastChoicesParser
-        Fitted model specification that owns the trained encoder and variable
-        metadata.
-    past_choices : PastChoicesData or object
-        Historical choices. ``PastChoicesData`` supports array-style callers; any
-        other object is treated as tabular data and transformed with the fitted
-        encoder.
-    past_choices_dems_data : object | None
-        Optional panel-level demographics to join to tabular ``past_choices``.
-
-    Returns
-    -------
-    :class:`~lcl._struct.ParsedData`
-        Encoded historical choices with validated choice indicators.
-
-    Raises
-    ------
-    ValueError
-        If ``past_choices_dems_data`` is supplied with ``PastChoicesData``.
-    """
-    if isinstance(past_choices, PastChoicesData):
-        if past_choices_dems_data is not None:
-            raise ValueError(
-                "past_choices_dems_data is only supported when past_choices is "
-                "provided as tabular data."
-            )
-        return _parsed_prediction_arrays(
-            X=past_choices.X,
-            dems=past_choices.dems,
-            alts=past_choices.alts,
-            cases=past_choices.cases,
-            panels=past_choices.panels,
-            dem_panel_ids=past_choices.dem_panel_ids,
-            y=past_choices.y,
-            case_varnames=model.case_varnames,
-            dem_varnames=model.dem_varnames,
-        )
-
-    return model._transform_data(
-        past_choices,
-        dems_data=past_choices_dems_data,
-        require_choice=True,
-    )
-
-
-def _validate_past_choice_panels(
-    parsed_past: ParsedData, parsed_predict: ParsedData
-) -> None:
-    """Require past-choice panels to match prediction panels exactly.
-
-    Posterior class probabilities are indexed by each dataset's own sequential
-    panel IDs, assigned from unique panel labels in sorted order. The two
-    indexations only align when both datasets contain the same panel-label set.
-
-    Parameters
-    ----------
-    parsed_past : ParsedData
-        Encoded historical choices.
-    parsed_predict : ParsedData
-        Encoded prediction data.
-
-    Raises
-    ------
-    ValueError
-        If the unique panel labels of the two datasets differ.
-    """
-    past_panels = onp.unique(onp.asarray(parsed_past.original_panels))
-    predict_panels = onp.unique(onp.asarray(parsed_predict.original_panels))
-    if past_panels.shape == predict_panels.shape and onp.array_equal(
-        past_panels, predict_panels
-    ):
-        return
-
-    def _sample(values: onp.ndarray) -> str:
-        suffix = ", ..." if values.shape[0] > 5 else ""
-        return f"{values[:5].tolist()}{suffix}"
-
-    missing = onp.setdiff1d(predict_panels, past_panels)
-    extra = onp.setdiff1d(past_panels, predict_panels)
-    raise ValueError(
-        "past_choices must contain exactly the panels present in the "
-        "prediction data, because posterior class probabilities are matched "
-        "to prediction panels by sorted panel ID. "
-        f"Panels missing from past_choices: {_sample(missing)}; "
-        f"panels absent from the prediction data: {_sample(extra)}."
-    )
-
-
-def _parsed_prediction_arrays(
-    X: ArrayLike,
-    dems: ArrayLike | None,
-    alts: ArrayLike,
-    cases: ArrayLike,
-    panels: ArrayLike,
-    dem_panel_ids: ArrayLike | None,
-    case_varnames: list[str],
-    dem_varnames: list[str] | None,
-    y: ArrayLike | None = None,
-) -> ParsedData:
-    """Parse array-style prediction inputs into the shared encoded-data container.
-
-    Parameters
-    ----------
-    X : ArrayLike
-        Alternative-specific design matrix in long format.
-    dems : ArrayLike | None
-        Optional panel-level demographic matrix, one row per unique panel.
-    alts : ArrayLike
-        Alternative identifiers aligned to rows of ``X``.
-    cases : ArrayLike
-        Choice-situation identifiers aligned to rows of ``X``.
-    panels : ArrayLike
-        Panel identifiers aligned to rows of ``X``.
-    dem_panel_ids : ArrayLike | None
-        Panel identifiers aligned to rows of ``dems``. When omitted, demographic
-        rows must already follow sorted unique panel-ID order.
-    case_varnames : list[str]
-        Names corresponding to columns of ``X``.
-    dem_varnames : list[str] | None
-        Names corresponding to columns of ``dems``.
-    y : ArrayLike | None, optional
-        Optional choice indicators for historical-choice updating.
-
-    Returns
-    -------
-    :class:`~lcl._struct.ParsedData`
-        Sorted arrays with contiguous zero-indexed IDs and original labels preserved.
-    """
-    X_np = onp.asarray(X)
-    alts_np = onp.asarray(alts)
-    cases_np = onp.asarray(cases)
-    panels_np = onp.asarray(panels)
-    if X_np.ndim != 2:
-        raise ValueError("X must be a two-dimensional design matrix.")
-    num_rows = X_np.shape[0]
-    if any(arr.shape != (num_rows,) for arr in (alts_np, cases_np, panels_np)):
-        raise ValueError(
-            "alts, cases, and panels must align one-to-one with rows of X."
-        )
-    if X_np.shape[1] != len(case_varnames):
-        raise ValueError(
-            f"X has {X_np.shape[1]} columns; expected {len(case_varnames)}."
-        )
-    if y is not None and onp.asarray(y).shape != (num_rows,):
-        raise ValueError("y must align one-to-one with rows of X.")
-    order = onp.lexsort((alts_np, cases_np, panels_np))
-
-    X_sorted = X_np[order]
-    alts_sorted = alts_np[order]
-    cases_sorted = cases_np[order]
-    panels_sorted = panels_np[order]
-    y_sorted = None if y is None else onp.asarray(y)[order]
-
-    panel_ids, panel_seq = onp.unique(panels_sorted, return_inverse=True)
-    alt_ids, alt_seq = onp.unique(alts_sorted, return_inverse=True)
-    _ = alt_ids
-
-    case_seq = onp.empty_like(cases_sorted, dtype=onp.uint32)
-    case_lookup: dict[tuple[object, object], int] = {}
-    # Cases are only unique within panel for some user datasets, so key on both IDs.
-    for idx, key in enumerate(zip(panels_sorted.tolist(), cases_sorted.tolist())):
-        if key not in case_lookup:
-            case_lookup[key] = len(case_lookup)
-        case_seq[idx] = case_lookup[key]
-
-    dems_array = None
-    if dems is not None:
-        dems_np = onp.asarray(dems)
-        if dems_np.ndim != 2:
-            raise ValueError("dems must be a two-dimensional matrix.")
-        if dems_np.shape[0] != panel_ids.shape[0]:
-            raise ValueError("dems must have one row per unique panel.")
-        expected_dem_vars = len(dem_varnames or [])
-        if dems_np.shape[1] != expected_dem_vars:
-            raise ValueError(
-                f"dems has {dems_np.shape[1]} columns; expected {expected_dem_vars}."
-            )
-        if dem_panel_ids is not None:
-            dem_panel_ids_np = onp.asarray(dem_panel_ids)
-            if dem_panel_ids_np.shape != (dems_np.shape[0],):
-                raise ValueError(
-                    "dem_panel_ids must align one-to-one with rows of dems."
-                )
-            if onp.unique(dem_panel_ids_np).shape[0] != dem_panel_ids_np.shape[0]:
-                raise ValueError("dem_panel_ids cannot contain duplicates.")
-            lookup = {
-                panel_id: idx for idx, panel_id in enumerate(dem_panel_ids_np.tolist())
-            }
-            missing_panels = [
-                panel_id for panel_id in panel_ids.tolist() if panel_id not in lookup
-            ]
-            extra_panels = [
-                panel_id
-                for panel_id in lookup
-                if panel_id not in set(panel_ids.tolist())
-            ]
-            if missing_panels or extra_panels:
-                raise ValueError(
-                    "dem_panel_ids must match the unique prediction panels exactly. "
-                    f"Missing: {missing_panels}; extra: {extra_panels}."
-                )
-            dems_np = dems_np[[lookup[panel_id] for panel_id in panel_ids.tolist()]]
-        dems_array = jnp.array(dems_np, dtype="float64")
-    elif dem_panel_ids is not None:
-        raise ValueError("dem_panel_ids can only be supplied with dems.")
-
-    return ParsedData(
-        X=jnp.array(X_sorted, dtype="float64"),
-        dems=dems_array,
-        y=None if y_sorted is None else jnp.array(y_sorted, dtype="bool"),
-        cases=jnp.array(case_seq, dtype="uint32"),
-        panels=jnp.array(panel_seq, dtype="uint32"),
-        alts=jnp.array(alt_seq, dtype="uint32"),
-        case_varnames=case_varnames,
-        dem_varnames=dem_varnames,
-        original_alts=alts_sorted,
-        original_cases=cases_sorted,
-        original_panels=panels_sorted,
-    )

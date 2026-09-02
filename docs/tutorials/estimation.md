@@ -90,6 +90,7 @@ from lcl import (
     InferenceOptions,
     LCLSpec,
     NegativeCoefficient,
+    Options,
     OptimizationOptions,
 )
 
@@ -119,17 +120,16 @@ spec = LCLSpec(
 results = lcl.fit(
     df_long,
     spec,
-    fit_options=FitOptions(
-        seed=42,
-        starts=3,
-        max_em_iter=60,
-        num_devices=1,
+    options=Options(
+        fit=FitOptions(
+            seed=42,
+            starts=3,
+            max_em_iter=60,
+            num_devices=1,
+        ),
+        optimization=OptimizationOptions(maxiter=40, gradient_tol=1e-5),
+        inference=InferenceOptions(covariance="clustered"),
     ),
-    optimization_options=OptimizationOptions(
-        maxiter=40,
-        gradient_tol=1e-5,
-    ),
-    inference=InferenceOptions(covariance="clustered"),
 )
 
 summary = results.summarize_betas()
@@ -227,6 +227,7 @@ section       check                   status           value  message
 ------------  ----------------------  --------  ------------  ----------------------------------------------------------
 fit           converged               ok            1         EM convergence flag.
 fit           log_likelihood          ok        -6413.84      Final unconditional log likelihood.
+fit           observed_score_max      ok            2.1e-07   Maximum absolute final observed-data score.
 data          panels                  ok          500         Number of decision-maker panels.
 data          cases                   ok         8000         Number of choice situations.
 latent_class  posterior_entropy_mean  ok            0.27833   Mean entropy of posterior class membership.
@@ -252,19 +253,26 @@ Warnings: 0
 Last EM history row: {'em_iter': 30, 'loglik': -6413.840782946274, 'class_0_share': 0.45298103347438456, 'class_1_share': 0.24193776632753392, 'class_2_share': 0.3050812001980814}
 ```
 
-`class_shares()` reports each class's aggregate share and posterior panel mass.
-`class_coefficients()` returns the structural coefficients underlying the population
-moments.
+`class_shares()` reports each class's aggregate share, its delta-method standard
+error, and posterior panel mass. `class_coefficients()` returns structural
+coefficients and their class-specific standard errors. Membership logits use class
+0 as the reference and are available from `membership_coefficients()`.
+`classification_diagnostics()` reports modal class sizes, average posterior
+probabilities, odds of correct classification, and entropy R-squared. Treat these
+as separation diagnostics rather than a class-count objective: near-degenerate
+extra classes can make entropy look deceptively strong.
 
 ```python
 print(results.class_shares())
 print(results.class_coefficients())
+print(results.membership_coefficients())
+print(results.classification_diagnostics())
 ```
 
 ```text
-shape: (3, 3)
-┌───────┬──────────┬──────────────────┐
-│ class ┆ share    ┆ effective_panels │
+shape: (3, 4)
+┌───────┬──────────┬─────────────┬──────────────────┐
+│ class ┆ share    ┆ std_error   ┆ effective_panels │
 │ ---   ┆ ---      ┆ ---              │
 │ i64   ┆ f64      ┆ f64              │
 ╞═══════╪══════════╪══════════════════╡
@@ -272,9 +280,9 @@ shape: (3, 3)
 │ 1     ┆ 0.241938 ┆ 120.968878       │
 │ 2     ┆ 0.305081 ┆ 152.5406         │
 └───────┴──────────┴──────────────────┘
-shape: (15, 5)
-┌────────────────┬───────────────────┬───────┬─────────────┬─────────────┐
-│ variable       ┆ label             ┆ class ┆ coefficient ┆ constrained │
+shape: (15, 6)
+┌────────────────┬───────────────────┬───────┬─────────────┬───────────┬─────────────┐
+│ variable       ┆ label             ┆ class ┆ coefficient ┆ std_error ┆ constrained │
 │ ---            ┆ ---               ┆ ---   ┆ ---         ┆ ---         │
 │ str            ┆ str               ┆ i64   ┆ f64         ┆ bool        │
 ╞════════════════╪═══════════════════╪═══════╪═════════════╪═════════════╡
@@ -378,7 +386,10 @@ panels, preventing silent reassignment when one input contains missing or extra
 decision-makers.
 
 `LCLPrediction` also reports expected consumer surplus by choice situation and a
-panel-level willingness-to-pay frame for downstream welfare analysis.
+panel-level willingness-to-pay frame for downstream welfare analysis. The surplus
+frame labels its units as `money` when a numeraire exists and `utils` otherwise.
+Utility levels depend on normalization; compute an identified change with
+`baseline_prediction.surplus_change(counterfactual_prediction)`.
 
 !!! tip "Prefer tabular prediction when possible"
     `results.predict(data=...)` is the safest interface because the fitted encoder
@@ -403,16 +414,16 @@ shape: (8, 6)
 ┌────────┬───────┬──────┬─────────────┬─────────────────┬─────────────────┐
 │ panels ┆ cases ┆ alts ┆ target_alts ┆ elasticity_cost ┆ elasticity_time │
 │ ---    ┆ ---   ┆ ---  ┆ ---         ┆ ---             ┆ ---             │
-│ u32    ┆ u32   ┆ u32  ┆ u32         ┆ f64             ┆ f64             │
+│ i64    ┆ u32   ┆ str  ┆ str         ┆ f64             ┆ f64             │
 ╞════════╪═══════╪══════╪═════════════╪═════════════════╪═════════════════╡
-│ 0      ┆ 0     ┆ 0    ┆ 0           ┆ -3.966785       ┆ -0.370332       │
-│ 0      ┆ 0     ┆ 0    ┆ 1           ┆ 3.408956        ┆ 1.036931        │
-│ 0      ┆ 0     ┆ 1    ┆ 0           ┆ 2.323102        ┆ 0.216881        │
-│ 0      ┆ 0     ┆ 1    ┆ 1           ┆ -1.996415       ┆ -0.607266       │
-│ 0      ┆ 1     ┆ 0    ┆ 0           ┆ -4.431907       ┆ -0.612719       │
-│ 0      ┆ 1     ┆ 0    ┆ 1           ┆ 3.116184        ┆ 1.488032        │
-│ 0      ┆ 1     ┆ 1    ┆ 0           ┆ 1.149604        ┆ 0.158935        │
-│ 0      ┆ 1     ┆ 1    ┆ 1           ┆ -0.808315       ┆ -0.385984       │
+│ 1      ┆ 0     ┆ air  ┆ air         ┆ -3.966785       ┆ -0.370332       │
+│ 1      ┆ 0     ┆ air  ┆ rail        ┆ 3.408956        ┆ 1.036931        │
+│ 1      ┆ 0     ┆ rail ┆ air         ┆ 2.323102        ┆ 0.216881        │
+│ 1      ┆ 0     ┆ rail ┆ rail        ┆ -1.996415       ┆ -0.607266       │
+│ 1      ┆ 1     ┆ air  ┆ air         ┆ -4.431907       ┆ -0.612719       │
+│ 1      ┆ 1     ┆ air  ┆ rail        ┆ 3.116184        ┆ 1.488032        │
+│ 1      ┆ 1     ┆ rail ┆ air         ┆ 1.149604        ┆ 0.158935        │
+│ 1      ┆ 1     ┆ rail ┆ rail        ┆ -0.808315       ┆ -0.385984       │
 └────────┴───────┴──────┴─────────────┴─────────────────┴─────────────────┘
 ```
 
@@ -420,6 +431,16 @@ shape: (8, 6)
 the alternative whose attribute changes. Rows where the two are equal contain own
 elasticities, and the remaining rows contain cross-elasticities. The calculation uses
 the stored posterior class probabilities.
+
+Do not take a plain mean of row elasticities. `aggregate_elasticities()` weights
+each affected row by its predicted demand contribution, yielding the elasticity
+of aggregate demand. Optional panel weights are resolved when prediction is made:
+
+```python
+weighted_prediction = results.predict(cf_df, panel_weights="survey_weight")
+print(weighted_prediction.market_shares())
+print(weighted_prediction.aggregate_elasticities(["cost", "time"]))
+```
 
 ## 6. Marginal willingness-to-pay
 
@@ -442,6 +463,8 @@ wtp_tables = prediction.compute_wtp(
     WTPRequest(alt_var="time", demographic_var="female",
                partition_type=PartitionType.CATEGORICAL),
     class_probabilities="prior",
+    se="bootstrap",
+    bootstrap_draws=1_000,
 )
 ```
 
@@ -501,7 +524,10 @@ Female traveler & Mean marginal WTP \\
 ```
 
 Categorical groups retain their first-observed order. Numeric quintiles and custom
-break partitions are returned in numeric bin order.
+break partitions are returned in numeric bin order. Tied values are never split;
+when five groups are not attainable, the output reports the actual number of
+quantile groups. Each WTP row includes `Panel_Count` and
+`Effective_Panel_Weight`.
 
 The estimate varies more across income bands than across gender. Its sign follows the
 coefficient convention: travel time enters utility as a disamenity.
@@ -509,6 +535,9 @@ coefficient convention: travel time enters utility as a disamenity.
 `wtp_tables` is a dictionary whose keys are the displayed titles and whose values
 are the corresponding Polars frames. Use `show=False` when a notebook, test, or
 application should receive those frames without terminal and LaTeX output.
+`se="bootstrap"` is an asymptotic parametric bootstrap over the fitted parameter
+distribution; use `bootstrap_seed=` for reproducibility. It is not a panel
+resample-and-refit bootstrap.
 
 !!! note "No manual one-hot encoding"
     `C(income_band)` handles estimation coding while `compute_wtp` groups on the

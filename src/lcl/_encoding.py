@@ -1,17 +1,22 @@
 """Data encoding layer shared by fit and predict APIs."""
 
 import re
+import warnings
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 import jax.numpy as jnp
-import numpy as onp
 import polars as pl
 from formulaic import Formula  # type: ignore
-from formulaic.errors import FormulaicError  # type: ignore
+from formulaic.errors import DataMismatchWarning, FormulaicError  # type: ignore
 
 from lcl._struct import ParsedData
+from lcl._validation import (
+    validate_external_demographics,
+    validate_parsed_data,
+    validate_raw_choice_frame,
+)
 
 
 @dataclass
@@ -135,6 +140,18 @@ class ChoiceDataEncoder:
         """
         df = _coerce_frame(data)
         _require_columns(df, [self.alts_col, self.cases_col, self.panels_col])
+        validate_raw_choice_frame(
+            df,
+            alts_col=self.alts_col,
+            cases_col=self.cases_col,
+            panels_col=self.panels_col,
+        )
+        if dems_data is not None:
+            validate_external_demographics(
+                df,
+                _coerce_frame(dems_data),
+                panels_col=self.panels_col,
+            )
         sort_cols = list(
             dict.fromkeys([self.panels_col, self.cases_col, self.alts_col])
         )
@@ -150,10 +167,7 @@ class ChoiceDataEncoder:
         demographic_data_source = None if self.dem_model_spec is not None else dems_data
         dems_array = self._encode_demographics(df, dem_vars, demographic_data_source)
 
-        if y_array is not None:
-            self._validate_one_choice_per_case(df, y_array)
-
-        return ParsedData(
+        parsed = ParsedData(
             X=X_array,
             dems=dems_array,
             y=y_array,
@@ -166,6 +180,8 @@ class ChoiceDataEncoder:
             original_cases=df[self.cases_col].to_numpy(),
             original_panels=df[self.panels_col].to_numpy(),
         )
+        validate_parsed_data(parsed)
+        return parsed
 
     def _attach_sequential_ids(self, df: pl.DataFrame) -> pl.DataFrame:
         """Attach contiguous panel, case, and alternative IDs.
@@ -229,23 +245,11 @@ class ChoiceDataEncoder:
         if not cols_to_join:
             return df
 
-        unique_dems = dems_df.select([self.panels_col, *cols_to_join]).unique(
-            maintain_order=True
+        return df.join(
+            dems_df.select([self.panels_col, *cols_to_join]),
+            on=self.panels_col,
+            how="left",
         )
-        duplicate_panels = (
-            unique_dems.group_by(self.panels_col)
-            .len()
-            .filter(pl.col("len") > 1)
-            .select(self.panels_col)
-        )
-        if duplicate_panels.height:
-            sample = duplicate_panels.head(5)[self.panels_col].to_list()
-            raise ValueError(
-                "dems_data must contain one unique value per panel for formula "
-                f"demographics. Conflicting panels include: {sample}"
-            )
-
-        return df.join(unique_dems, on=self.panels_col, how="left")
 
     def _encode_features(
         self, df: pl.DataFrame, fit: bool, require_choice: bool
@@ -552,30 +556,6 @@ class ChoiceDataEncoder:
             aligned.sort("_seq_panels").select(dem_vars).to_numpy(), dtype="float64"
         )
 
-    @staticmethod
-    def _validate_one_choice_per_case(df: pl.DataFrame, y_array: jnp.ndarray) -> None:
-        """Validate that every choice situation has exactly one selected alternative.
-
-        Parameters
-        ----------
-        df : pl.DataFrame
-            Encoded choice data containing ``_seq_cases``.
-        y_array : jnp.ndarray
-            Boolean choice indicator aligned to ``df``.
-
-        Raises
-        ------
-        ValueError
-            If any choice situation has zero or multiple chosen alternatives.
-        """
-        cases = df["_seq_cases"].to_numpy()
-        y = onp.asarray(y_array, dtype=onp.int32)
-        choices_per_case = onp.bincount(cases, weights=y)
-        if not onp.all(choices_per_case == 1):
-            raise ValueError(
-                "Every choice situation must have exactly one chosen alternative."
-            )
-
 
 def _coerce_frame(data: Any) -> pl.DataFrame:
     """Coerce supported tabular inputs to a Polars DataFrame.
@@ -664,7 +644,7 @@ def _validate_matrix_height(matrix: Any, expected_height: int, label: str) -> No
     if len(matrix) != expected_height:
         raise ValueError(
             f"{label} produced {len(matrix)} rows for {expected_height} input rows. "
-            "Check missing values in formula variables."
+            "Check missing or non-finite values in formula variables."
         )
 
 
@@ -683,8 +663,10 @@ def _get_model_matrix(
 ) -> Any:
     """Materialize a Formulaic model matrix with contextual errors."""
     try:
-        return model_spec.get_model_matrix(data)
-    except FormulaicError as exc:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DataMismatchWarning)
+            return model_spec.get_model_matrix(data)
+    except (FormulaicError, DataMismatchWarning) as exc:
         raise _formulaic_value_error(label, formula, exc) from exc
 
 

@@ -11,8 +11,9 @@ from lcl.constraints import (
     pullback_negative_derivatives,
 )
 from lcl._case_utils import _to_structural_betas
-from lcl._struct import OptimizationOptions, OptimizeResult
-from lcl.utils import _invert_information
+from lcl._inference import _invert_information
+from lcl.options import OptimizationOptions
+from lcl._struct import OptimizeResult
 
 
 class NewtonState(NamedTuple):
@@ -25,6 +26,7 @@ class NewtonState(NamedTuple):
     failed: jnp.ndarray
     num_fun_eval: jnp.ndarray
     num_grad_hess_eval: jnp.ndarray
+    trust_radius: jnp.ndarray
 
 
 def exact_newton_minimize(
@@ -41,9 +43,9 @@ def exact_newton_minimize(
     *args: object,
     tol: float = 1e-6,
     maxiter: int = 50,
-    damping: float = 1e-6,
-    max_step_norm: float = 25.0,
-    line_search_maxiter: int = 25,
+    damping: float = 0.0,
+    max_step_norm: float = 1000.0,
+    line_search_maxiter: int = 40,
     accept_any_decrease: bool = False,
 ) -> NewtonState:
     """Minimize a scalar objective with exact Newton steps and Armijo backtracking.
@@ -59,16 +61,18 @@ def exact_newton_minimize(
     *args :
         Additional arguments passed to the objective function (e.g., data, weights).
     tol : float, default=1e-6
-        L-infinity norm tolerance for the gradient.
+        Tolerance for the Newton decrement. Unlike a raw gradient norm, the
+        decrement is invariant to nonsingular diagonal rescaling of parameters.
     maxiter : int, default=50
         Maximum number of Newton iterations.
-    damping : float, default=1e-6
-        Initial relative diagonal shift for the regularized Hessian. The shift is
-        increased geometrically if Cholesky factorization does not yield a descent
-        direction.
-    max_step_norm : float, default=25.0
-        Maximum norm allowed for a trial direction before line search.
-    line_search_maxiter : int, default=25
+    damping : float, default=0.0
+        Initial diagonal shift in standardized Hessian coordinates. The exact,
+        undamped Cholesky solve is always attempted first; this value is used only
+        if that solve is not finite and descending.
+    max_step_norm : float, default=1000.0
+        Maximum adaptive trust radius, measured in the local curvature metric.
+        The initial radius is one and expands or contracts with model agreement.
+    line_search_maxiter : int, default=40
         Maximum number of Armijo backtracking iterations per Newton step.
     accept_any_decrease : bool, default=False
         If True, accept a finite step that decreases the objective even when it does
@@ -82,20 +86,87 @@ def exact_newton_minimize(
     """
     init_loss, init_grad, init_hess = value_grad_hess_fn(init_params, *args)
 
+    def regularized_newton_direction(
+        grad: jnp.ndarray, hess: jnp.ndarray
+    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        """Return a scale-equivariant Newton direction and decrement.
+
+        Cholesky is first attempted on the undamped, symmetrized Hessian.  If it
+        fails, diagonal shifts are applied after standardizing each parameter by
+        the square root of its local curvature.  Under a diagonal reparameterization
+        this standardized system, its shifts, and the resulting decrement are
+        unchanged.
+        """
+        H_sym = 0.5 * (hess + hess.T)
+        diagonal = jnp.abs(jnp.diag(H_sym))
+        diagonal_scale = jnp.sqrt(
+            jnp.where(diagonal > 0.0, diagonal, jnp.ones_like(diagonal))
+        )
+        H_scaled = H_sym / (diagonal_scale[:, None] * diagonal_scale[None, :])
+        grad_scaled = grad / diagonal_scale
+        identity = jnp.eye(grad.shape[0], dtype=grad.dtype)
+
+        class RegularizationState(NamedTuple):
+            shift: jnp.ndarray
+            direction_scaled: jnp.ndarray
+            attempts: int
+
+        def solve_scaled(shift: jnp.ndarray) -> jnp.ndarray:
+            factor, lower = cho_factor(H_scaled + identity * shift)
+            return -cho_solve((factor, lower), grad_scaled)
+
+        zero = jnp.asarray(0.0, dtype=grad.dtype)
+        initial = RegularizationState(zero, solve_scaled(zero), 0)
+
+        def regularization_cond(reg_state: RegularizationState) -> jnp.ndarray:
+            direction = reg_state.direction_scaled / diagonal_scale
+            valid = jnp.all(jnp.isfinite(direction)) & (jnp.dot(grad, direction) < 0.0)
+            return (~valid) & (reg_state.attempts < 12)
+
+        def regularization_body(
+            reg_state: RegularizationState,
+        ) -> RegularizationState:
+            fallback_shift = jnp.maximum(
+                jnp.asarray(damping, dtype=grad.dtype),
+                jnp.sqrt(jnp.finfo(grad.dtype).eps),
+            )
+            shift = jnp.where(
+                reg_state.attempts == 0,
+                fallback_shift,
+                reg_state.shift * 10.0,
+            )
+            return RegularizationState(
+                shift, solve_scaled(shift), reg_state.attempts + 1
+            )
+
+        regularization = lax.while_loop(
+            regularization_cond, regularization_body, initial
+        )
+        direction = regularization.direction_scaled / diagonal_scale
+        valid = jnp.all(jnp.isfinite(direction)) & (jnp.dot(grad, direction) < 0.0)
+        decrement = jnp.where(
+            valid,
+            jnp.sqrt(jnp.maximum(-jnp.dot(grad, direction), 0.0)),
+            jnp.asarray(jnp.inf, dtype=grad.dtype),
+        )
+        return direction, decrement, diagonal_scale
+
+    _, init_decrement, _ = regularized_newton_direction(init_grad, init_hess)
     init_state = NewtonState(
         params=init_params,
         loss=init_loss,
         grad=init_grad,
         hess=init_hess,
         step_num=0,
-        error=jnp.max(jnp.abs(init_grad)),
+        error=init_decrement,
         failed=jnp.array(False),
         num_fun_eval=jnp.array(0),
         num_grad_hess_eval=jnp.array(1),
+        trust_radius=jnp.asarray(min(1.0, max_step_norm), dtype=init_params.dtype),
     )
 
     def outer_cond(state: NewtonState) -> jnp.ndarray:
-        """Continue while the gradient is too large and iterations remain."""
+        """Continue while the Newton decrement is too large."""
         return jnp.logical_and(
             jnp.logical_and(state.error > tol, state.step_num < maxiter),
             ~state.failed,
@@ -103,54 +174,24 @@ def exact_newton_minimize(
 
     def outer_body(state: NewtonState) -> NewtonState:
         """Run one damped Newton step plus backtracking line search."""
-        # Try a cheap Cholesky factorization first, increasing the diagonal shift
-        # geometrically only when the pulled-back Hessian is not positive definite.
-        # This avoids an eigenvalue decomposition on the usual well-behaved path.
-        H_sym = 0.5 * (state.hess + state.hess.T)
-        identity = jnp.eye(state.params.shape[0], dtype=state.params.dtype)
-        matrix_scale = jnp.maximum(1.0, jnp.max(jnp.abs(jnp.diag(H_sym))))
-
-        class RegularizationState(NamedTuple):
-            shift: jnp.ndarray
-            direction: jnp.ndarray
-            attempts: int
-
-        def regularized_direction(shift: jnp.ndarray) -> jnp.ndarray:
-            """Solve one diagonally shifted Newton system by Cholesky."""
-            factor, lower = cho_factor(H_sym + identity * shift)
-            return -cho_solve((factor, lower), state.grad)
-
-        initial_shift = jnp.asarray(damping, dtype=state.params.dtype) * matrix_scale
-        initial_direction = regularized_direction(initial_shift)
-        initial_regularization = RegularizationState(
-            initial_shift, initial_direction, 0
+        newton_direction, decrement, diagonal_scale = regularized_newton_direction(
+            state.grad, state.hess
         )
-
-        def regularization_cond(reg_state: RegularizationState) -> jnp.ndarray:
-            """Increase damping until the direction is finite and descending."""
-            valid = jnp.all(jnp.isfinite(reg_state.direction)) & (
-                jnp.dot(state.grad, reg_state.direction) < 0.0
-            )
-            return (~valid) & (reg_state.attempts < 12)
-
-        def regularization_body(reg_state: RegularizationState) -> RegularizationState:
-            """Retry the Newton system with ten times more diagonal damping."""
-            shift = reg_state.shift * 10.0
-            return RegularizationState(
-                shift, regularized_direction(shift), reg_state.attempts + 1
-            )
-
-        regularization = lax.while_loop(
-            regularization_cond, regularization_body, initial_regularization
-        )
-        newton_direction = regularization.direction
         newton_is_descent = jnp.all(jnp.isfinite(newton_direction)) & (
             jnp.dot(state.grad, newton_direction) < 0.0
         )
-        search_direction = jnp.where(newton_is_descent, newton_direction, -state.grad)
-        direction_norm = jnp.linalg.norm(search_direction)
+        # A diagonally preconditioned gradient is the scale-equivariant fallback.
+        fallback_direction = -state.grad / (diagonal_scale**2)
+        search_direction = jnp.where(
+            newton_is_descent, newton_direction, fallback_direction
+        )
+        direction_norm = jnp.where(
+            newton_is_descent,
+            decrement,
+            jnp.linalg.norm(diagonal_scale * search_direction),
+        )
         search_direction = search_direction * jnp.minimum(
-            1.0, max_step_norm / (direction_norm + 1e-12)
+            1.0, state.trust_radius / (direction_norm + 1e-12)
         )
         directional_derivative = jnp.dot(state.grad, search_direction)
 
@@ -217,16 +258,43 @@ def exact_newton_minimize(
             operand=None,
         )
 
+        _, new_decrement, _ = regularized_newton_direction(new_grad, new_hess)
+
+        # Update the curvature-metric trust radius from agreement between the
+        # local quadratic model and the accepted objective change.
+        accepted_step = final_ls.step_size * search_direction
+        predicted_decrease = -(
+            jnp.dot(state.grad, accepted_step)
+            + 0.5 * jnp.dot(accepted_step, state.hess @ accepted_step)
+        )
+        actual_decrease = state.loss - new_loss
+        agreement = actual_decrease / jnp.maximum(
+            predicted_decrease, jnp.finfo(state.params.dtype).eps
+        )
+        step_metric = final_ls.step_size * direction_norm
+        contracted_radius = jnp.maximum(0.25 * state.trust_radius, 1e-8)
+        expanded_radius = jnp.minimum(2.0 * state.trust_radius, max_step_norm)
+        trust_radius = jnp.where(
+            (~accepted) | (agreement < 0.25),
+            contracted_radius,
+            jnp.where(
+                (agreement > 0.75) & (step_metric >= 0.9 * state.trust_radius),
+                expanded_radius,
+                state.trust_radius,
+            ),
+        )
+
         return NewtonState(
             params=params,
             loss=new_loss,
             grad=new_grad,
             hess=new_hess,
             step_num=state.step_num + 1,
-            error=jnp.max(jnp.abs(new_grad)),
+            error=jnp.where(accepted, new_decrement, state.error),
             failed=~accepted,
             num_fun_eval=state.num_fun_eval + final_ls.ls_iter + 1,
             num_grad_hess_eval=state.num_grad_hess_eval + accepted.astype(jnp.int32),
+            trust_radius=trust_radius,
         )
 
     return lax.while_loop(outer_cond, outer_body, init_state)
@@ -260,7 +328,7 @@ def _minimize(
     args : tuple
         Tuple of static and dynamic arguments (e.g., design matrices, weights)
         required by the objective function.
-    optimization_options : :class:`~lcl._struct.OptimizationOptions`, optional
+    optimization_options : :class:`~lcl.options.OptimizationOptions`, optional
         Configuration holding tolerances and maximum iteration limits.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable, if bounded to be strictly negative.

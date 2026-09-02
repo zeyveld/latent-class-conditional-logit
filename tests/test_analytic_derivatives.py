@@ -20,7 +20,8 @@ from lcl._case_utils import _diff_unchosen_chosen
 from lcl._demographics import _compute_grouped_data_loglik_grad_hess
 from lcl._em_alg_steps import _compute_panel_logliks
 from lcl._params import ParamPacking
-from lcl._struct import Data, FitOptions, InferenceOptions
+from lcl.options import FitOptions, InferenceOptions
+from lcl._struct import Data
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
 
@@ -143,7 +144,6 @@ def test_fitted_covariance_matches_autodiff_formulation() -> None:
         panels_col="panel",
         choice_col="choice",
         case_varnames=["price", "quality"],
-        dem_varnames=["income"],
         fit_options=FitOptions(max_em_iter=30),
     )
 
@@ -207,12 +207,9 @@ def test_batched_and_sequential_schedules_agree(
 
     score_scale = max(float(jnp.max(jnp.abs(scores_batched))), 1.0)
     hessian_scale = max(float(jnp.max(jnp.abs(hessian_batched))), 1.0)
+    assert float(jnp.max(jnp.abs(scores_batched - scores_scan))) <= 1e-11 * score_scale
     assert (
-        float(jnp.max(jnp.abs(scores_batched - scores_scan))) <= 1e-11 * score_scale
-    )
-    assert (
-        float(jnp.max(jnp.abs(hessian_batched - hessian_scan)))
-        <= 1e-11 * hessian_scale
+        float(jnp.max(jnp.abs(hessian_batched - hessian_scan))) <= 1e-11 * hessian_scale
     )
 
 
@@ -258,9 +255,7 @@ def test_membership_mstep_schedules_agree(
     num_panels = 40
     data = _random_panel_data(rng, num_panels, 3, num_dem_vars)
     targets = jnp.asarray(rng.dirichlet(onp.ones(num_classes), size=num_panels))
-    thetas = jnp.asarray(
-        rng.normal(size=(num_dem_vars + 1) * (num_classes - 1)) * 1.5
-    )
+    thetas = jnp.asarray(rng.normal(size=(num_dem_vars + 1) * (num_classes - 1)) * 1.5)
 
     monkeypatch.setattr(scheduling, "ITERATION_THRESHOLD_BYTES", 2**62)
     value_b, grad_b, hess_b = _compute_grouped_data_loglik_grad_hess(

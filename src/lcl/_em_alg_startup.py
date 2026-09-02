@@ -11,13 +11,8 @@ from lcl.constraints import (
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._em_alg_steps import _compute_conditional_class_probs
 from lcl._optimize import exact_newton_minimize
-from lcl._struct import (
-    Data,
-    DiffUnchosenChosen,
-    EMVars,
-    FitOptions,
-    OptimizationOptions,
-)
+from lcl.options import FitOptions, OptimizationOptions
+from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
 
 def _get_starting_vals(
@@ -44,9 +39,9 @@ def _get_starting_vals(
         The core estimation data and metadata.
     num_classes : int
         The number of latent classes to initialize.
-    fit_options : :class:`~lcl._struct.FitOptions`
+    fit_options : :class:`~lcl.options.FitOptions`
         EM settings containing the reproducible partition seed.
-    optimization_options : :class:`~lcl._struct.OptimizationOptions`
+    optimization_options : :class:`~lcl.options.OptimizationOptions`
         Optimization settings for the subset-level Newton routines.
     numeraire_idx : int | None, optional
         Column index of the numeraire variable, if applicable.
@@ -158,7 +153,7 @@ def _random_class_partition(
         The core estimation data and metadata.
     num_classes : int
         The number of mutually exclusive subsets to generate.
-    fit_options : :class:`~lcl._struct.FitOptions`
+    fit_options : :class:`~lcl.options.FitOptions`
         EM settings containing the reproducible partition seed.
 
     Returns

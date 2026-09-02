@@ -15,7 +15,7 @@ import polars as pl
 import pytest
 
 import lcl  # noqa: F401  (enables x64)
-from lcl._struct import InferenceOptions
+from lcl.options import InferenceOptions
 from lcl.conditional_logit import ConditionalLogit
 from lcl.constraints import (
     NegativeCoefficient,
@@ -24,7 +24,7 @@ from lcl.constraints import (
     pullback_negative_hessian,
     pullback_negative_score_rows,
 )
-from lcl.utils import _invert_information, _robust_covariance
+from lcl._inference import _invert_information, _robust_covariance
 
 
 def _choice_frame(
@@ -75,7 +75,7 @@ def test_invert_information_flags_rank_deficiency(caplog) -> None:
     """A singular information matrix warns instead of silently truncating."""
     # Third direction carries no curvature at all.
     matrix = onp.diag([3.0, 1.0, 0.0])
-    with caplog.at_level(logging.WARNING, logger="lcl.utils"):
+    with caplog.at_level(logging.WARNING, logger="lcl._inference"):
         inverse, diagnostics = _invert_information(matrix, label="test matrix")
 
     assert diagnostics.rank == 2
@@ -83,8 +83,8 @@ def test_invert_information_flags_rank_deficiency(caplog) -> None:
     assert diagnostics.rank_deficient
     assert not diagnostics.positive_definite
     assert diagnostics.condition_number == onp.inf
-    # Pseudo-inverse still zeroes the null direction rather than exploding.
-    assert onp.asarray(inverse)[2, 2] == 0.0
+    # No covariance is exposed for an unidentified direction.
+    assert onp.isnan(onp.asarray(inverse)).all()
     assert "rank deficient" in caplog.text
     assert "test matrix" in caplog.text
 
@@ -92,7 +92,7 @@ def test_invert_information_flags_rank_deficiency(caplog) -> None:
 def test_invert_information_flags_saddle_point(caplog) -> None:
     """A negative eigenvalue means a saddle point, not a maximum."""
     matrix = onp.diag([2.0, -1.0])
-    with caplog.at_level(logging.WARNING, logger="lcl.utils"):
+    with caplog.at_level(logging.WARNING, logger="lcl._inference"):
         _, diagnostics = _invert_information(matrix)
 
     assert not diagnostics.positive_definite
@@ -115,18 +115,14 @@ def test_invert_information_matches_pinv_on_full_rank() -> None:
 def test_collinear_design_surfaces_rank_diagnostics() -> None:
     """An exactly collinear covariate leaves a detectable rank deficiency."""
     df = _choice_frame(collinear=True)
-    results = ConditionalLogit().fit(
-        df,
-        alts_col="alt",
-        cases_col="case",
-        choice_col="choice",
-        case_varnames=["price", "quality", "price_copy"],
-    )
-    diagnostics = results.information_diagnostics
-    assert diagnostics is not None
-    assert diagnostics.num_params == 3
-    assert diagnostics.rank_deficient
-    assert diagnostics.rank < diagnostics.num_params
+    with pytest.raises(ValueError, match="rank deficient"):
+        ConditionalLogit().fit(
+            df,
+            alts_col="alt",
+            cases_col="case",
+            choice_col="choice",
+            case_varnames=["price", "quality", "price_copy"],
+        )
 
 
 # --------------------------------------------------------------------------
@@ -192,7 +188,7 @@ def test_clustered_and_unclustered_branches_share_conventions() -> None:
         @ bread
     )
     onp.testing.assert_allclose(
-        onp.asarray(clustered.covariance), expected_clustered, rtol=1e-9, atol=1e-12
+        onp.asarray(clustered.cov_matrix), expected_clustered, rtol=1e-9, atol=1e-12
     )
 
     n = case_scores.shape[0]
@@ -203,7 +199,7 @@ def test_clustered_and_unclustered_branches_share_conventions() -> None:
         @ onp.asarray(unclustered.hess_inv)
     )
     onp.testing.assert_allclose(
-        onp.asarray(unclustered.covariance), expected_unclustered, rtol=1e-9, atol=1e-12
+        onp.asarray(unclustered.cov_matrix), expected_unclustered, rtol=1e-9, atol=1e-12
     )
 
 

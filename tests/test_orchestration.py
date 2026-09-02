@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-import warnings
+import importlib
 from typing import Any
 
 import jax.numpy as jnp
@@ -20,13 +20,17 @@ from lcl import (
     cv_optimal_classes,
 )
 from lcl._kernels import _class_membership_probs
+from lcl._cross_validation import _annotate_cv_selection, _resolve_panel_folds
 from lcl._params import ParamPacking
 from lcl._prediction import _apply_wtp_partition
 from lcl._results import _parsed_prediction_arrays
-from lcl._struct import EMVars, PartitionType, WTPRequest
+from lcl.options import PartitionType, WTPRequest
+from lcl._struct import EMVars
 from lcl.conditional_logit import ConditionalLogit
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 from lcl.spec import resolve_lcl_spec
+
+_lcl_model_module = importlib.import_module("lcl.latent_class_conditional_logit")
 
 
 def _choice_rows(panel_ids: list[int] | None = None) -> pl.DataFrame:
@@ -41,7 +45,7 @@ def _choice_rows(panel_ids: list[int] | None = None) -> pl.DataFrame:
                         "case": case,
                         "alt": alt,
                         "choice": alt == ((panel_index + case) % 2),
-                        "x": float(alt + 0.2 * case),
+                        "x": float(alt * (1.0 + 0.01 * panel + 0.2 * case)),
                         "cost": float(1 + alt + case),
                     }
                 )
@@ -258,14 +262,8 @@ def test_failed_strict_refit_continues_within_total_em_budget(
             unconditional_loglik=jnp.array(remaining_logliks.pop(0))
         )
 
-    monkeypatch.setattr(
-        "lcl.latent_class_conditional_logit._get_starting_vals",
-        fake_starting_values,
-    )
-    monkeypatch.setattr(
-        "lcl.latent_class_conditional_logit._em_step",
-        fake_em_step,
-    )
+    monkeypatch.setattr(_lcl_model_module, "_get_starting_vals", fake_starting_values)
+    monkeypatch.setattr(_lcl_model_module, "_em_step", fake_em_step)
     caplog.set_level("INFO", logger="lcl.latent_class_conditional_logit")
 
     result = LatentClassConditionalLogit(num_classes=2).fit(
@@ -299,9 +297,7 @@ def test_failed_strict_refit_continues_within_total_em_budget(
         *(["strict"] * len(strict_logliks)),
     ]
     assert [
-        event["phase"]
-        for event in progress_events
-        if event["event"] == "em_step"
+        event["phase"] for event in progress_events if event["event"] == "em_step"
     ] == result.em_history_["phase"].to_list()
 
     strict_options = optimization_calls[len(standard_logliks) :]
@@ -329,7 +325,7 @@ def test_held_out_formula_scoring_keeps_training_categorical_columns() -> None:
                             "case": case,
                             "alt": alt,
                             "choice": alt == ((panel + case) % 2),
-                            "x": float(alt),
+                            "x": float(alt * (1.0 + 0.1 * panel + 0.2 * case)),
                             "brand": brand,
                         }
                     )
@@ -350,12 +346,8 @@ def test_held_out_formula_scoring_keeps_training_categorical_columns() -> None:
     )
     training_columns = list(result.model.case_varnames)
 
-    with warnings.catch_warnings(record=True) as caught_warnings:
-        warnings.simplefilter("always")
-        held_out_ll = result.loglik(test)
-
-    assert np.isfinite(held_out_ll)
-    assert any("categories outside" in str(item.message) for item in caught_warnings)
+    with pytest.raises(ValueError, match="categories outside"):
+        result.loglik(test)
     assert result.model.case_varnames == training_columns
     assert any("train_only" in column for column in training_columns)
     assert all("test_only" not in column for column in training_columns)
@@ -450,6 +442,35 @@ def test_cv_reports_fold_failures_and_uses_per_panel_scores(
     assert seen_options == [(3, True, 0.123), (3, True, 0.123)]
 
 
+def test_user_cv_folds_are_validated_as_a_panel_partition() -> None:
+    """Explicit fold maps preserve panel identity and reject leakage."""
+    panels = np.array([10, 20, 30, 40])
+    mapped = _resolve_panel_folds({10: "a", 20: "b", 30: "a", 40: "b"}, panels, seed=9)
+    assert [group.tolist() for group in mapped] == [[10, 30], [20, 40]]
+    explicit = _resolve_panel_folds([[40, 10], [20, 30]], panels, seed=9)
+    assert [group.tolist() for group in explicit] == [[40, 10], [20, 30]]
+
+    with pytest.raises(ValueError, match="more than one"):
+        _resolve_panel_folds([[10, 20], [20, 30, 40]], panels, seed=9)
+    with pytest.raises(ValueError, match="cover exactly"):
+        _resolve_panel_folds([[10, 20], [30]], panels, seed=9)
+
+
+def test_cv_one_se_rule_selects_the_smallest_eligible_class_count() -> None:
+    """One-SE selection uses the best model's uncertainty on the LL scale."""
+    selected = _annotate_cv_selection(
+        pl.DataFrame(
+            {
+                "Num_Classes": [2, 3, 4],
+                "Avg_OOS_LL": [-1.00, -0.92, -0.90],
+                "SE_OOS_LL": [0.03, 0.04, 0.12],
+            }
+        )
+    )
+    assert selected.filter(pl.col("Selected_Best"))["Num_Classes"].item() == 4
+    assert selected.filter(pl.col("Selected_One_SE"))["Num_Classes"].item() == 2
+
+
 def test_quantile_and_custom_wtp_partitions_have_numeric_bin_order() -> None:
     df = pl.DataFrame(
         {
@@ -474,6 +495,15 @@ def test_quantile_and_custom_wtp_partitions_have_numeric_bin_order() -> None:
         WTPRequest("x", "score", PartitionType.CUSTOM_BREAKS, bins=[20.0, 40.0]),
     ).sort("_partition_order")
     assert custom["_partition_order"].to_list() == [0, 0, 1, 1, 2]
+
+    tied = _apply_wtp_partition(
+        pl.DataFrame({"panel_idx": range(8), "score": [1, 1, 1, 2, 2, 3, 3, 3]}),
+        WTPRequest("x", "score", PartitionType.QUINTILES),
+    )
+    assert tied.group_by("score").agg(pl.col("Partition").n_unique())[
+        "Partition"
+    ].to_list() == [1, 1, 1]
+    assert all("of" in label for label in tied["Partition"].unique())
 
 
 def test_param_packing_owns_structural_map_and_flat_layout() -> None:
@@ -553,7 +583,7 @@ def test_numeraire_pvalue_is_suppressed_and_panel_bic_is_consistent() -> None:
 
 def test_inference_options_are_canonical() -> None:
     assert InferenceOptions(covariance="none").covariance == "unadjusted"
-    assert InferenceOptions(covariance="robust").covariance == "clustered"
+    assert InferenceOptions(covariance="robust").covariance == "robust"
     with pytest.raises(ValueError, match="InferenceOptions.covariance"):
         InferenceOptions(covariance="invalid")
 

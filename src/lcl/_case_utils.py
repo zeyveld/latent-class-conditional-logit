@@ -37,8 +37,8 @@ def _loglik_gradient(
     objective_and_aux : tuple
         A tuple containing:
         * ``neg_loglik``: Scalar negative log-likelihood.
-        * ``grad_n``: ``Float64[Array, "cases alt_vars"]`` matrix of case-level score
-          contributions used for robust sandwich covariance estimation.
+        * ``grad_n``: ``Float64[Array, "cases alt_vars"]`` matrix of unweighted
+          case-level score contributions used for robust sandwich covariance.
     grad : Float64[Array, "alt_vars"]
         The analytic gradient of the negative log-likelihood with respect to ``structural_betas``.
     hessian : Float64[Array, "alt_vars alt_vars"]
@@ -61,8 +61,8 @@ def _loglik_gradient(
         num_segments=diff_unchosen_chosen.num_cases,
     )  # (cases, alt_vars)
 
-    grad_n = -x_bar_d * weights[:, None]
-    grad = jnp.sum(grad_n, axis=0)
+    grad_n = -x_bar_d
+    grad = jnp.sum(grad_n * weights[:, None], axis=0)
 
     row_weights = p_unchosen * weights[diff_unchosen_chosen.cases]
 
