@@ -347,6 +347,90 @@ class ChoiceModel(ABC):
 
         return onp.asarray([value_by_key[key] for key in sorted_keys], dtype=float)
 
+    @staticmethod
+    def _resolve_panel_cluster_ids(
+        data: Any,
+        parsed: ParsedData,
+        cluster_col: str,
+        *,
+        panels_col: str,
+    ) -> tuple[onp.ndarray, int]:
+        """Map a coarser cluster column onto encoded panel order.
+
+        Standard errors cluster at the decision-maker by default.  A study whose
+        sampling or treatment varies at a coarser level -- household, market,
+        school, region -- needs the scores summed at that level instead, so the
+        grouping variable must be constant within each panel and is resolved to
+        contiguous zero-indexed identifiers in the encoder's panel order.
+
+        Parameters
+        ----------
+        data : Any
+            Original long-format data, before encoder sorting.
+        parsed : :class:`~lcl._struct.ParsedData`
+            Encoded arrays, used for the canonical panel order.
+        cluster_col : str
+            Column naming the coarser grouping.
+        panels_col : str
+            Panel identifier column.
+
+        Returns
+        -------
+        cluster_ids : numpy.ndarray
+            One contiguous zero-indexed cluster identifier per encoded panel.
+        num_clusters : int
+            Number of distinct clusters.
+        """
+        df = _coerce_frame(data)
+        if cluster_col not in df.columns:
+            raise ValueError(
+                f"Cluster column {cluster_col!r} was not found in the estimation "
+                "data. Pass inference=InferenceOptions(cluster='panel') to cluster "
+                "at the decision-maker instead."
+            )
+        grouped = df.group_by(panels_col, maintain_order=True).agg(
+            pl.col(cluster_col).n_unique().alias("_cluster_n_unique"),
+            pl.col(cluster_col).first().alias("_cluster_value"),
+        )
+        nonconstant = grouped.filter(pl.col("_cluster_n_unique") != 1)
+        if nonconstant.height:
+            sample = nonconstant.select(panels_col).head(5).to_dicts()
+            raise ValueError(
+                f"Cluster column {cluster_col!r} must be constant within each "
+                f"panel. Conflicting panels include: {sample}"
+            )
+        value_by_panel = dict(
+            zip(grouped[panels_col].to_list(), grouped["_cluster_value"].to_list())
+        )
+
+        if parsed.original_panels is None:
+            raise ValueError(
+                "Encoded data does not preserve original panel identifiers."
+            )
+        first_panel_rows = parsed.panels != jnp.roll(parsed.panels, shift=1)
+        first_panel_rows = first_panel_rows.at[0].set(True)
+        panel_ids = onp.asarray(parsed.original_panels[first_panel_rows]).tolist()
+        missing = [panel for panel in panel_ids if panel not in value_by_panel]
+        if missing:
+            raise ValueError(
+                f"Cluster column {cluster_col!r} has no value for panels "
+                f"{missing[:5]}."
+            )
+
+        codes: list[int] = []
+        seen: dict[object, int] = {}
+        for panel in panel_ids:
+            value = value_by_panel[panel]
+            if value is None:
+                raise ValueError(
+                    f"Cluster column {cluster_col!r} contains a null value for "
+                    f"panel {panel!r}."
+                )
+            if value not in seen:
+                seen[value] = len(seen)
+            codes.append(seen[value])
+        return onp.asarray(codes, dtype=onp.int32), len(seen)
+
     def _pre_fit(
         self,
         case_varnames: Sequence[str],

@@ -9,8 +9,12 @@ from lcl.constraints import (
     pullback_negative_derivatives,
 )
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
-from lcl._em_alg_steps import _compute_conditional_class_probs
-from lcl._optimize import exact_newton_minimize
+from lcl._demographics import _predict_class_membership_probs
+from lcl._em_alg_steps import (
+    _compute_conditional_class_probs,
+    _compute_unconditional_loglik,
+)
+from lcl._optimize import exact_newton_minimize, newton_kwargs
 from lcl.options import FitOptions, OptimizationOptions
 from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
@@ -51,9 +55,12 @@ def _get_starting_vals(
     Returns
     -------
     :class:`~lcl._struct.EMVars`
-        Container holding the initialized taste parameters, uniform starting shares,
-        and first-pass posterior class probabilities.
+        Container holding the initialized taste parameters, starting shares, the
+        membership coefficients that reproduce them, the observed-data log
+        likelihood at those values, and first-pass posterior class probabilities.
     """
+    if data.num_panels is None:
+        raise ValueError("Panel identifiers are required for latent-class models.")
     diff_unchosen_chosen_by_class = _random_class_partition(
         diff_unchosen_chosen, data, num_classes, fit_options
     )
@@ -101,12 +108,7 @@ def _get_starting_vals(
             _startup_value_closure,
             _startup_loglik_closure,
             jnp.zeros(data.num_alt_vars),
-            tol=optimization_options.gradient_tol,
-            maxiter=optimization_options.maxiter,
-            damping=optimization_options.hessian_damping,
-            max_step_norm=optimization_options.max_step_norm,
-            line_search_maxiter=optimization_options.line_search_maxiter,
-            accept_any_decrease=optimization_options.accept_any_decrease,
+            **newton_kwargs(optimization_options),
         )
         latent_betas_list.append(optim_res.params)
 
@@ -116,19 +118,45 @@ def _get_starting_vals(
         latent_betas, numeraire_idx, numeraire_min_abs
     )
 
-    thetas = None
     shares = jnp.repeat(1.0 / num_classes, num_classes)
 
     starting_class_probs_by_panel, _ = _compute_conditional_class_probs(
-        structural_betas, thetas, shares, diff_unchosen_chosen, data
+        structural_betas, None, shares, diff_unchosen_chosen, data
+    )
+    starting_shares = jnp.mean(starting_class_probs_by_panel, axis=0)
+
+    # Seed the membership model at the intercepts that reproduce the starting
+    # shares exactly.  Starting it at zeros would instead impose a uniform prior,
+    # so the first membership M-step would not be warm started at the prior its
+    # own E-step used -- the one place the generalized-EM ascent guarantee could
+    # otherwise slip.  Initializing here also keeps the EM state's PyTree
+    # structure fixed across iterations, so the compiled step is traced once.
+    if data.dems is None:
+        thetas = None
+    else:
+        clipped_shares = jnp.clip(starting_shares, 1e-10)
+        normalized_shares = clipped_shares / clipped_shares.sum()
+        intercepts = jnp.log(normalized_shares[1:] / normalized_shares[0])
+        thetas = jnp.zeros((data.num_dem_vars + 1, num_classes - 1)).at[0, :].set(
+            intercepts
+        )
+
+    if thetas is None:
+        prior_by_panel = jnp.repeat(
+            starting_shares[None, :], data.num_panels, axis=0
+        )
+    else:
+        prior_by_panel = _predict_class_membership_probs(thetas, data)
+    starting_loglik = _compute_unconditional_loglik(
+        structural_betas, prior_by_panel, diff_unchosen_chosen, data
     )
 
     return EMVars(
         latent_betas=latent_betas,
         structural_betas=structural_betas,
         thetas=thetas,
-        shares=jnp.mean(starting_class_probs_by_panel, axis=0),
-        unconditional_loglik=jnp.array(1.0),
+        shares=starting_shares,
+        unconditional_loglik=starting_loglik,
         class_probs_by_panel=starting_class_probs_by_panel,
     )
 

@@ -6,7 +6,7 @@ from jax import lax
 from jax.nn import log_softmax, softmax
 from jaxtyping import Array, Float64
 
-from lcl._optimize import exact_newton_minimize
+from lcl._optimize import exact_newton_minimize, newton_kwargs
 from lcl._scheduling import ITERATION_THRESHOLD_BYTES, use_sequential
 from lcl.options import OptimizationOptions
 from lcl._struct import Data
@@ -30,6 +30,7 @@ def _update_thetas(
 ) -> tuple[
     Float64[Array, "dem_vars_plus_one classes_minus_one"],
     Float64[Array, "panels classes"],
+    Float64[Array, ""],
 ]:
     """Update the class-membership regression from posterior class probabilities.
 
@@ -53,20 +54,23 @@ def _update_thetas(
         Optimized class-membership coefficients.
     predicted_class_probs : Float64[Array, "panels classes"]
         Unconditional class probabilities implied by the optimized demographic model.
+    newton_error : Float64[Array, ""]
+        Final Newton decrement, returned as a device scalar so this M-step can run
+        inside a compiled EM step.  Callers compare it against
+        ``optimization_options.newton_decrement_tol`` at a point where they are
+        already synchronizing with the host.
     """
-    updated_thetas, convergence = _perform_frac_response_reg(
+    updated_thetas, newton_error = _perform_frac_response_reg(
         starting_thetas,
         class_probs_by_panel,
         data,
         num_classes,
         optimization_options,
     )
-    if not convergence:
-        logger.warning("Demographic regression failed to converge.")
 
     predicted_class_probs = _predict_class_membership_probs(updated_thetas, data)
 
-    return updated_thetas, predicted_class_probs
+    return updated_thetas, predicted_class_probs, newton_error
 
 
 def _perform_frac_response_reg(
@@ -75,7 +79,9 @@ def _perform_frac_response_reg(
     data: Data,
     num_classes: int,
     optimization_options: OptimizationOptions | None = None,
-) -> tuple[Float64[Array, "dem_vars_plus_one classes_minus_one"], bool]:
+) -> tuple[
+    Float64[Array, "dem_vars_plus_one classes_minus_one"], Float64[Array, ""]
+]:
     """Fit the fractional-response class-membership model.
 
     The objective is the cross-entropy between posterior class assignments from
@@ -99,9 +105,9 @@ def _perform_frac_response_reg(
     -------
     updated_thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"]
         Optimized class-membership coefficients.
-    converged : bool
-        Whether the final Newton error is within
-        ``optimization_options.gradient_tol``.
+    newton_error : Float64[Array, ""]
+        Final Newton decrement, left on device.  Materializing it here would force
+        a host synchronization and make the whole M-step untraceable.
     """
     if optimization_options is None:
         optimization_options = OptimizationOptions()
@@ -112,15 +118,10 @@ def _perform_frac_response_reg(
         class_probs_by_panel,
         data,
         num_classes,
-        tol=optimization_options.gradient_tol,
-        maxiter=optimization_options.maxiter,
-        damping=optimization_options.hessian_damping,
-        max_step_norm=optimization_options.max_step_norm,
-        line_search_maxiter=optimization_options.line_search_maxiter,
-        accept_any_decrease=optimization_options.accept_any_decrease,
+        **newton_kwargs(optimization_options),
     )
     thetas = optim_res.params.reshape(data.num_dem_vars + 1, num_classes - 1)
-    return thetas, float(optim_res.error) <= optimization_options.gradient_tol
+    return thetas, optim_res.error
 
 
 @filter_jit

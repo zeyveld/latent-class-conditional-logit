@@ -10,7 +10,6 @@ import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jax import jacrev
-from jax.ops import segment_sum
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float64, install_import_hook
 from scipy.stats import norm
@@ -28,7 +27,8 @@ with install_import_hook("lcl", "beartype.beartype"):
     from lcl._diagnostics import LCLDiagnostics
     from lcl._encoding import _coerce_frame
     from lcl._kernels import _choice_probabilities_and_logsum, _diff_logit_components
-    from lcl._inference import _robust_covariance
+    from lcl._delta import apply_delta_method, parametric_bootstrap_se
+    from lcl._inference import _aggregate_scores, _robust_covariance
     from lcl._logging import log_or_print
     from lcl._optimize import _minimize
     from lcl.options import (
@@ -36,6 +36,7 @@ with install_import_hook("lcl", "beartype.beartype"):
         Options,
         OptimizationOptions,
         _resolve_options,
+        _resolve_weight_type,
     )
     from lcl._presentation import format_cl_coefficients
     from lcl._prediction import CLPrediction, resolve_panel_weights
@@ -91,6 +92,7 @@ class ConditionalLogit(ChoiceModel):
             | ArrayLike
             | None
         ) = None,
+        weight_type: str = "probability",
         init_beta: ArrayLike | None = None,
         options: Options | None = None,
         optimization_options: OptimizationOptions | None = None,
@@ -124,10 +126,21 @@ class ConditionalLogit(ChoiceModel):
             Optional mapping from raw DataFrame/model variable names to
             human-readable labels used in printed coefficient tables.
         weights : str, Mapping, ArrayLike, or None, optional
-            Case-level importance weights. A string names a data column that must
-            be constant within case; a mapping is keyed by case ID (or
-            ``(panel_id, case_id)`` when case IDs repeat); a vector follows first
-            case appearance in the input data and is realigned after encoding.
+            Case-level weights. A string names a data column that must be constant
+            within case; a mapping is keyed by case ID (or ``(panel_id, case_id)``
+            when case IDs repeat); a vector follows first case appearance in the
+            input data and is realigned after encoding.
+        weight_type : {"probability", "frequency"}, default="probability"
+            How ``weights`` enter the variance, mirroring Stata's ``pweight`` and
+            ``fweight``.  ``"probability"`` treats them as survey or sampling
+            weights, so the score of the weighted objective for case ``i`` is
+            ``w_i s_i`` and the robust meat is ``sum_i w_i^2 s_i s_i'``.
+            ``"frequency"`` treats them as replication counts for collapsed data,
+            giving ``sum_i w_i s_i s_i'`` and a sample size of ``sum_i w_i``.
+            Point estimates and the log likelihood are identical either way; only
+            robust and clustered standard errors differ, and they coincide when
+            every weight is one.  Survey weights are the common case in household
+            panel data, so they are the default.
         init_beta : ArrayLike | None, optional
             ``(K,)`` vector of initial taste parameters.
         optimization_options : OptimizationOptions | None, optional
@@ -184,6 +197,7 @@ class ConditionalLogit(ChoiceModel):
             self.numeraire_idx = None
 
         # Format data for MLE
+        resolved_weight_type = _resolve_weight_type(weight_type)
         aligned_weights = self._resolve_case_weights(
             data,
             parsed_data,
@@ -198,6 +212,30 @@ class ConditionalLogit(ChoiceModel):
         )
 
         diff_unchosen_chosen = _diff_unchosen_chosen(data_struct)
+
+        # Resolve a coarser clustering to encoded panel order, then broadcast it
+        # to cases: cases nest inside panels, so a grouping constant within panel
+        # is well defined at either level.
+        cluster_of_cases = None
+        num_clusters = None
+        cluster_column = inference.cluster_column
+        if cluster_column is not None:
+            cluster_by_panel, num_clusters = self._resolve_panel_cluster_ids(
+                data,
+                parsed_data,
+                cluster_column,
+                panels_col=_internal_panels_col,
+            )
+            if data_struct.panels_of_cases is None:
+                raise ValueError("Panel identifiers are required for clustering.")
+            cluster_of_cases = jnp.asarray(cluster_by_panel)[
+                data_struct.panels_of_cases
+            ]
+            logger.info(
+                "Clustering standard errors on %r: %s groups.",
+                cluster_column,
+                num_clusters,
+            )
 
         # Estimate the conditional logit model
         optim_res = _minimize(
@@ -223,6 +261,9 @@ class ConditionalLogit(ChoiceModel):
             estim_time_sec=estim_time_sec,
             has_panels=panels_col is not None,
             case_weights=weights_arr,
+            weight_type=resolved_weight_type,
+            cluster_of_cases=cluster_of_cases,
+            num_clusters=num_clusters,
         )
 
 
@@ -242,6 +283,9 @@ class CLResults:
         estim_time_sec: float,
         has_panels: bool,
         case_weights: ArrayLike,
+        weight_type: str = "probability",
+        cluster_of_cases: ArrayLike | None = None,
+        num_clusters: int | None = None,
     ) -> None:
         """Compute inference summaries from a fitted conditional-logit model.
 
@@ -260,13 +304,21 @@ class CLResults:
         has_panels : bool
             Whether robust covariance should cluster scores at the panel level.
         case_weights : ArrayLike
-            Frequency weights aligned with encoded choice situations.
+            Case weights aligned with encoded choice situations.
+        weight_type : {"probability", "frequency"}, default="probability"
+            Interpretation of ``case_weights`` for the robust variance.
+        cluster_of_cases : ArrayLike | None, optional
+            Zero-indexed cluster identifier per case, for clustering coarser than
+            the panel.
+        num_clusters : int | None, optional
+            Number of distinct clusters implied by ``cluster_of_cases``.
         """
         self.model = model_spec
         self.data = data_struct
         self.inference = inference
         self.has_panels = has_panels
         self.case_weights = jnp.asarray(case_weights)
+        self.weight_type = _resolve_weight_type(weight_type)
         self.converged = optim_res.success
         self.latent_coeff_ = optim_res.params
 
@@ -281,42 +333,49 @@ class CLResults:
 
         # Both robust branches use uncentered scores and the same finite-sample
         # multiplier; they differ only in the level at which scores are summed.
+        # Clustering aggregates weighted scores first, so the two weight
+        # interpretations coincide once a cluster sum has been taken.
         if inference.skip:
             self.hess_inv = jnp.full_like(self.hess_inv, jnp.nan)
-            self.cov_matrix = self.hess_inv
+            latent_cov = self.hess_inv
         elif inference.covariance in {"clustered", "robust"}:
-            if (
-                inference.covariance == "clustered"
-                and has_panels
-                and data_struct.panels_of_cases is not None
-                and data_struct.num_panels is not None
-            ):
-                # Cluster-robust standard errors
-                G = data_struct.num_panels
-                if G < 2:
+            cluster_ids, num_groups = self._resolve_cluster_groups(
+                inference,
+                data_struct,
+                has_panels,
+                cluster_of_cases,
+                num_clusters,
+            )
+            if cluster_ids is not None:
+                if num_groups is None or num_groups < 2:
                     raise ValueError(
-                        "Cluster-robust covariance requires at least two panels."
+                        "Cluster-robust covariance requires at least two clusters."
                     )
-                grad_g = segment_sum(
+                grad_g = _aggregate_scores(
                     optim_res.grad_n * jnp.asarray(case_weights)[:, None],
-                    data_struct.panels_of_cases,
-                    num_segments=G,
+                    cluster_ids,
+                    num_groups,
                 )
-                self.cov_matrix = _robust_covariance(
+                latent_cov = _robust_covariance(
                     self.hess_inv, grad_g, inference.finite_sample_correction
                 )
             else:
                 # Standard Huber-White Robust Standard Errors
-                self.cov_matrix = _robust_covariance(
+                latent_cov = _robust_covariance(
                     self.hess_inv,
                     optim_res.grad_n,
                     inference.finite_sample_correction,
                     weights=case_weights,
+                    weight_type=self.weight_type,
                 )
         else:
-            self.cov_matrix = self.hess_inv
+            latent_cov = self.hess_inv
 
-        # Apply delta method for standard errors if numeraire (softplus) is used
+        # The public covariance is reported on the same scale as ``coeff_``, so
+        # ``sqrt(diag(cov_matrix))`` reproduces ``stderr``.  ``latent_cov_matrix``
+        # keeps the unconstrained parameterization the delta method and the
+        # parametric bootstrap consume.
+        self.latent_cov_matrix = latent_cov
         if self.model.numeraire_idx is not None:
 
             def struct_fn(
@@ -328,11 +387,11 @@ class CLResults:
                 )
 
             jac = jacrev(struct_fn)(self.latent_coeff_)
-            struct_cov = jac @ self.cov_matrix @ jac.T
+            struct_cov = jac @ latent_cov @ jac.T
             self.cov_matrix = 0.5 * (struct_cov + struct_cov.T)
-            self.stderr = jnp.sqrt(jnp.diag(struct_cov))
         else:
-            self.stderr = jnp.sqrt(jnp.diag(self.cov_matrix))
+            self.cov_matrix = latent_cov
+        self.stderr = jnp.sqrt(jnp.diag(self.cov_matrix))
 
         self.zvalues = onp.array(self.coeff_ / self.stderr, dtype=onp.float64)
         self.pvalues = 2 * norm.cdf(-onp.abs(self.zvalues))
@@ -389,6 +448,86 @@ class CLResults:
                 self.total_iter,
                 optim_res.message,
             )
+
+    @staticmethod
+    def _resolve_cluster_groups(
+        inference: InferenceOptions,
+        data_struct: Data,
+        has_panels: bool,
+        cluster_of_cases: ArrayLike | None,
+        num_clusters: int | None,
+    ) -> tuple[ArrayLike | None, int | None]:
+        """Return the case-level grouping used to sum scores, if any.
+
+        Returns ``(None, None)`` for the unclustered sandwich so the caller falls
+        through to case-level Huber-White.
+        """
+        if inference.covariance != "clustered":
+            return None, None
+        if cluster_of_cases is not None:
+            return cluster_of_cases, num_clusters
+        if (
+            has_panels
+            and data_struct.panels_of_cases is not None
+            and data_struct.num_panels is not None
+        ):
+            return data_struct.panels_of_cases, data_struct.num_panels
+        return None, None
+
+    @property
+    def flat_params(self) -> Array:
+        """Latent parameter vector, aligned with :attr:`latent_cov_matrix`."""
+        return self.latent_coeff_
+
+    @property
+    def covariance_available(self) -> bool:
+        """Report whether a usable covariance matrix was estimated."""
+        return bool(onp.all(onp.isfinite(onp.asarray(self.cov_matrix))))
+
+    def _apply_delta_method(
+        self,
+        func: Any,
+        flat_params: Array,
+        **kwargs: Any,
+    ) -> tuple[Array, Array]:
+        """Apply the delta method to a function of the latent coefficients."""
+        return apply_delta_method(func, flat_params, self.latent_cov_matrix, **kwargs)
+
+    def _parametric_bootstrap_se(
+        self,
+        func: Any,
+        flat_params: Array,
+        *,
+        draws: int = 500,
+        seed: int = 0,
+        **kwargs: Any,
+    ) -> Array:
+        """Estimate nonlinear standard errors from asymptotic parameter draws."""
+        return parametric_bootstrap_se(
+            func,
+            flat_params,
+            self.latent_cov_matrix,
+            draws=draws,
+            seed=seed,
+            **kwargs,
+        )
+
+    def _structural_betas_and_class_probs(
+        self,
+        flat_params: Array,
+        dems: Array | None,
+        num_panels: int,
+    ) -> tuple[Array, Array]:
+        """Return structural betas and class probabilities for one homogeneous class.
+
+        A conditional logit is the one-class case of the mixture, so presenting it
+        that way lets the counterfactual inference in
+        :mod:`lcl._prediction_inference` serve both estimators unchanged.
+        """
+        betas = _to_structural_betas(
+            flat_params, self.model.numeraire_idx, self.model.numeraire_min_abs
+        )
+        return betas[:, None], jnp.ones((num_panels, 1), dtype=betas.dtype)
 
     def coefficient_table(self) -> pl.DataFrame:
         """Return conditional-logit coefficients with presentation labels.

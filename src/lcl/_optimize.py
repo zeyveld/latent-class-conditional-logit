@@ -1,5 +1,5 @@
 from collections.abc import Callable
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 from jax import lax
@@ -29,6 +29,37 @@ class NewtonState(NamedTuple):
     trust_radius: jnp.ndarray
 
 
+def newton_kwargs(
+    optimization_options: OptimizationOptions,
+) -> dict[str, Any]:
+    """Translate an :class:`~lcl.options.OptimizationOptions` into solver kwargs.
+
+    Keeping the translation in one place means every call site -- the standalone
+    conditional logit, the class-specific M-step, the membership M-step, and the
+    observed-data polish -- reads the same fields, so an option added here reaches
+    all of them.
+
+    Parameters
+    ----------
+    optimization_options : :class:`~lcl.options.OptimizationOptions`
+        Solver configuration.
+
+    Returns
+    -------
+    dict
+        Keyword arguments accepted by :func:`exact_newton_minimize`.
+    """
+    return {
+        "tol": optimization_options.newton_decrement_tol,
+        "maxiter": optimization_options.maxiter,
+        "damping": optimization_options.hessian_damping,
+        "max_step_norm": optimization_options.max_step_norm,
+        "initial_trust_radius": optimization_options.initial_trust_radius,
+        "line_search_maxiter": optimization_options.line_search_maxiter,
+        "accept_any_decrease": optimization_options.accept_any_decrease,
+    }
+
+
 def exact_newton_minimize(
     value_fn: Callable[..., Float64[Array, ""]],
     value_grad_hess_fn: Callable[
@@ -45,6 +76,7 @@ def exact_newton_minimize(
     maxiter: int = 50,
     damping: float = 0.0,
     max_step_norm: float = 1000.0,
+    initial_trust_radius: float = 1.0,
     line_search_maxiter: int = 40,
     accept_any_decrease: bool = False,
 ) -> NewtonState:
@@ -71,7 +103,10 @@ def exact_newton_minimize(
         if that solve is not finite and descending.
     max_step_norm : float, default=1000.0
         Maximum adaptive trust radius, measured in the local curvature metric.
-        The initial radius is one and expands or contracts with model agreement.
+        The radius starts at ``initial_trust_radius`` and expands or contracts
+        with model agreement.
+    initial_trust_radius : float, default=1.0
+        Starting trust radius, in the local curvature metric.
     line_search_maxiter : int, default=40
         Maximum number of Armijo backtracking iterations per Newton step.
     accept_any_decrease : bool, default=False
@@ -118,10 +153,16 @@ def exact_newton_minimize(
         zero = jnp.asarray(0.0, dtype=grad.dtype)
         initial = RegularizationState(zero, solve_scaled(zero), 0)
 
+        # A block with no curvature and no slope -- a class padded out to fill a
+        # device, or one whose posterior mass has collapsed -- is already
+        # stationary.  Escalating diagonal shifts cannot manufacture a strict
+        # descent direction there, so the shift loop must not chase one.
+        stationary = jnp.max(jnp.abs(grad)) <= tol
+
         def regularization_cond(reg_state: RegularizationState) -> jnp.ndarray:
             direction = reg_state.direction_scaled / diagonal_scale
             valid = jnp.all(jnp.isfinite(direction)) & (jnp.dot(grad, direction) < 0.0)
-            return (~valid) & (reg_state.attempts < 12)
+            return (~valid) & (~stationary) & (reg_state.attempts < 12)
 
         def regularization_body(
             reg_state: RegularizationState,
@@ -144,10 +185,17 @@ def exact_newton_minimize(
         )
         direction = regularization.direction_scaled / diagonal_scale
         valid = jnp.all(jnp.isfinite(direction)) & (jnp.dot(grad, direction) < 0.0)
+        # Reserve an infinite decrement for a genuine non-descent direction.  A
+        # negligible gradient reports zero so the caller stops rather than
+        # burning the whole iteration budget on zero-length steps.
         decrement = jnp.where(
             valid,
             jnp.sqrt(jnp.maximum(-jnp.dot(grad, direction), 0.0)),
-            jnp.asarray(jnp.inf, dtype=grad.dtype),
+            jnp.where(
+                stationary,
+                jnp.asarray(0.0, dtype=grad.dtype),
+                jnp.asarray(jnp.inf, dtype=grad.dtype),
+            ),
         )
         return direction, decrement, diagonal_scale
 
@@ -162,7 +210,9 @@ def exact_newton_minimize(
         failed=jnp.array(False),
         num_fun_eval=jnp.array(0),
         num_grad_hess_eval=jnp.array(1),
-        trust_radius=jnp.asarray(min(1.0, max_step_norm), dtype=init_params.dtype),
+        trust_radius=jnp.asarray(
+            min(initial_trust_radius, max_step_norm), dtype=init_params.dtype
+        ),
     )
 
     def outer_cond(state: NewtonState) -> jnp.ndarray:
@@ -268,10 +318,20 @@ def exact_newton_minimize(
             + 0.5 * jnp.dot(accepted_step, state.hess @ accepted_step)
         )
         actual_decrease = state.loss - new_loss
-        agreement = actual_decrease / jnp.maximum(
-            predicted_decrease, jnp.finfo(state.params.dtype).eps
+        # A non-positive predicted decrease means the local quadratic model has
+        # broken down; that must contract the radius, not expand it.
+        agreement = jnp.where(
+            predicted_decrease > 0.0,
+            actual_decrease / jnp.maximum(
+                predicted_decrease, jnp.finfo(state.params.dtype).eps
+            ),
+            jnp.zeros_like(actual_decrease),
         )
-        step_metric = final_ls.step_size * direction_norm
+        # The step actually taken is the trust-truncated one, so the
+        # "did the step reach the boundary" test must use the truncated length.
+        step_metric = final_ls.step_size * jnp.minimum(
+            direction_norm, state.trust_radius
+        )
         contracted_radius = jnp.maximum(0.25 * state.trust_radius, 1e-8)
         expanded_radius = jnp.minimum(2.0 * state.trust_radius, max_step_norm)
         trust_radius = jnp.where(
@@ -350,8 +410,8 @@ def _minimize(
     if optimization_options is None:
         optimization_options = OptimizationOptions()
 
-    # A common per-observation scale gives gradient_tol the same meaning across
-    # standalone CL, class-specific M-steps, and demographic M-steps.
+    # A common per-observation scale gives newton_decrement_tol the same meaning
+    # across standalone CL, class-specific M-steps, and demographic M-steps.
     scale_factor = jnp.maximum(
         jnp.asarray(1.0 if objective_scale is None else objective_scale),
         1.0,
@@ -383,12 +443,7 @@ def _minimize(
         _value_grad_hess_closure,
         params,
         *args,
-        tol=optimization_options.gradient_tol,
-        maxiter=optimization_options.maxiter,
-        damping=optimization_options.hessian_damping,
-        max_step_norm=optimization_options.max_step_norm,
-        line_search_maxiter=optimization_options.line_search_maxiter,
-        accept_any_decrease=optimization_options.accept_any_decrease,
+        **newton_kwargs(optimization_options),
     )
     params = state.params
 
@@ -396,7 +451,7 @@ def _minimize(
     error = state.error.item()
     iterations = int(state.step_num)
 
-    if error <= optimization_options.gradient_tol:
+    if error <= optimization_options.newton_decrement_tol:
         success = True
         message = "Optimization terminated successfully."
     elif bool(state.failed):

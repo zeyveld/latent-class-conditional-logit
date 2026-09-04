@@ -9,13 +9,13 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import jacrev
-from jax.tree_util import Partial
+from jax import jacfwd
 from jax.typing import ArrayLike
 from jaxtyping import Array, Float64
 
 from lcl._analytic_derivatives import _panel_scores_and_hessian
 from lcl._case_utils import _diff_unchosen_chosen
+from lcl._delta import apply_delta_method, parametric_bootstrap_se
 from lcl._diagnostics import LCLDiagnostics
 from lcl._em_alg_steps import (
     _compute_conditional_class_probs,
@@ -23,10 +23,11 @@ from lcl._em_alg_steps import (
 )
 from lcl._encoding import _coerce_frame
 from lcl._jax_compat import cpu_device, device_put_array_leaves
-from lcl._inference import _invert_information, _symmetrize
+from lcl._inference import _aggregate_scores, _invert_information, _symmetrize
 from lcl._kernels import _choice_probabilities_and_logsum
 from lcl._logging import log_or_print
 from lcl._params import ParamPacking
+from lcl._polish import PolishReport
 from lcl._prediction import LCLPrediction, resolve_panel_weights
 from lcl._predict_inputs import (
     _parse_past_choices,
@@ -41,6 +42,9 @@ from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
 logger = logging.getLogger(__name__)
 
+DEGENERATE_VARIANCE_RTOL = 1e-12
+"""Relative floor below which between-class spread counts as unidentified."""
+
 
 class LCLResults:
     """Post-estimation results and inference container.
@@ -51,8 +55,16 @@ class LCLResults:
     Attributes
     ----------
     cov_matrix : Float64[Array, "all_params all_params"]
-        Robust cluster-adjusted covariance matrix, strictly aligned with the Stata
-        finite-sample correction multiplier :math:`(G / (G - 1))`.
+        Covariance of the *reported* (structural) parameters, aligned row for row
+        with :meth:`parameter_names`.  Constrained coefficients appear on the
+        scale printed by :meth:`class_coefficients`, so ``sqrt(diag(cov_matrix))``
+        matches the published standard errors.  Clustered covariance uses the
+        Stata maximum-likelihood multiplier :math:`(G / (G - 1))`.
+    latent_cov_matrix : Float64[Array, "all_params all_params"]
+        Covariance in the unconstrained parameterization the optimizer works in.
+        This is the matrix the delta method consumes: target functions apply the
+        softplus transform internally, so its Jacobian is differentiated rather
+        than applied twice.
     caic : float
         Consistent Akaike Information Criterion (Bozdogan, 1987).
     bic : float
@@ -73,6 +85,13 @@ class LCLResults:
         diagnostics_config: DiagnosticsOptions | None = None,
         em_history: list[dict[str, Any]] | None = None,
         optimization_history: list[dict[str, Any]] | None = None,
+        observed_score_max: float = float("nan"),
+        score_tol: float = 1e-4,
+        em_criterion_met: bool = False,
+        polish_report: PolishReport | None = None,
+        cluster_ids: ArrayLike | None = None,
+        num_clusters: int | None = None,
+        param_packing: ParamPacking | None = None,
     ) -> None:
         """Build a latent-class results object and compute inference artifacts.
 
@@ -99,6 +118,24 @@ class LCLResults:
             EM log-likelihood and class-share history.
         optimization_history : list[dict[str, Any]] | None
             Final class-level M-step diagnostics.
+        observed_score_max : float, optional
+            Largest absolute component of the observed-data score at the reported
+            estimate.  Recomputed here when covariance estimation runs.
+        score_tol : float, default=1e-4
+            Stationarity tolerance used for the ``converged`` flag, reused by
+            :meth:`diagnostics` so the two can never disagree.
+        em_criterion_met : bool, default=False
+            Whether the Aitken EM stopping criterion was satisfied before the
+            iteration cap.
+        polish_report : :class:`~lcl._polish.PolishReport` | None, optional
+            Outcome of the observed-data Newton polish.
+        cluster_ids : ArrayLike | None, optional
+            Zero-indexed cluster identifier per panel, for clustering coarser than
+            the decision-maker.
+        num_clusters : int | None, optional
+            Number of distinct clusters implied by ``cluster_ids``.
+        param_packing : :class:`~lcl._params.ParamPacking` | None, optional
+            Reuse of the packing built during estimation.
         """
         self.model = model_spec
         self.em_res = em_vars
@@ -123,7 +160,7 @@ class LCLResults:
         if self.data.num_panels is None:
             raise ValueError("Panel identifiers are required for LCL results.")
 
-        self._param_packing = ParamPacking(
+        self._param_packing = param_packing or ParamPacking(
             num_alt_vars=self.model.num_vars,
             num_classes=self.model.num_classes,
             num_dem_vars=self.model.num_dem_vars,
@@ -132,10 +169,18 @@ class LCLResults:
         )
         self.flat_params = self._pack_params()
         self.num_params = self._param_packing.num_params
+        self.score_tol = float(score_tol)
+        self.em_criterion_met = bool(em_criterion_met)
+        self.polish_report = polish_report
+        self._cluster_ids = (
+            None if cluster_ids is None else jnp.asarray(cluster_ids, dtype=jnp.int32)
+        )
+        self._num_clusters = num_clusters
         # Populated by _compute_covariance; stays None when inference is skipped.
         self.information_diagnostics: Any = None
-        self.observed_score_max = float("nan")
-        self.cov_matrix = self._compute_covariance()
+        self.observed_score_max = float(observed_score_max)
+        self.latent_cov_matrix = self._compute_covariance()
+        self.cov_matrix = self._structural_covariance(self.latent_cov_matrix)
 
         # Compute information criteria
         num_panels = self.data.num_panels
@@ -167,16 +212,17 @@ class LCLResults:
     def __repr__(self) -> str:
         """Return a compact, human-readable summary of fit quality."""
         status = "Converged" if self.converged else "Did Not Converge"
-        return " | ".join(
-            [
-                f"<LCLResults: {self.model.num_classes} Classes",
-                f"{status}",
-                f"Log likelihood: {self.em_res.unconditional_loglik:.1f}",
-                f"CAIC: {self.caic:.1f}",
-                f"BIC: {self.bic:.1f}",
-                f"Adj. BIC: {self.adjusted_bic:.1f}>",
-            ]
-        )
+        parts = [
+            f"<LCLResults: {self.model.num_classes} Classes",
+            f"{status}",
+            f"Log likelihood: {self.em_res.unconditional_loglik:.1f}",
+            f"CAIC: {self.caic:.1f}",
+            f"BIC: {self.bic:.1f}",
+            f"Adj. BIC: {self.adjusted_bic:.1f}",
+        ]
+        if not self.inference.skip and not self.covariance_available:
+            parts.append("Covariance unavailable")
+        return " | ".join(parts) + ">"
 
     def parameter_names(self) -> list[str]:
         """Return names aligned with rows and columns of ``cov_matrix``."""
@@ -275,7 +321,7 @@ class LCLResults:
         Returns
         -------
         Float64[Array, "all_params all_params"]
-            Covariance matrix aligned with the flattened parameter vector.
+            Covariance in the latent (unconstrained) parameterization.
         """
         cpu = cpu_device()
         if self.inference.skip:
@@ -309,15 +355,61 @@ class LCLResults:
             if self.inference.covariance == "unadjusted":
                 return _symmetrize(H_inv)
 
-            B = J.T @ J
-
             if data.num_panels is None:
                 raise ValueError(
                     "Panel identifiers are required for clustered covariance."
                 )
-            G = data.num_panels
+            # Each panel contributes exactly one score row to the mixture
+            # likelihood, so panel clustering aggregates nothing further.  A
+            # coarser grouping sums those rows first and counts its own groups.
+            if self._cluster_ids is None:
+                cluster_scores = J
+                G = data.num_panels
+            else:
+                if self._num_clusters is None:
+                    raise ValueError("num_clusters is required with cluster_ids.")
+                cluster_scores = _aggregate_scores(
+                    J, self._cluster_ids, self._num_clusters
+                )
+                G = self._num_clusters
+            if G < 2:
+                raise ValueError(
+                    "Cluster-robust covariance requires at least two clusters."
+                )
+            B = cluster_scores.T @ cluster_scores
             correction = G / (G - 1) if self.inference.finite_sample_correction else 1.0
             return _symmetrize((H_inv @ B @ H_inv) * correction)
+
+    def _structural_from_latent(
+        self, flat_params: Float64[Array, "all_params"]
+    ) -> Float64[Array, "all_params"]:
+        """Map latent parameters to the scale the results tables report."""
+        latent_betas, thetas = self._param_packing.unpack(flat_params)
+        structural_betas = self._param_packing.to_structural(latent_betas)
+        return jnp.concatenate([structural_betas.ravel(), thetas.ravel()])
+
+    def _structural_covariance(
+        self, latent_cov: Float64[Array, "all_params all_params"]
+    ) -> Float64[Array, "all_params all_params"]:
+        """Push the latent covariance through to the reported parameter scale.
+
+        Without this the public covariance would sit in a different
+        parameterization from the coefficients whose names label its rows, and
+        from :attr:`~lcl.conditional_logit.CLResults.cov_matrix`, which the shared
+        results protocol advertises as the same object.
+        """
+        if self._param_packing.numeraire_idx is None:
+            return latent_cov
+        cpu = cpu_device()
+        with jax.default_device(cpu):
+            flat_params = device_put_array_leaves(self.flat_params, cpu)
+            jacobian = jacfwd(self._structural_from_latent)(flat_params)
+            return _symmetrize(jacobian @ device_put_array_leaves(latent_cov, cpu) @ jacobian.T)
+
+    @property
+    def covariance_available(self) -> bool:
+        """Report whether a usable covariance matrix was estimated."""
+        return bool(onp.all(onp.isfinite(onp.asarray(self.cov_matrix))))
 
     def _panel_loglik_fn(
         self,
@@ -398,64 +490,49 @@ class LCLResults:
         self,
         func: Callable[..., Float64[Array, "..."]],
         flat_params: Float64[Array, "all_params"],
-        *args: object,
-        **kwargs: object,
+        **kwargs: Any,
     ) -> tuple[Float64[Array, "..."], Float64[Array, "..."]]:
-        """Apply the Delta Method on CPU for non-linear parameter functions.
+        """Apply the delta method to a function of the latent parameters.
 
-        The target functions used for summaries and WTP inference generally return
-        scalars or short vectors, so reverse-mode AD remains appropriate here even
-        though the robust covariance score Jacobian uses ``jacfwd``.
+        Extras are keyword-only: the parameter vector is the sole positional
+        argument, so nothing can displace it at a call site.
+
+        Parameters
+        ----------
+        func : Callable
+            Target taking the flat latent parameter vector.
+        flat_params : Float64[Array, "all_params"]
+            Latent parameters.
+        **kwargs
+            Extra keyword arguments bound into ``func``.
+
+        Returns
+        -------
+        tuple[Array, Array]
+            Value and delta-method standard errors.
         """
-        cpu = cpu_device()
-        with jax.default_device(cpu):
-            flat_params_cpu = device_put_array_leaves(flat_params, cpu)
-            args_cpu = device_put_array_leaves(args, cpu)
-            kwargs_cpu = device_put_array_leaves(kwargs, cpu)
-            cov_matrix = device_put_array_leaves(self.cov_matrix, cpu)
-
-            target_func = Partial(func, *args_cpu, **kwargs_cpu)
-            val = target_func(flat_params_cpu)
-            jac = jacrev(target_func)(flat_params_cpu)
-
-            jac_rows = jac.reshape((-1, flat_params_cpu.size))
-            variance = jnp.einsum("ip,pq,iq->i", jac_rows, cov_matrix, jac_rows)
-            variance = variance.reshape(val.shape)
-
-            return val, jnp.sqrt(jnp.maximum(variance, 0.0))
+        return apply_delta_method(
+            func, flat_params, self.latent_cov_matrix, **kwargs
+        )
 
     def _parametric_bootstrap_se(
         self,
         func: Callable[..., Float64[Array, "..."]],
         flat_params: Float64[Array, "all_params"],
-        *args: object,
+        *,
         draws: int = 500,
         seed: int = 0,
-        **kwargs: object,
+        **kwargs: Any,
     ) -> Float64[Array, "..."]:
         """Estimate nonlinear standard errors from asymptotic parameter draws."""
-        if draws < 2:
-            raise ValueError("bootstrap_draws must be at least 2.")
-        covariance = onp.asarray(self.cov_matrix, dtype=onp.float64)
-        if not onp.all(onp.isfinite(covariance)):
-            raise ValueError(
-                "A finite covariance matrix is required for bootstrap SEs."
-            )
-        eigenvalues, eigenvectors = onp.linalg.eigh(0.5 * (covariance + covariance.T))
-        tolerance = (
-            onp.finfo(onp.float64).eps
-            * max(1.0, float(onp.max(onp.abs(eigenvalues))))
-            * covariance.shape[0]
+        return parametric_bootstrap_se(
+            func,
+            flat_params,
+            self.latent_cov_matrix,
+            draws=draws,
+            seed=seed,
+            **kwargs,
         )
-        if float(eigenvalues.min()) < -tolerance:
-            raise ValueError("The covariance matrix is not positive semidefinite.")
-        root = eigenvectors * onp.sqrt(onp.maximum(eigenvalues, 0.0))[None, :]
-        rng = onp.random.default_rng(seed)
-        standard_normal = rng.standard_normal((draws, flat_params.size))
-        parameter_draws = onp.asarray(flat_params) + standard_normal @ root.T
-        target = Partial(func, *args, **kwargs)
-        values = jax.vmap(target)(jnp.asarray(parameter_draws))
-        return jnp.std(values, axis=0, ddof=1)
 
     def _calc_population_mean_betas(
         self,
@@ -472,13 +549,22 @@ class LCLResults:
         structural_betas = self._param_packing.to_structural(latent_betas)
         return structural_betas @ avg_shares
 
-    def _calc_population_std_betas(
+    def _calc_population_var_betas(
         self,
         flat_params: Float64[Array, "all_params"],
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
     ) -> Float64[Array, "alt_vars"]:
-        """Compute the population variance of the structural taste parameters."""
+        """Compute the between-class variance of the structural taste parameters.
+
+        The delta method is applied to the variance rather than to its square
+        root because the square root is not differentiable where the variance
+        vanishes -- which is exactly the case of interest, a variable whose
+        coefficient does not differ across classes.  :meth:`beta_summary`
+        converts to a standard deviation and applies the chain rule explicitly,
+        so it can report ``NaN`` at the degenerate point instead of a spurious
+        zero.
+        """
         latent_betas, thetas = self._unpack_params(flat_params)
 
         class_probs = self._get_class_probs(thetas, dems, num_panels)
@@ -488,9 +574,42 @@ class LCLResults:
 
         mean_betas = structural_betas @ avg_shares
         diff_sq = (structural_betas - mean_betas[:, None]) ** 2
-        var_betas = diff_sq @ avg_shares
+        return diff_sq @ avg_shares
 
-        return jnp.sqrt(jnp.maximum(var_betas, 1e-250))
+    def _calc_population_std_betas(
+        self,
+        flat_params: Float64[Array, "all_params"],
+        dems: Float64[Array, "panels dem_vars"] | None,
+        num_panels: int,
+    ) -> Float64[Array, "alt_vars"]:
+        """Return the between-class standard deviation of the taste parameters."""
+        return jnp.sqrt(
+            jnp.clip(
+                self._calc_population_var_betas(flat_params, dems, num_panels),
+                min=0.0,
+            )
+        )
+
+    def _structural_betas_and_class_probs(
+        self,
+        flat_params: Float64[Array, "all_params"],
+        dems: Float64[Array, "panels dem_vars"] | None,
+        num_panels: int,
+    ) -> tuple[
+        Float64[Array, "alt_vars classes"], Float64[Array, "panels classes"]
+    ]:
+        """Return structural class betas and prior class probabilities.
+
+        The one hook the differentiable counterfactual quantities in
+        :mod:`lcl._prediction_inference` need from a fitted model.  A conditional
+        logit implements it with a single class, so those quantities are written
+        once and serve both estimators.
+        """
+        latent_betas, thetas = self._unpack_params(flat_params)
+        return (
+            self._param_packing.to_structural(latent_betas),
+            self._get_class_probs(thetas, dems, num_panels),
+        )
 
     def _calc_structural_betas(
         self, flat_params: Float64[Array, "all_params"]
@@ -666,13 +785,40 @@ class LCLResults:
             dems=self.data.dems,
             num_panels=self.data.num_panels,
         )
-        stds, se_stds = self._apply_delta_method(
-            self._calc_population_std_betas,
+        variances, se_variances = self._apply_delta_method(
+            self._calc_population_var_betas,
             self.flat_params,
             dems=self.data.dems,
             num_panels=self.data.num_panels,
         )
         structural = onp.asarray(self.em_res.structural_betas)
+
+        # sd = sqrt(var), so se(sd) = se(var) / (2 sd) -- but only where the
+        # variance is separated from zero.  A variable whose coefficient is
+        # common to every class has no identified spread, and the derivative of
+        # the square root there is unbounded, so the standard error is NaN rather
+        # than the zero a floored square root would silently report.
+        variance_array = onp.asarray(variances, dtype=onp.float64)
+        se_variance_array = onp.asarray(se_variances, dtype=onp.float64)
+        scale = onp.maximum(onp.max(structural**2, axis=1), 1.0)
+        identified = variance_array > DEGENERATE_VARIANCE_RTOL * scale
+        stds = onp.sqrt(onp.maximum(variance_array, 0.0))
+        with onp.errstate(divide="ignore", invalid="ignore"):
+            se_stds = onp.where(
+                identified, se_variance_array / (2.0 * stds), onp.nan
+            )
+        if not bool(onp.all(identified)):
+            degenerate = [
+                variable
+                for variable, keep in zip(self.model.case_varnames, identified)
+                if not keep
+            ]
+            logger.warning(
+                "Between-class spread is not identified for %s: the coefficient "
+                "is common to every class, so its standard deviation has no "
+                "standard error.",
+                ", ".join(degenerate),
+            )
         rows = []
         for idx, variable in enumerate(self.model.case_varnames):
             rows.append(
@@ -771,7 +917,10 @@ class LCLResults:
                 "check": "converged",
                 "value": bool(self.converged),
                 "status": "ok" if self.converged else "warning",
-                "message": "EM convergence flag.",
+                "message": (
+                    "Whether the estimate is a stationary point of the mixture "
+                    "likelihood, judged by observed_score_max against score_tol."
+                ),
             },
             {
                 "section": "fit",
@@ -787,12 +936,24 @@ class LCLResults:
                 "status": (
                     "warning"
                     if onp.isfinite(self.observed_score_max)
-                    and self.observed_score_max > 1e-4
+                    and self.observed_score_max > self.score_tol
                     else "ok"
                 ),
                 "message": (
-                    "Maximum absolute component of the final observed-data score; "
-                    "this checks stationarity of the mixture likelihood itself."
+                    "Maximum absolute component of the final observed-data score, "
+                    f"against the score_tol of {self.score_tol:.3g}. This is the "
+                    "same test that sets the converged flag, so the two agree by "
+                    "construction."
+                ),
+            },
+            {
+                "section": "fit",
+                "check": "em_criterion_met",
+                "value": bool(self.em_criterion_met),
+                "status": "ok" if self.em_criterion_met else "warning",
+                "message": (
+                    "Whether the Aitken-extrapolated EM criterion was met before "
+                    "the iteration cap."
                 ),
             },
             {
@@ -811,7 +972,81 @@ class LCLResults:
             },
         ]
 
-        if self.information_diagnostics is not None:
+        if self.polish_report is not None:
+            report = self.polish_report
+            rows.append(
+                {
+                    "section": "fit",
+                    "check": "polish_loglik_gain",
+                    "value": float(report.loglik_after - report.loglik_before),
+                    "status": "ok",
+                    "message": (
+                        f"Log likelihood gained by {report.iterations} "
+                        "observed-data Newton step(s) after EM. A large value "
+                        "means EM stopped well short of the optimum."
+                    ),
+                }
+            )
+            rows.append(
+                {
+                    "section": "fit",
+                    "check": "polish_score_reduction",
+                    "value": float(report.score_before),
+                    "status": "ok",
+                    "message": (
+                        "Observed-data score before the polish, for comparison "
+                        "with observed_score_max after it."
+                    ),
+                }
+            )
+
+        rows.append(
+            {
+                "section": "inference",
+                "check": "covariance_available",
+                "value": bool(self.inference.skip or self.covariance_available),
+                "status": (
+                    "ok"
+                    if self.inference.skip or self.covariance_available
+                    else "warning"
+                ),
+                "message": (
+                    "Whether a finite covariance matrix was estimated. When false, "
+                    "every standard error in this results object is NaN."
+                ),
+            }
+        )
+
+        if self.diagnostics_config.check_separation and self.data.num_panels:
+            prior = onp.asarray(
+                self._get_class_probs(
+                    self._unpack_params(self.flat_params)[1],
+                    self.data.dems,
+                    self.data.num_panels,
+                )
+            )
+            min_prior = float(prior.min())
+            separated = min_prior <= self.diagnostics_config.separation_threshold
+            rows.append(
+                {
+                    "section": "latent_class",
+                    "check": "min_membership_probability",
+                    "value": min_prior,
+                    "status": "warning" if separated else "ok",
+                    "message": (
+                        "Smallest prior class-membership probability over panels. "
+                        "A value at zero means some demographic cell never belongs "
+                        "to that class, so its membership coefficients are "
+                        "unbounded and the observed information is singular in "
+                        "that direction. Merge the cell, drop the variable, or fit "
+                        "fewer classes."
+                    ),
+                }
+            )
+
+        if self.information_diagnostics is not None and (
+            self.diagnostics_config.check_collinearity
+        ):
             info = self.information_diagnostics
             rows.append(
                 {
@@ -947,9 +1182,20 @@ class LCLResults:
         lines = [
             f"Converged: {self.converged}",
             f"EM recursions: {self.total_recursions}",
+            f"EM criterion met: {self.em_criterion_met}",
             f"Final log likelihood: {float(self.em_res.unconditional_loglik):.6g}",
+            f"Max observed-data score: {self.observed_score_max:.3e} "
+            f"(tolerance {self.score_tol:.3g})",
             f"Warnings: {warnings.height}",
         ]
+        if self.polish_report is not None:
+            report = self.polish_report
+            lines.append(
+                f"Observed-data polish: {report.iterations} Newton step(s), "
+                f"log likelihood {report.loglik_before:.6f} -> "
+                f"{report.loglik_after:.6f}, score {report.score_before:.3e} -> "
+                f"{report.score_after:.3e}"
+            )
         if self.em_history_.height:
             last = self.em_history_.tail(1).row(0, named=True)
             lines.append(f"Last EM history row: {last}")
@@ -1098,6 +1344,10 @@ class LCLResults:
                 "validate their panel alignment."
             )
 
+        # Retained for posterior-updated WTP inference, which differentiates
+        # through the Bayes update rather than freezing the posterior.
+        data_past: Data | None = None
+        diff_unchosen_chosen_past: DiffUnchosenChosen | None = None
         if past_choices is not None:
             parsed_past = _parse_past_choices(
                 model=self.model,
@@ -1219,4 +1469,6 @@ class LCLResults:
             original_panels=parsed_predict.original_panels,
             raw_prediction_data=raw_prediction_data,
             panel_weights=resolved_panel_weights,
+            past_diff_unchosen_chosen=diff_unchosen_chosen_past,
+            past_data=data_past,
         )

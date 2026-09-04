@@ -4,14 +4,24 @@ import logging
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Any, Literal
 
-import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jaxtyping import Array, Float64, Int
 
+from lcl._case_utils import _to_structural_betas
 from lcl._elasticities import compute_elasticities, elasticity_design_derivative
+from lcl._em_alg_steps import _compute_conditional_class_probs
 from lcl._logging import log_or_print
+from lcl._prediction_inference import (
+    aggregate_elasticities as _aggregate_elasticities_fn,
+)
+from lcl._prediction_inference import (
+    build_within_case_pairs,
+    market_shares as _market_shares_fn,
+    mean_surplus as _mean_surplus_fn,
+    mean_surplus_change as _mean_surplus_change_fn,
+)
 from lcl._presentation import format_wtp_table
 from lcl.options import PartitionType, WTPRequest
 from lcl._struct import Data
@@ -72,6 +82,8 @@ class _PredictionBase:
         original_panels: Any | None = None,
         raw_prediction_data: pl.DataFrame | None = None,
         panel_weights: Sequence[float] | onp.ndarray | None = None,
+        past_diff_unchosen_chosen: Any | None = None,
+        past_data: Data | None = None,
     ) -> None:
         """Store prediction outputs and references needed for post-processing.
 
@@ -131,6 +143,11 @@ class _PredictionBase:
             )
         )
         self.raw_prediction_data = raw_prediction_data
+        # Retained so willingness to pay computed from Bayesian-updated class
+        # membership can be differentiated through that update rather than
+        # treating the posterior as a fixed constant.
+        self.past_diff_unchosen_chosen = past_diff_unchosen_chosen
+        self.past_data = past_data
         num_panels = predict_data.num_panels
         if num_panels is None:
             raise ValueError("Panel identifiers are required for prediction.")
@@ -148,6 +165,73 @@ class _PredictionBase:
         if not onp.any(weights > 0.0):
             raise ValueError("At least one panel weight must be positive.")
         self.panel_weights = weights
+
+    def _design_kwargs(self) -> dict[str, Any]:
+        """Return the design arrays every differentiable counterfactual needs."""
+        data = self.predict_data
+        if data.panels is None or data.num_panels is None:
+            raise ValueError("Panel identifiers are required for prediction inference.")
+        return {
+            "results": self.results,
+            "X": data.X,
+            "cases": data.cases,
+            "panels": data.panels,
+            "dems": data.dems,
+            "num_cases": data.num_cases,
+            "num_panels": data.num_panels,
+        }
+
+    def _row_panel_weights(self) -> jnp.ndarray:
+        """Return each design row's panel weight."""
+        data = self.predict_data
+        if data.panels is None:
+            raise ValueError("Panel identifiers are required for prediction inference.")
+        return jnp.asarray(self.panel_weights)[data.panels]
+
+    def _case_panel_weights(self) -> jnp.ndarray:
+        """Return each choice situation's panel weight."""
+        data = self.predict_data
+        if data.panels_of_cases is None:
+            raise ValueError("Panel identifiers are required for prediction inference.")
+        return jnp.asarray(self.panel_weights)[data.panels_of_cases]
+
+    def _quantity_se(
+        self,
+        func: Any,
+        se: str,
+        *,
+        bootstrap_draws: int = 500,
+        bootstrap_seed: int = 0,
+        **kwargs: Any,
+    ) -> tuple[onp.ndarray, onp.ndarray]:
+        """Evaluate a counterfactual quantity with the requested uncertainty.
+
+        The delta method linearizes, which is exact for a mildly nonlinear
+        aggregate and optimistic for a sharply curved one.  Market shares and
+        consumer surplus can be sharply curved when a class's numeraire
+        coefficient is weakly identified, so the parametric bootstrap -- drawing
+        in the unconstrained parameterization, then transforming -- is offered
+        alongside it.
+        """
+        if se not in {"delta", "bootstrap", "none"}:
+            raise ValueError("se must be 'delta', 'bootstrap', or 'none'.")
+        flat_params = self.results.flat_params
+        if se == "delta":
+            value, standard_error = self.results._apply_delta_method(
+                func, flat_params, **kwargs
+            )
+            return onp.asarray(value), onp.asarray(standard_error)
+        value = onp.asarray(func(flat_params, **kwargs))
+        if se == "none":
+            return value, onp.full(value.shape, onp.nan)
+        standard_error = self.results._parametric_bootstrap_se(
+            func,
+            flat_params,
+            draws=bootstrap_draws,
+            seed=bootstrap_seed,
+            **kwargs,
+        )
+        return value, onp.asarray(standard_error)
 
     def _elasticity_design_derivative(
         self, variable: str
@@ -186,8 +270,33 @@ class _PredictionBase:
         """
         return compute_elasticities(self, vars)
 
-    def market_shares(self) -> pl.DataFrame:
-        """Return panel-weighted predicted market shares by alternative."""
+    def market_shares(
+        self,
+        *,
+        se: Literal["delta", "bootstrap", "none"] = "delta",
+        bootstrap_draws: int = 500,
+        bootstrap_seed: int = 0,
+    ) -> pl.DataFrame:
+        """Return panel-weighted predicted market shares by alternative.
+
+        Parameters
+        ----------
+        se : {"delta", "bootstrap", "none"}, default="delta"
+            Uncertainty method.  A market share is a smooth function of the
+            coefficients, so the delta method costs one Jacobian; the bootstrap
+            captures curvature that matters when a class's numeraire coefficient
+            is weakly identified.
+        bootstrap_draws : int, default=500
+            Number of asymptotic draws for ``se="bootstrap"``.
+        bootstrap_seed : int, default=0
+            Reproducible seed for those draws.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row per alternative with its share and the standard error of that
+            share, which is ``NaN`` when ``se="none"``.
+        """
         data = self.predict_data
         if data.panels is None:
             raise ValueError("Panel identifiers are required for market shares.")
@@ -197,21 +306,163 @@ class _PredictionBase:
         )
         first_case_rows[0] = True
         denominator = float(row_weights[first_case_rows].sum())
-        frame = self.predicted_probs.with_columns(
-            pl.Series("_panel_weight", row_weights)
-        ).with_columns(
-            (pl.col("choice_probs") * pl.col("_panel_weight")).alias("_demand")
+
+        alt_codes = onp.asarray(data.alts)
+        num_alts = int(alt_codes.max()) + 1 if alt_codes.size else 0
+        # Alternative codes are contiguous and globally consistent, so the first
+        # row carrying each code names it.
+        labels: list[Any] = [None] * num_alts
+        for code, label in zip(alt_codes, self.original_alts):
+            if labels[code] is None:
+                labels[code] = label
+
+        shares, standard_errors = self._quantity_se(
+            _market_shares_fn,
+            se,
+            bootstrap_draws=bootstrap_draws,
+            bootstrap_seed=bootstrap_seed,
+            alt_codes=data.alts,
+            num_alts=num_alts,
+            row_weights=jnp.asarray(row_weights),
+            weight_total=denominator,
+            **self._design_kwargs(),
         )
-        return (
-            frame.group_by("alts", maintain_order=True)
-            .agg(pl.col("_demand").sum())
-            .with_columns((pl.col("_demand") / denominator).alias("market_share"))
-            .select("alts", "market_share")
-            .sort("alts")
+
+        frame = pl.DataFrame(
+            {
+                "alts": labels,
+                "market_share": onp.asarray(shares, dtype=onp.float64),
+                "std_error": onp.asarray(standard_errors, dtype=onp.float64),
+            }
+        ).sort("alts")
+        return frame
+
+    def mean_surplus(
+        self,
+        *,
+        se: Literal["delta", "bootstrap", "none"] = "delta",
+        bootstrap_draws: int = 500,
+        bootstrap_seed: int = 0,
+    ) -> pl.DataFrame:
+        """Return the panel-weighted mean consumer surplus per choice situation.
+
+        Parameters
+        ----------
+        se : {"delta", "bootstrap", "none"}, default="delta"
+            Uncertainty method.  Surplus in money units divides by the numeraire
+            coefficient, so when that coefficient is weakly identified the ratio
+            is sharply curved and the bootstrap is the more honest summary.
+        bootstrap_draws : int, default=500
+            Number of asymptotic draws for ``se="bootstrap"``.
+        bootstrap_seed : int, default=0
+            Reproducible seed for those draws.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row holding the mean surplus, its standard error, and the units
+            (money when a numeraire is defined, otherwise utils).
+        """
+        data = self.predict_data
+        if data.panels_of_cases is None:
+            raise ValueError("Panel identifiers are required for surplus inference.")
+        kwargs = self._design_kwargs()
+        kwargs.pop("panels")
+        kwargs["panels_of_cases"] = data.panels_of_cases
+        value, standard_error = self._quantity_se(
+            _mean_surplus_fn,
+            se,
+            bootstrap_draws=bootstrap_draws,
+            bootstrap_seed=bootstrap_seed,
+            case_weights=self._case_panel_weights(),
+            **kwargs,
+        )
+        return pl.DataFrame(
+            {
+                "mean_surplus": [float(value)],
+                "std_error": [float(standard_error)],
+                "surplus_units": [self.surplus_units],
+            }
+        )
+
+    def mean_surplus_change(
+        self,
+        counterfactual: "_PredictionBase",
+        *,
+        se: Literal["delta", "bootstrap", "none"] = "delta",
+        bootstrap_draws: int = 500,
+        bootstrap_seed: int = 0,
+    ) -> pl.DataFrame:
+        """Return the mean counterfactual-minus-baseline surplus with inference.
+
+        Both scenarios are evaluated at the same parameter vector, so the
+        difference keeps the correlation between the two surplus levels instead
+        of treating them as independent estimates.
+
+        Parameters
+        ----------
+        counterfactual : :class:`_PredictionBase`
+            Prediction under the counterfactual scenario.  It must cover the same
+            choice situations, in the same order, as this baseline.
+        se : {"delta", "bootstrap", "none"}, default="delta"
+            Uncertainty method.
+        bootstrap_draws : int, default=500
+            Number of asymptotic draws for ``se="bootstrap"``.
+        bootstrap_seed : int, default=0
+            Reproducible seed for those draws.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row holding the mean change, its standard error, and the units.
+        """
+        if self.surplus_units != counterfactual.surplus_units:
+            raise ValueError("Baseline and counterfactual surplus units do not match.")
+        if self.results is not counterfactual.results:
+            raise ValueError(
+                "Baseline and counterfactual predictions must come from the same "
+                "fitted model."
+            )
+        if self.predict_data.num_cases != counterfactual.predict_data.num_cases:
+            raise ValueError(
+                "Baseline and counterfactual predictions must contain identical "
+                "choice situations."
+            )
+
+        def scenario(prediction: "_PredictionBase") -> dict[str, Any]:
+            """Build the surplus keyword arguments for one scenario."""
+            kwargs = prediction._design_kwargs()
+            kwargs.pop("panels")
+            panels_of_cases = prediction.predict_data.panels_of_cases
+            if panels_of_cases is None:
+                raise ValueError("Panel identifiers are required for surplus.")
+            kwargs["panels_of_cases"] = panels_of_cases
+            return kwargs
+
+        value, standard_error = self._quantity_se(
+            _mean_surplus_change_fn,
+            se,
+            bootstrap_draws=bootstrap_draws,
+            bootstrap_seed=bootstrap_seed,
+            baseline=scenario(self),
+            counterfactual=scenario(counterfactual),
+            case_weights=self._case_panel_weights(),
+        )
+        return pl.DataFrame(
+            {
+                "mean_surplus_change": [float(value)],
+                "std_error": [float(standard_error)],
+                "surplus_units": [self.surplus_units],
+            }
         )
 
     def surplus_change(self, counterfactual: "_PredictionBase") -> pl.DataFrame:
-        """Return identified counterfactual-minus-baseline surplus changes."""
+        """Return identified counterfactual-minus-baseline surplus changes.
+
+        Per-case changes are point estimates.  Use :meth:`mean_surplus_change`
+        for the aggregate, which is the quantity a welfare analysis reports and
+        the one that carries a standard error.
+        """
         if self.surplus_units != counterfactual.surplus_units:
             raise ValueError("Baseline and counterfactual surplus units do not match.")
         keys = ["cases"]
@@ -236,49 +487,96 @@ class _PredictionBase:
             pl.lit(self.surplus_units).alias("surplus_units"),
         )
 
-    def aggregate_elasticities(self, vars: str | Iterable[str]) -> pl.DataFrame:
-        """Aggregate elasticities using each row's weighted demand contribution."""
+    def aggregate_elasticities(
+        self,
+        vars: str | Iterable[str],
+        *,
+        se: Literal["delta", "bootstrap", "none"] = "delta",
+        bootstrap_draws: int = 500,
+        bootstrap_seed: int = 0,
+    ) -> pl.DataFrame:
+        """Aggregate elasticities over demand, with delta-method standard errors.
+
+        Each alternative pair's elasticity is averaged over choice situations
+        using predicted demand as the weight, exactly as in the point-estimate
+        path, and the whole aggregate is differentiated with respect to the
+        parameters.
+
+        Parameters
+        ----------
+        vars : str | Iterable[str]
+            Continuous variable(s) whose elasticities to aggregate.
+        se : {"delta", "bootstrap", "none"}, default="delta"
+            Uncertainty method.
+        bootstrap_draws : int, default=500
+            Number of asymptotic draws for ``se="bootstrap"``.
+        bootstrap_seed : int, default=0
+            Reproducible seed for those draws.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row per ``(alts, target_alts)`` pair with the aggregate elasticity
+            of each requested variable and its standard error, which is ``NaN``
+            when ``se="none"``.
+        """
         variables = [vars] if isinstance(vars, str) else list(vars)
-        elasticities = self.elasticities(variables)
-        join_keys = ["cases", "alts"]
-        if "panels" in elasticities.columns:
-            join_keys.insert(0, "panels")
-        probability_columns = self.predicted_probs.select([*join_keys, "choice_probs"])
-        if self.original_panels is None:
+        if not variables:
+            raise ValueError("At least one elasticity variable is required.")
+        data = self.predict_data
+        if data.panels is None:
             raise ValueError("Panel identifiers are required for aggregation.")
-        panel_first_rows = onp.asarray(self.predict_data.panels) != onp.roll(
-            onp.asarray(self.predict_data.panels), 1
-        )
-        panel_first_rows[0] = True
-        panel_frame = pl.DataFrame(
-            {
-                "panels": self.original_panels[panel_first_rows],
-                "_panel_weight": self.panel_weights,
-            }
-        )
-        joined = elasticities.join(probability_columns, on=join_keys).join(
-            panel_frame, on="panels"
-        )
-        demand_weight = pl.col("choice_probs") * pl.col("_panel_weight")
-        aggregations = [demand_weight.sum().alias("_demand")]
+
+        alt_codes = onp.asarray(data.alts)
+        num_alts = int(alt_codes.max()) + 1 if alt_codes.size else 0
+        labels: list[Any] = [None] * num_alts
+        for code, label in zip(alt_codes, self.original_alts):
+            if labels[code] is None:
+                labels[code] = label
+
+        affected, target = build_within_case_pairs(onp.asarray(data.cases))
+        group_codes = alt_codes[affected] * num_alts + alt_codes[target]
+        num_groups = num_alts * num_alts
+        present = onp.zeros(num_groups, dtype=bool)
+        present[group_codes] = True
+
+        design_kwargs = self._design_kwargs()
+        row_weights = self._row_panel_weights()
+        columns: dict[str, onp.ndarray] = {}
         for variable in variables:
-            column = f"elasticity_{variable}"
-            aggregations.append(
-                (demand_weight * pl.col(column)).sum().alias(f"_{column}_total")
+            raw_values, design_derivative = self._elasticity_design_derivative(variable)
+            call_kwargs = dict(
+                design_derivative=design_derivative,
+                raw_values=raw_values,
+                affected=jnp.asarray(affected, dtype=jnp.int32),
+                target=jnp.asarray(target, dtype=jnp.int32),
+                group_codes=jnp.asarray(group_codes, dtype=jnp.int32),
+                num_groups=num_groups,
+                row_weights=row_weights,
+                **design_kwargs,
             )
-        result = joined.group_by(["alts", "target_alts"], maintain_order=True).agg(
-            aggregations
-        )
-        return result.select(
-            "alts",
-            "target_alts",
-            *(
-                (pl.col(f"_elasticity_{variable}_total") / pl.col("_demand")).alias(
-                    f"elasticity_{variable}"
-                )
-                for variable in variables
-            ),
-        ).sort(["alts", "target_alts"])
+            value, standard_error = self._quantity_se(
+                _aggregate_elasticities_fn,
+                se,
+                bootstrap_draws=bootstrap_draws,
+                bootstrap_seed=bootstrap_seed,
+                **call_kwargs,
+            )
+            columns[f"elasticity_{variable}"] = value
+            columns[f"elasticity_{variable}_se"] = standard_error
+
+        frame = pl.DataFrame(
+            {
+                "alts": [labels[code // num_alts] for code in range(num_groups)],
+                "target_alts": [labels[code % num_alts] for code in range(num_groups)],
+                "_present": present,
+                **{
+                    name: onp.asarray(values, dtype=onp.float64)
+                    for name, values in columns.items()
+                },
+            }
+        ).filter(pl.col("_present")).drop("_present")
+        return frame.sort(["alts", "target_alts"])
 
 
 class LCLPrediction(_PredictionBase):
@@ -328,8 +626,12 @@ class LCLPrediction(_PredictionBase):
         se : {"delta", "bootstrap", "none"}, default="delta"
             Standard-error method. Delta-method and asymptotic parametric-bootstrap
             standard errors are available for prior class probabilities.
-            Posterior-updated WTP through ``past_choices`` requires differentiating
-            through the Bayesian class update and is refused unless ``se="none"``.
+            When the prediction used ``past_choices``, both methods
+            differentiate through the Bayesian class update, so the reported
+            uncertainty reflects the same posterior as the point estimate.  Note
+            that partitions built from the data (quintiles, custom breaks) are
+            treated as fixed, so standard errors are conditional on the realized
+            partition and on the demographic design.
         bootstrap_draws : int, default=500
             Number of asymptotic parameter draws for ``se="bootstrap"``.
         bootstrap_seed : int, default=0
@@ -362,15 +664,19 @@ class LCLPrediction(_PredictionBase):
             raise ValueError(
                 "class_probabilities='posterior' requires predict(..., past_choices=...)."
             )
+        use_posterior = (
+            class_probabilities in {"stored", "posterior"}
+            and self.class_probabilities_source == "posterior"
+        )
         if (
             se in {"delta", "bootstrap"}
-            and class_probabilities in {"stored", "posterior"}
-            and self.class_probabilities_source == "posterior"
+            and use_posterior
+            and (self.past_data is None or self.past_diff_unchosen_chosen is None)
         ):
-            raise NotImplementedError(
-                "WTP uncertainty after past_choices requires differentiating "
-                "through the posterior class update. Use se='none' or "
-                "class_probabilities='prior'."
+            raise ValueError(
+                "Posterior-updated WTP inference needs the past-choice design "
+                "that produced the posterior. Recreate the prediction with "
+                "predict(..., past_choices=...)."
             )
 
         # We rely on the explicitly tracked numeraire index from _pre_fit
@@ -451,6 +757,17 @@ class LCLPrediction(_PredictionBase):
             selected_class_probs = None
             if se == "none":
                 selected_class_probs = self._class_probs_for_wtp(class_probabilities)
+            # Differentiating through the Bayes update keeps the reported
+            # uncertainty consistent with the point estimate: the posterior is a
+            # smooth function of the same coefficients, not a fixed constant.
+            posterior_kwargs = (
+                {
+                    "past_diff_unchosen_chosen": self.past_diff_unchosen_chosen,
+                    "past_data": self.past_data,
+                }
+                if use_posterior
+                else {"past_diff_unchosen_chosen": None, "past_data": None}
+            )
             summary_rows = []
 
             for partition_name, subset_df in partitioned_df.group_by(
@@ -473,6 +790,7 @@ class LCLPrediction(_PredictionBase):
                         subset_panel_weights=subset_panel_weights,
                         dems=self.predict_data.dems,
                         num_panels=self.predict_data.num_panels,
+                        **posterior_kwargs,
                     )
                     se_float = float(se_val)
                 elif se == "bootstrap":
@@ -484,6 +802,7 @@ class LCLPrediction(_PredictionBase):
                         subset_panel_weights=subset_panel_weights,
                         dems=self.predict_data.dems,
                         num_panels=self.predict_data.num_panels,
+                        **posterior_kwargs,
                     )
                     se_val = self.results._parametric_bootstrap_se(
                         self._compute_subset_mean_wtp,
@@ -496,6 +815,7 @@ class LCLPrediction(_PredictionBase):
                         num_panels=self.predict_data.num_panels,
                         draws=bootstrap_draws,
                         seed=bootstrap_seed,
+                        **posterior_kwargs,
                     )
                     se_float = float(se_val)
                 else:
@@ -689,10 +1009,34 @@ class LCLPrediction(_PredictionBase):
         subset_panel_weights: Float64[Array, "subset_panels"],
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
+        past_diff_unchosen_chosen: Any | None = None,
+        past_data: Data | None = None,
     ) -> Float64[Array, ""]:
-        """Evaluate panel-weighted subset WTP for delta/bootstrap inference."""
+        """Evaluate panel-weighted subset WTP for delta/bootstrap inference.
+
+        When a past-choice design is supplied the class probabilities are the
+        Bayesian posterior implied by ``flat_params``, so differentiating this
+        function propagates uncertainty through the update itself.
+        """
         latent_betas, thetas = self.results._unpack_params(flat_params)
-        class_probs = self.results._get_class_probs(thetas, dems, num_panels)
+        if past_data is None:
+            class_probs = self.results._get_class_probs(thetas, dems, num_panels)
+        else:
+            structural = self.results._param_packing.to_structural(latent_betas)
+            prior = self.results._get_class_probs(
+                thetas, past_data.dems, past_data.num_panels
+            )
+            if past_diff_unchosen_chosen is None:
+                raise ValueError(
+                    "A past-choice design matrix is required alongside past_data."
+                )
+            class_probs, _ = _compute_conditional_class_probs(
+                structural_betas=structural,
+                thetas=thetas if past_data.dems is not None else None,
+                shares=jnp.mean(prior, axis=0),
+                diff_unchosen_chosen=past_diff_unchosen_chosen,
+                data=past_data,
+            )
         weights = subset_panel_weights / jnp.sum(subset_panel_weights)
         subset_shares = jnp.sum(
             class_probs[subset_panel_indices] * weights[:, None], axis=0
@@ -715,7 +1059,30 @@ class CLPrediction(_PredictionBase):
         bootstrap_draws: int = 500,
         bootstrap_seed: int = 0,
     ) -> pl.DataFrame:
-        """Return homogeneous WTP ratios with delta or parametric-bootstrap SEs."""
+        """Return homogeneous WTP ratios with delta or parametric-bootstrap SEs.
+
+        Both methods work in the unconstrained parameterization and apply the
+        softplus transform inside the target function.  Drawing structural
+        coefficients directly would put mass on a positive numeraire coefficient
+        -- a region the constraint excludes -- and the resulting ratios have no
+        finite variance to summarize.
+
+        Parameters
+        ----------
+        target : str | None, optional
+            Restrict the table to one non-numeraire variable.
+        se : {"delta", "bootstrap", "none"}, default="delta"
+            Standard-error method.
+        bootstrap_draws : int, default=500
+            Number of asymptotic parameter draws for ``se="bootstrap"``.
+        bootstrap_seed : int, default=0
+            Reproducible seed for those draws.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row per variable with its tradeoff ratio and standard error.
+        """
         if se not in {"delta", "bootstrap", "none"}:
             raise ValueError("se must be 'delta', 'bootstrap', or 'none'.")
         cost_idx = getattr(self.results.model, "numeraire_idx", None)
@@ -730,53 +1097,29 @@ class CLPrediction(_PredictionBase):
             raise ValueError(
                 f"Variable {target!r} was not found in the utility design."
             )
+        selector = jnp.asarray(target_indices)
 
-        def ratio_function(params: Array) -> Array:
-            return params[jnp.asarray(target_indices)] / (-params[cost_idx])
+        def ratio_function(latent: Array) -> Array:
+            """Map latent coefficients to structural WTP ratios."""
+            structural = _to_structural_betas(
+                latent,
+                self.results.model.numeraire_idx,
+                self.results.model.numeraire_min_abs,
+            )
+            return structural[selector] / (-structural[cost_idx])
 
-        coefficients = jnp.asarray(self.results.coeff_)
-        ratios = ratio_function(coefficients)
+        latent = jnp.asarray(self.results.flat_params)
+        ratios = ratio_function(latent)
         if se == "none":
             standard_errors = jnp.full_like(ratios, jnp.nan)
         elif se == "delta":
-            jacobian = jax.jacrev(ratio_function)(coefficients)
-            standard_errors = jnp.sqrt(
-                jnp.maximum(
-                    jnp.einsum(
-                        "ip,pq,iq->i",
-                        jacobian,
-                        self.results.cov_matrix,
-                        jacobian,
-                    ),
-                    0.0,
-                )
+            _, standard_errors = self.results._apply_delta_method(
+                ratio_function, latent
             )
         else:
-            if bootstrap_draws < 2:
-                raise ValueError("bootstrap_draws must be at least 2.")
-            covariance = onp.asarray(self.results.cov_matrix, dtype=onp.float64)
-            if not onp.all(onp.isfinite(covariance)):
-                raise ValueError(
-                    "A finite covariance matrix is required for bootstrap SEs."
-                )
-            eigenvalues, eigenvectors = onp.linalg.eigh(
-                0.5 * (covariance + covariance.T)
+            standard_errors = self.results._parametric_bootstrap_se(
+                ratio_function, latent, draws=bootstrap_draws, seed=bootstrap_seed
             )
-            tolerance = (
-                onp.finfo(onp.float64).eps
-                * max(1.0, float(onp.max(onp.abs(eigenvalues))))
-                * covariance.shape[0]
-            )
-            if float(eigenvalues.min()) < -tolerance:
-                raise ValueError("The covariance matrix is not positive semidefinite.")
-            root = eigenvectors * onp.sqrt(onp.maximum(eigenvalues, 0.0))[None, :]
-            rng = onp.random.default_rng(bootstrap_seed)
-            draws = (
-                onp.asarray(coefficients)
-                + rng.standard_normal((bootstrap_draws, coefficients.size)) @ root.T
-            )
-            draw_ratios = jax.vmap(ratio_function)(jnp.asarray(draws))
-            standard_errors = jnp.std(draw_ratios, axis=0, ddof=1)
 
         rows = []
         for output_idx, variable_idx in enumerate(target_indices):

@@ -4,7 +4,7 @@ import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from time import time
-from typing import Any
+from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 import numpy as onp
@@ -20,7 +20,15 @@ from lcl._case_utils import (
 )
 from lcl._choice_model import ChoiceModel
 from lcl._em_alg_startup import _get_starting_vals
-from lcl._em_alg_steps import _em_step
+from lcl._em_alg_steps import _em_step, place_em_vars
+from lcl._params import ParamPacking
+from lcl._polish import (
+    PolishReport,
+    aitken_extrapolated_gap,
+    em_vars_from_flat,
+    observed_score_max,
+    polish_observed_data,
+)
 from lcl._results import LCLResults
 from lcl.options import (
     DiagnosticsOptions,
@@ -34,6 +42,17 @@ from lcl._struct import EMVars
 from lcl.spec import LCLSpec, resolve_lcl_spec
 
 logger = logging.getLogger(__name__)
+
+
+class _EMRun(NamedTuple):
+    """Outcome of one independent EM start."""
+
+    em_vars: EMVars
+    loglik: float
+    recursions: int
+    history: list[dict[str, Any]]
+    criterion_met: bool
+    seed: int
 
 
 def _canonicalize_classes(em_vars: EMVars) -> tuple[EMVars, tuple[int, ...]]:
@@ -241,6 +260,13 @@ class LatentClassConditionalLogit(ChoiceModel):
         progress_callback : callable | None, optional
             Receives structured hardware, start, EM-step, and completion events.
 
+        Notes
+        -----
+        Case or panel weights are not supported for latent-class estimation and
+        this method takes no ``weights`` argument; passing one is a
+        :class:`TypeError` rather than a silent no-op.  Weighted estimation is
+        available for :class:`~lcl.conditional_logit.ConditionalLogit`.
+
         Returns
         -------
         :class:`~lcl._results.LCLResults`
@@ -296,18 +322,6 @@ class LatentClassConditionalLogit(ChoiceModel):
         inference = resolved_options.inference
         diagnostics = resolved_options.diagnostics
 
-        if fit_options.starts > 1:
-            best_seed = self._select_best_start(
-                data=data,
-                dems_data=dems_data,
-                spec=self.spec,
-                fit_options=fit_options,
-                optimization_options=optimization_options,
-                diagnostics=diagnostics,
-                progress_callback=progress_callback,
-            )
-            fit_options = replace(fit_options, starts=1, seed=best_seed)
-
         parsed_data = self._ingest_data(
             data=data,
             alts_col=alts_col,
@@ -340,22 +354,35 @@ class LatentClassConditionalLogit(ChoiceModel):
         else:
             self.numeraire_idx = None
 
-        data_struct, weights, init_beta = self._setup_data(parsed_data)
+        data_struct, _, _ = self._setup_data(parsed_data)
         if data_struct.num_panels is None:
             raise ValueError("panels_col is required for latent-class models.")
         if self.num_classes > data_struct.num_panels:
             raise ValueError("num_classes cannot exceed the number of panels.")
         diff_unchosen_chosen = _diff_unchosen_chosen(data_struct)
-
-        em_vars = _get_starting_vals(
-            diff_unchosen_chosen,
-            data_struct,
-            self.num_classes,
-            fit_options,
-            optimization_options,
-            self.numeraire_idx,
-            self.numeraire_min_abs,
+        packing = ParamPacking(
+            num_alt_vars=self.num_vars,
+            num_classes=self.num_classes,
+            num_dem_vars=self.num_dem_vars,
+            numeraire_idx=self.numeraire_idx,
+            numeraire_min_abs=self.numeraire_min_abs,
         )
+
+        # Resolve a coarser clustering once, in encoded panel order, so every
+        # start shares it and the results object never re-reads the raw frame.
+        cluster_ids: onp.ndarray | None = None
+        num_clusters: int | None = None
+        cluster_column = inference.cluster_column
+        if cluster_column is not None:
+            cluster_ids, num_clusters = self._resolve_panel_cluster_ids(
+                data, parsed_data, cluster_column, panels_col=panels_col
+            )
+            logger.info(
+                "Clustering standard errors on %r: %s groups across %s panels.",
+                cluster_column,
+                num_clusters,
+                data_struct.num_panels,
+            )
 
         num_devices = fit_options.num_devices
         if num_devices > 1:
@@ -369,121 +396,116 @@ class LatentClassConditionalLogit(ChoiceModel):
         if progress_callback is not None:
             progress_callback({"event": "hardware", "message": message})
 
-        logliks_list, em_recursion = [], 0
-        converged = False
-        standard_converged = False
-        em_history_rows: list[dict[str, Any]] = []
-        strict_optimization_options = OptimizationOptions(
-            gradient_tol=min(optimization_options.gradient_tol, 1e-8),
-            maxiter=max(optimization_options.maxiter, 500),
-            hessian_damping=optimization_options.hessian_damping,
-            max_step_norm=optimization_options.max_step_norm,
-            line_search_maxiter=optimization_options.line_search_maxiter,
-            accept_any_decrease=optimization_options.accept_any_decrease,
+        # Independent starts share one ingested dataset and one compiled EM step,
+        # and the winner is kept outright rather than refit from its seed.
+        best_run: _EMRun | None = None
+        failures: list[str] = []
+        for start_index in range(fit_options.starts):
+            seed = fit_options.seed + start_index
+            if progress_callback is not None:
+                progress_callback(
+                    {
+                        "event": "start",
+                        "start": start_index + 1,
+                        "starts": fit_options.starts,
+                        "seed": seed,
+                    }
+                )
+            start_options = replace(fit_options, seed=seed)
+            if fit_options.starts == 1:
+                # A single start has nothing to fall back on, so let the original
+                # exception and its traceback reach the caller unwrapped.
+                run = self._run_em(
+                    diff_unchosen_chosen=diff_unchosen_chosen,
+                    data_struct=data_struct,
+                    fit_options=start_options,
+                    optimization_options=optimization_options,
+                    progress_callback=progress_callback,
+                )
+            else:
+                try:
+                    run = self._run_em(
+                        diff_unchosen_chosen=diff_unchosen_chosen,
+                        data_struct=data_struct,
+                        fit_options=start_options,
+                        optimization_options=optimization_options,
+                        progress_callback=progress_callback,
+                    )
+                except Exception as exc:  # noqa: BLE001 - reported to the caller
+                    failures.append(f"seed {seed}: {exc}")
+                    logger.warning("LCL start with seed %s failed: %s", seed, exc)
+                    continue
+            if best_run is None or run.loglik > best_run.loglik:
+                best_run = run
+
+        if best_run is None:
+            detail = "; ".join(failures)
+            raise RuntimeError(f"All {fit_options.starts} EM starts failed: {detail}")
+        if fit_options.starts > 1:
+            logger.info(
+                "Selected EM start seed %s with log likelihood %.6f.",
+                best_run.seed,
+                best_run.loglik,
+            )
+
+        em_vars = best_run.em_vars
+        em_history_rows = best_run.history
+        em_recursion = best_run.recursions
+
+        # Observed-data Newton polish.  EM is linearly convergent, so it stops
+        # short of a stationary point; the observed information and the sandwich
+        # covariance both assume the score vanishes at the reported estimate.
+        if em_vars.latent_betas is None or em_vars.shares is None:
+            raise RuntimeError("The EM run returned an incomplete parameter state.")
+        flat_params = packing.pack(
+            em_vars.latent_betas, em_vars.thetas, em_vars.shares
         )
-
-        # Reserve one recursion for the strict phase so max_em_iter is a genuine
-        # cap over every complete EM update, including the final refit.
-        standard_em_limit = max(fit_options.max_em_iter - 1, 0)
-        while em_recursion < standard_em_limit:
-            logger.info("EM recursion: %s", em_recursion)
+        polish_report: PolishReport | None = None
+        if fit_options.polish:
+            if progress_callback is not None:
+                progress_callback({"event": "polish", "iterations": None})
+            polished, polish_report = polish_observed_data(
+                flat_params,
+                diff_unchosen_chosen,
+                data_struct,
+                packing,
+                maxiter=fit_options.polish_maxiter,
+                max_step_norm=optimization_options.max_step_norm,
+                line_search_maxiter=optimization_options.line_search_maxiter,
+            )
+            if polish_report.accepted:
+                em_vars = em_vars_from_flat(
+                    polished, diff_unchosen_chosen, data_struct, packing
+                )
+            score_max = polish_report.score_after
             if progress_callback is not None:
                 progress_callback(
                     {
-                        "event": "em_step",
-                        "iteration": em_recursion,
-                        "phase": "standard",
+                        "event": "polish",
+                        "iterations": polish_report.iterations,
+                        "score_before": polish_report.score_before,
+                        "score_after": polish_report.score_after,
                     }
                 )
-
-            em_vars = _em_step(
-                em_vars,
-                diff_unchosen_chosen,
-                data_struct,
-                self.num_classes,
-                optimization_options,
-                fit_options,
-                self.numeraire_idx,
-                self.numeraire_min_abs,
+        else:
+            score_max = observed_score_max(
+                flat_params, diff_unchosen_chosen, data_struct, packing
             )
 
-            logliks_list.append(em_vars.unconditional_loglik)
-            em_history_rows.append(
-                self._em_history_row(em_recursion, em_vars, phase="standard")
-            )
-            em_recursion += 1
-
-            # Force a host synchronization only at configured convergence checks.
-            if em_recursion >= 5 and (em_recursion % fit_options.check_interval == 0):
-                current_ll = float(em_vars.unconditional_loglik)
-                past_ll = float(logliks_list[-5])
-
-                rel_change = abs(current_ll - past_ll) / max(abs(past_ll), 1.0)
-                if rel_change <= fit_options.em_tol:
-                    standard_converged = True
-                    break
-
-        strict_recursions = 0
-        strict_rel_change: float | None = None
-        while em_recursion < fit_options.max_em_iter:
-            logger.info("Strict EM recursion: %s", em_recursion)
-            if progress_callback is not None:
-                progress_callback(
-                    {
-                        "event": "em_step",
-                        "iteration": em_recursion,
-                        "phase": "strict",
-                    }
-                )
-
-            pre_refit_ll = float(em_vars.unconditional_loglik)
-            em_vars = _em_step(
-                em_vars,
-                diff_unchosen_chosen,
-                data_struct,
-                self.num_classes,
-                strict_optimization_options,
-                fit_options,
-                self.numeraire_idx,
-                self.numeraire_min_abs,
-            )
-            post_refit_ll = float(em_vars.unconditional_loglik)
-            strict_rel_change = abs(post_refit_ll - pre_refit_ll) / max(
-                abs(pre_refit_ll), 1.0
-            )
-            em_history_rows.append(
-                self._em_history_row(em_recursion, em_vars, phase="strict")
-            )
-            em_recursion += 1
-            strict_recursions += 1
-
-            if strict_rel_change <= fit_options.em_tol:
-                converged = True
-                break
-
-            if (
-                standard_converged
-                and strict_recursions == 1
-                and em_recursion < fit_options.max_em_iter
-            ):
-                logger.info(
-                    "The strict final refit moved the log likelihood by %.3g "
-                    "relative units, above the EM tolerance %.3g; continuing "
-                    "strict EM with %s recursions remaining.",
-                    strict_rel_change,
-                    fit_options.em_tol,
-                    fit_options.max_em_iter - em_recursion,
-                )
-
-        if standard_converged and strict_rel_change is not None and not converged:
+        # A fit has converged when the observed-data score has actually vanished.
+        # Reporting convergence from a log-likelihood change instead lets a
+        # slowly crawling EM claim an optimum it has not reached.
+        converged = bool(score_max <= fit_options.score_tol)
+        if not converged:
             logger.warning(
-                "The strict final refit moved the log likelihood by %.3g "
-                "relative units, above the EM tolerance %.3g, and the maximum "
-                "of %s EM recursions was reached.",
-                strict_rel_change,
-                fit_options.em_tol,
-                fit_options.max_em_iter,
+                "The maximum absolute observed-data score is %.3e, above the "
+                "tolerance %.3g, so the estimate is not a stationary point of the "
+                "mixture likelihood. Standard errors assume it is. Consider "
+                "raising max_em_iter or polish_maxiter.",
+                score_max,
+                fit_options.score_tol,
             )
+
         em_vars, class_permutation = _canonicalize_classes(em_vars)
         em_history_rows = _permute_em_history(em_history_rows, class_permutation)
         final_em_iter = max(em_recursion - 1, 0)
@@ -510,105 +532,164 @@ class LatentClassConditionalLogit(ChoiceModel):
             estim_time_sec=estim_time_sec,
             em_history=em_history_rows,
             optimization_history=optimization_history_rows,
+            observed_score_max=score_max,
+            score_tol=fit_options.score_tol,
+            em_criterion_met=best_run.criterion_met,
+            polish_report=polish_report,
+            cluster_ids=cluster_ids,
+            num_clusters=num_clusters,
+            param_packing=packing,
         )
 
-    @staticmethod
-    def _select_best_start(
+    def _run_em(
+        self,
         *,
-        data: Any,
-        dems_data: Any | None,
-        spec: LCLSpec,
+        diff_unchosen_chosen: Any,
+        data_struct: Any,
         fit_options: FitOptions,
         optimization_options: OptimizationOptions,
-        diagnostics: DiagnosticsOptions,
         progress_callback: Callable[[dict[str, Any]], None] | None,
-    ) -> int:
-        """Evaluate independent EM starts and return the best random seed.
+    ) -> "_EMRun":
+        """Run the EM recursion from one start and report where it stopped.
 
-        Preliminary starts skip covariance work. The selected seed is then refit by
-        the caller with the requested inference settings so the returned results
-        contain a covariance matrix aligned to the winning optimum.
+        The stopping rule is the Aitken-extrapolated remaining ascent per panel
+        rather than the raw log-likelihood change.  EM converges linearly, so the
+        raw change understates the distance to the optimum by ``1 / (1 - r)``;
+        extrapolating the geometric tail makes ``em_tol`` mean what a user
+        expects it to mean, and normalizing by the panel count keeps that meaning
+        fixed as the sample grows.
 
         Parameters
         ----------
-        data : Any
-            Long-format estimation data.
-        dems_data : Any | None
-            Optional panel-level demographics.
-        spec : LCLSpec
-            Canonical model specification shared by every start.
-        fit_options : FitOptions
-            EM options including the number of starts and base seed.
-        optimization_options : OptimizationOptions
-            M-step optimizer settings.
-        diagnostics : DiagnosticsOptions
-            Diagnostic configuration forwarded to candidate fits.
+        diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
+            Differenced design matrix.
+        data_struct : :class:`~lcl._struct.Data`
+            Encoded estimation data.
+        fit_options : :class:`~lcl.options.FitOptions`
+            EM settings, with ``seed`` already set for this start.
+        optimization_options : :class:`~lcl.options.OptimizationOptions`
+            M-step Newton settings.
         progress_callback : callable | None
             Optional progress callback.
 
         Returns
         -------
-        int
-            Seed associated with the highest final training log likelihood.
-
-        Raises
-        ------
-        RuntimeError
-            If every requested start fails.
+        _EMRun
+            Final EM state, log likelihood, iteration count, history rows, and
+            whether the Aitken criterion was met.
         """
-        candidates: list[tuple[float, bool, int]] = []
-        failures: list[str] = []
-        for start_index in range(fit_options.starts):
-            seed = fit_options.seed + start_index
+        em_vars = _get_starting_vals(
+            diff_unchosen_chosen,
+            data_struct,
+            self.num_classes,
+            fit_options,
+            optimization_options,
+            self.numeraire_idx,
+            self.numeraire_min_abs,
+        )
+        # Match the placement the compiled step returns, so iteration one and
+        # every later iteration share a single executable.
+        em_vars = place_em_vars(em_vars, fit_options.num_devices)
+
+        num_panels = max(int(data_struct.num_panels or 1), 1)
+        loglik_history: list[float] = [float(em_vars.unconditional_loglik)]
+        history_rows: list[dict[str, Any]] = []
+        criterion_met = False
+        em_recursion = 0
+        mstep_warnings = 0
+
+        while em_recursion < fit_options.max_em_iter:
+            em_vars, step_diagnostics = _em_step(
+                em_vars,
+                diff_unchosen_chosen,
+                data_struct,
+                self.num_classes,
+                optimization_options,
+                fit_options,
+                self.numeraire_idx,
+                self.numeraire_min_abs,
+            )
+
+            # One host transfer per iteration carries every scalar the loop
+            # needs, so the compiled step is never interrupted more than once.
+            probe = jnp.stack(
+                [
+                    em_vars.unconditional_loglik,
+                    jnp.max(step_diagnostics.beta_newton_error),
+                    step_diagnostics.membership_newton_error,
+                ]
+            )
+            loglik, beta_error, membership_error = (
+                float(value) for value in onp.asarray(probe)
+            )
+            loglik_history.append(loglik)
+            em_recursion += 1
+            if (
+                max(beta_error, membership_error)
+                > optimization_options.newton_decrement_tol
+            ):
+                mstep_warnings += 1
+
+            history_rows.append(
+                self._em_history_row(
+                    em_recursion - 1,
+                    em_vars,
+                    loglik=loglik,
+                    beta_newton_error=beta_error,
+                    membership_newton_error=membership_error,
+                )
+            )
             if progress_callback is not None:
                 progress_callback(
                     {
-                        "event": "start",
-                        "start": start_index + 1,
-                        "starts": fit_options.starts,
-                        "seed": seed,
+                        "event": "em_step",
+                        "iteration": em_recursion - 1,
+                        "loglik": loglik,
                     }
                 )
-            candidate_model = LatentClassConditionalLogit(spec=spec)
-            try:
-                candidate_result = candidate_model.fit(
-                    data=data,
-                    dems_data=dems_data,
-                    fit_options=replace(fit_options, starts=1, seed=seed),
-                    optimization_options=optimization_options,
-                    inference=InferenceOptions(skip=True),
-                    diagnostics=diagnostics,
-                )
-            except Exception as exc:
-                failures.append(f"seed {seed}: {exc}")
-                logger.warning("LCL start with seed %s failed: %s", seed, exc)
-                continue
-            candidates.append(
-                (
-                    float(candidate_result.em_res.unconditional_loglik),
-                    bool(candidate_result.converged),
-                    seed,
-                )
+
+            if em_recursion % fit_options.check_interval == 0:
+                remaining = aitken_extrapolated_gap(loglik_history)
+                if remaining / num_panels <= fit_options.em_tol:
+                    criterion_met = True
+                    break
+
+        if mstep_warnings:
+            logger.info(
+                "%s of %s EM recursions ended with an M-step Newton decrement "
+                "above %.3g. That is normal early in EM and only matters if it "
+                "persists at the final iterations.",
+                mstep_warnings,
+                em_recursion,
+                optimization_options.newton_decrement_tol,
+            )
+        if not criterion_met:
+            logger.info(
+                "EM reached the maximum of %s recursions with an estimated "
+                "%.3g log-likelihood units of ascent remaining.",
+                fit_options.max_em_iter,
+                aitken_extrapolated_gap(loglik_history),
             )
 
-        if not candidates:
-            detail = "; ".join(failures)
-            raise RuntimeError(f"All {fit_options.starts} EM starts failed: {detail}")
-
-        converged_candidates = [item for item in candidates if item[1]]
-        selection_pool = converged_candidates or candidates
-        best_loglik, _, best_seed = max(selection_pool, key=lambda item: item[0])
-        logger.info(
-            "Selected EM start seed %s with log likelihood %.6f.",
-            best_seed,
-            best_loglik,
+        return _EMRun(
+            em_vars=em_vars,
+            loglik=loglik_history[-1],
+            recursions=em_recursion,
+            history=history_rows,
+            criterion_met=criterion_met,
+            seed=fit_options.seed,
         )
-        return best_seed
 
     def _em_history_row(
-        self, em_iter: int, em_vars: Any, *, phase: str
+        self,
+        em_iter: int,
+        em_vars: Any,
+        *,
+        loglik: float,
+        beta_newton_error: float,
+        membership_newton_error: float,
     ) -> dict[str, Any]:
-        """Return one lazily evaluated EM-history row.
+        """Return one EM-history row.
 
         Parameters
         ----------
@@ -616,20 +697,25 @@ class LatentClassConditionalLogit(ChoiceModel):
             EM recursion index.
         em_vars : EMVars-like
             Current EM state.
-        phase : str
-            Either ``"standard"`` or ``"strict"`` for the M-step settings used.
+        loglik : float
+            Observed-data log likelihood after this recursion.
+        beta_newton_error : float
+            Largest class-specific M-step Newton decrement.
+        membership_newton_error : float
+            Class-membership M-step Newton decrement.
 
         Returns
         -------
         dict[str, Any]
-            Log-likelihood and class-share diagnostics.  JAX scalar values are
-            kept lazy until results construction to avoid a host synchronization
-            on every EM iteration.
+            Log-likelihood, M-step convergence, and class-share diagnostics.  The
+            scalars arrive already materialized from the loop's single host
+            transfer, so building a row costs no extra synchronization.
         """
         row: dict[str, Any] = {
             "em_iter": em_iter,
-            "phase": phase,
-            "loglik": em_vars.unconditional_loglik,
+            "loglik": loglik,
+            "beta_newton_error": beta_newton_error,
+            "membership_newton_error": membership_newton_error,
         }
         if em_vars.shares is not None:
             for class_idx in range(self.num_classes):

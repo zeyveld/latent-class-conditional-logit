@@ -70,6 +70,18 @@ class OptimizeResult:
     information_diagnostics: Any = None
 
 
+class EMStepDiagnostics(NamedTuple):
+    """Device-resident convergence scalars produced by one EM recursion.
+
+    Kept separate from :class:`EMVars` so the EM step can stay inside a single
+    compiled region: materializing these would force a host synchronization on
+    every iteration.
+    """
+
+    beta_newton_error: Float64[Array, "classes"]
+    membership_newton_error: Float64[Array, ""]
+
+
 class EMVars(NamedTuple):
     """Parameters and probabilities updated by the EM algorithm."""
 
@@ -84,6 +96,7 @@ class EMVars(NamedTuple):
 __all__ = [
     "Data",
     "DiffUnchosenChosen",
+    "EMStepDiagnostics",
     "EMVars",
     "OptimizeResult",
     "ParsedData",

@@ -88,6 +88,11 @@ def fit(
     -------
     LCLResults
         Fitted latent-class results.
+
+    Notes
+    -----
+    Latent-class estimation does not accept case or survey weights.  Use
+    :class:`~lcl.conditional_logit.ConditionalLogit` when weighting is required.
     """
     model = LatentClassConditionalLogit(spec=spec)
     return model.fit(
