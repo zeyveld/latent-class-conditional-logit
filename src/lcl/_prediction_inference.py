@@ -21,6 +21,7 @@ import numpy as onp
 from jax.ops import segment_sum
 from jaxtyping import Array, Float64, Int, UInt
 
+from lcl._em_alg_steps import _compute_conditional_class_probs
 from lcl._kernels import _choice_probabilities_and_logsum
 
 
@@ -29,9 +30,41 @@ def _betas_and_class_probs(
     flat_params: Float64[Array, "all_params"],
     dems: Float64[Array, "panels dem_vars"] | None,
     num_panels: int,
+    past_data: Any | None = None,
+    past_diff_unchosen_chosen: Any | None = None,
 ) -> tuple[Float64[Array, "alt_vars classes"], Float64[Array, "panels classes"]]:
-    """Return structural class betas and prior class probabilities."""
-    return results._structural_betas_and_class_probs(flat_params, dems, num_panels)
+    """Return structural class betas and the class probabilities to predict with.
+
+    Without a past-choice design these are the demographics-only prior
+    ``pi_ns = P(s | z_n)``.  With one they are the Bayesian posterior
+    ``h_ns = P(s | y_n, z_n) ~ pi_ns * prod_t P(y_nt | s)`` -- the same update the
+    EM E-step performs, and the sharper object to predict a *sampled* individual
+    with.  Computing it here, inside the differentiated function, rather than
+    passing a precomputed array keeps the posterior a function of the parameters,
+    so the delta method and the parametric bootstrap propagate uncertainty
+    through the update instead of treating it as a fixed constant.
+    """
+    betas, prior = results._structural_betas_and_class_probs(
+        flat_params, dems, num_panels
+    )
+    if past_data is None:
+        return betas, prior
+    if past_diff_unchosen_chosen is None:
+        raise ValueError(
+            "A past-choice design matrix is required alongside past_data."
+        )
+    _, thetas = results._unpack_params(flat_params)
+    past_prior = results._get_class_probs(
+        thetas, past_data.dems, past_data.num_panels
+    )
+    posterior, _ = _compute_conditional_class_probs(
+        structural_betas=betas,
+        thetas=thetas if past_data.dems is not None else None,
+        shares=jnp.mean(past_prior, axis=0),
+        diff_unchosen_chosen=past_diff_unchosen_chosen,
+        data=past_data,
+    )
+    return betas, posterior
 
 
 def _marginal_utility_of_income(
@@ -54,9 +87,13 @@ def choice_probabilities(
     dems: Float64[Array, "panels dem_vars"] | None,
     num_cases: int,
     num_panels: int,
+    past_data: Any | None = None,
+    past_diff_unchosen_chosen: Any | None = None,
 ) -> Float64[Array, "rows"]:
     """Return mixture choice probabilities for every design row."""
-    betas, class_probs = _betas_and_class_probs(results, flat_params, dems, num_panels)
+    betas, class_probs = _betas_and_class_probs(
+        results, flat_params, dems, num_panels, past_data, past_diff_unchosen_chosen
+    )
     probs_by_class, _ = _choice_probabilities_and_logsum(X, betas, cases, num_cases)
     return jnp.sum(class_probs[panels] * probs_by_class, axis=1)
 
@@ -75,6 +112,8 @@ def market_shares(
     num_alts: int,
     row_weights: Float64[Array, "rows"],
     weight_total: float,
+    past_data: Any | None = None,
+    past_diff_unchosen_chosen: Any | None = None,
 ) -> Float64[Array, "num_alts"]:
     """Return panel-weighted predicted market shares by alternative."""
     probabilities = choice_probabilities(
@@ -86,6 +125,8 @@ def market_shares(
         dems=dems,
         num_cases=num_cases,
         num_panels=num_panels,
+        past_data=past_data,
+        past_diff_unchosen_chosen=past_diff_unchosen_chosen,
     )
     demand = segment_sum(probabilities * row_weights, alt_codes, num_segments=num_alts)
     return demand / weight_total
@@ -101,9 +142,19 @@ def surplus_by_case(
     dems: Float64[Array, "panels dem_vars"] | None,
     num_cases: int,
     num_panels: int,
+    past_data: Any | None = None,
+    past_diff_unchosen_chosen: Any | None = None,
 ) -> Float64[Array, "cases"]:
-    """Return expected consumer surplus for each choice situation."""
-    betas, class_probs = _betas_and_class_probs(results, flat_params, dems, num_panels)
+    """Return expected consumer surplus for each choice situation.
+
+    The log-sum is divided by that class's own marginal utility of income
+    *before* the class weights are applied, so each class's surplus is converted
+    to money on its own scale.  Averaging log-sums in utils first and dividing by
+    a pooled coefficient afterwards would mix non-commensurable scales.
+    """
+    betas, class_probs = _betas_and_class_probs(
+        results, flat_params, dems, num_panels, past_data, past_diff_unchosen_chosen
+    )
     _, logsum = _choice_probabilities_and_logsum(X, betas, cases, num_cases)
     surplus = logsum / _marginal_utility_of_income(results, betas)[None, :]
     return jnp.sum(class_probs[panels_of_cases] * surplus, axis=1)
@@ -137,6 +188,59 @@ def mean_surplus_change(
     changed = surplus_by_case(flat_params, **counterfactual)
     base = surplus_by_case(flat_params, **baseline)
     return jnp.sum((changed - base) * case_weights) / jnp.sum(case_weights)
+
+
+def normalisation_sensitivity(
+    flat_params: Float64[Array, "all_params"],
+    *,
+    baseline: dict[str, Any],
+    counterfactual: dict[str, Any],
+    case_weights: Float64[Array, "cases"],
+) -> Float64[Array, ""]:
+    """Return how far a surplus *change* moves with the utility normalisation.
+
+    The location of the Gumbel errors is not identified: shifting every class's
+    error location by ``c`` leaves all choice probabilities untouched but adds
+    ``c / alpha_s`` to class ``s``'s money-metric surplus.  In a difference those
+    shifts cancel term by term *only when the class weights are the same in both
+    scenarios*, because the surviving term is
+
+    ``c * sum_s (w1_s - w0_s) / alpha_s``.
+
+    This function returns the multiplier on ``c`` -- the case-weighted mean of
+    ``sum_s (w1_s - w0_s) / alpha_s``.  Zero means the reported change is free of
+    the normalisation.  Nonzero means part of the reported change is an artifact
+    of it, and the magnitude says how much: choosing the common convention
+    ``c = 0`` versus ``c = gamma`` (Euler's constant, the mean of a standard
+    Gumbel) moves the estimate by ``gamma`` times this number.
+
+    Two scenarios differ in their class weights whenever the counterfactual
+    changes a demographic that enters the class-membership model, or when one
+    scenario is weighted by the Bayesian posterior and the other by the prior.
+    """
+    betas, weights_counterfactual = _betas_and_class_probs(
+        counterfactual["results"],
+        flat_params,
+        counterfactual["dems"],
+        counterfactual["num_panels"],
+        counterfactual.get("past_data"),
+        counterfactual.get("past_diff_unchosen_chosen"),
+    )
+    _, weights_baseline = _betas_and_class_probs(
+        baseline["results"],
+        flat_params,
+        baseline["dems"],
+        baseline["num_panels"],
+        baseline.get("past_data"),
+        baseline.get("past_diff_unchosen_chosen"),
+    )
+    alpha = _marginal_utility_of_income(counterfactual["results"], betas)
+    difference = (
+        weights_counterfactual[counterfactual["panels_of_cases"]]
+        - weights_baseline[baseline["panels_of_cases"]]
+    )
+    per_case = jnp.sum(difference / alpha[None, :], axis=1)
+    return jnp.sum(per_case * case_weights) / jnp.sum(case_weights)
 
 
 def build_within_case_pairs(cases: onp.ndarray) -> tuple[onp.ndarray, onp.ndarray]:
@@ -193,6 +297,8 @@ def aggregate_elasticities(
     group_codes: Int[Array, "pairs"],
     num_groups: int,
     row_weights: Float64[Array, "rows"],
+    past_data: Any | None = None,
+    past_diff_unchosen_chosen: Any | None = None,
 ) -> Float64[Array, "num_groups"]:
     """Return demand-weighted own- and cross-elasticities by alternative pair.
 
@@ -219,7 +325,9 @@ def aggregate_elasticities(
     Float64[Array, "num_groups"]
         Aggregate elasticity for each alternative pair, in group-code order.
     """
-    betas, class_probs = _betas_and_class_probs(results, flat_params, dems, num_panels)
+    betas, class_probs = _betas_and_class_probs(
+        results, flat_params, dems, num_panels, past_data, past_diff_unchosen_chosen
+    )
     probs_by_class, _ = _choice_probabilities_and_logsum(X, betas, cases, num_cases)
     class_weights = class_probs[panels]  # (rows, classes)
     weighted_probs = class_weights * probs_by_class  # (rows, classes)
@@ -246,6 +354,7 @@ def aggregate_elasticities(
 
 __all__ = [
     "aggregate_elasticities",
+    "normalisation_sensitivity",
     "build_within_case_pairs",
     "choice_probabilities",
     "market_shares",

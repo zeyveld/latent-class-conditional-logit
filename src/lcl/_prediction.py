@@ -21,6 +21,7 @@ from lcl._prediction_inference import (
     market_shares as _market_shares_fn,
     mean_surplus as _mean_surplus_fn,
     mean_surplus_change as _mean_surplus_change_fn,
+    normalisation_sensitivity as _normalisation_sensitivity_fn,
 )
 from lcl._presentation import format_wtp_table
 from lcl.options import PartitionType, WTPRequest
@@ -34,6 +35,23 @@ from lcl._wtp_partitions import (
 )
 
 logger = logging.getLogger(__name__)
+
+EULER_MASCHERONI = 0.5772156649015329
+"""Mean of a standard Gumbel, quoted only as a yardstick for normalisation drift.
+
+The inclusive value omits it, which is the usual convention: with the Gumbel
+location normalised so the errors have mean zero it does not appear at all, and
+under the location-zero normalisation it is a constant that cancels from every
+difference taken at fixed class weights.  It is quoted in the warning below
+purely to put a familiar number on how far a normalisation choice can move a
+comparison whose class weights do move.
+"""
+
+NORMALISATION_SENSITIVITY_RTOL = 0.01
+"""Share of a surplus change attributable to normalisation before warning."""
+
+NORMALISATION_SENSITIVITY_FLOOR = 1e-8
+"""Floor on the comparison scale so a near-zero change does not always warn."""
 
 
 class _PredictionBase:
@@ -167,7 +185,13 @@ class _PredictionBase:
         self.panel_weights = weights
 
     def _design_kwargs(self) -> dict[str, Any]:
-        """Return the design arrays every differentiable counterfactual needs."""
+        """Return the design arrays every differentiable counterfactual needs.
+
+        When the prediction was built from ``past_choices``, the past-choice
+        design travels with the counterfactual design so the aggregate quantities
+        weight classes by the Bayesian posterior that the per-case tables already
+        use -- and differentiate through that update rather than freezing it.
+        """
         data = self.predict_data
         if data.panels is None or data.num_panels is None:
             raise ValueError("Panel identifiers are required for prediction inference.")
@@ -179,6 +203,8 @@ class _PredictionBase:
             "dems": data.dems,
             "num_cases": data.num_cases,
             "num_panels": data.num_panels,
+            "past_data": self.past_data,
+            "past_diff_unchosen_chosen": self.past_diff_unchosen_chosen,
         }
 
     def _row_panel_weights(self) -> jnp.ndarray:
@@ -382,6 +408,7 @@ class _PredictionBase:
                 "mean_surplus": [float(value)],
                 "std_error": [float(standard_error)],
                 "surplus_units": [self.surplus_units],
+                "level_identified": [False],
             }
         )
 
@@ -439,21 +466,64 @@ class _PredictionBase:
             kwargs["panels_of_cases"] = panels_of_cases
             return kwargs
 
+        baseline_kwargs = scenario(self)
+        counterfactual_kwargs = scenario(counterfactual)
+        case_weights = self._case_panel_weights()
         value, standard_error = self._quantity_se(
             _mean_surplus_change_fn,
             se,
             bootstrap_draws=bootstrap_draws,
             bootstrap_seed=bootstrap_seed,
-            baseline=scenario(self),
-            counterfactual=scenario(counterfactual),
-            case_weights=self._case_panel_weights(),
+            baseline=baseline_kwargs,
+            counterfactual=counterfactual_kwargs,
+            case_weights=case_weights,
         )
+        sensitivity = float(
+            _normalisation_sensitivity_fn(
+                self.results.flat_params,
+                baseline=baseline_kwargs,
+                counterfactual=counterfactual_kwargs,
+                case_weights=case_weights,
+            )
+        )
+        self._warn_if_normalisation_dependent(float(value), sensitivity)
         return pl.DataFrame(
             {
                 "mean_surplus_change": [float(value)],
                 "std_error": [float(standard_error)],
                 "surplus_units": [self.surplus_units],
+                "normalisation_sensitivity": [sensitivity],
             }
+        )
+
+    def _warn_if_normalisation_dependent(
+        self, value: float, sensitivity: float
+    ) -> None:
+        """Warn when a surplus change is not free of the utility normalisation.
+
+        The two scenarios' class weights coincide in the ordinary case -- a price
+        or attribute counterfactual -- and the unidentified per-class location
+        constants cancel exactly.  They do not coincide when the counterfactual
+        moves a demographic that enters the class-membership model, or when one
+        side is posterior-weighted and the other is not, and then part of the
+        reported change is an artifact of a normalisation the data cannot pin
+        down.
+        """
+        scale = max(abs(value), NORMALISATION_SENSITIVITY_FLOOR)
+        if abs(sensitivity) <= NORMALISATION_SENSITIVITY_RTOL * scale:
+            return
+        logger.warning(
+            "This surplus change is not identified independently of the utility "
+            "normalisation. The two scenarios weight the latent classes "
+            "differently, so the unidentified location of the Gumbel errors does "
+            "not cancel: shifting it by c moves the reported change of %.4g by "
+            "%.4g * c (for reference, c = 0.5772, Euler's constant, would move "
+            "it by %.4g). Compare scenarios that share class-membership weights "
+            "-- hold demographics fixed, and use the same prior/posterior "
+            "weighting on both sides -- for a normalisation-free comparison.",
+            value,
+            sensitivity,
+            EULER_MASCHERONI * sensitivity,
         )
 
     def surplus_change(self, counterfactual: "_PredictionBase") -> pl.DataFrame:

@@ -3,7 +3,7 @@
 import logging
 import warnings
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 import jax
 import jax.numpy as jnp
@@ -35,8 +35,14 @@ from lcl._predict_inputs import (
     _prediction_partition_data,
     _validate_past_choice_panels,
 )
+from lcl._labels import numeraire_enters_linearly
 from lcl._reporting import _history_frame, _model_variable_label
-from lcl._presentation import format_lcl_beta_summary
+from lcl._presentation import (
+    format_class_coefficients,
+    format_lcl_beta_summary,
+    format_membership_coefficients,
+    format_membership_marginal_effects,
+)
 from lcl.options import DiagnosticsOptions, InferenceOptions
 from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
@@ -694,6 +700,91 @@ class LCLResults:
                 )
         return pl.DataFrame(rows)
 
+    def _calc_membership_marginal_effects(
+        self,
+        flat_params: Float64[Array, "all_params"],
+        dems: Float64[Array, "panels dem_vars"] | None,
+        num_panels: int,
+    ) -> Float64[Array, "dem_vars classes"]:
+        """Average over panels of ``d pi_ns / d z_nm`` for each demographic.
+
+        For a multinomial logit membership model the panel-level derivative is
+        ``pi_ns (theta_sm - sum_r pi_nr theta_rm)``.  Averaging it over the
+        sample is the "average marginal effect", which is what a reader wants
+        from a class-membership regression: it is in probability units, it does
+        not depend on which class was chosen as the reference, and it sums to
+        zero across classes because the probabilities sum to one.
+        """
+        _, thetas = self._unpack_params(flat_params)
+        class_probs = self._get_class_probs(thetas, dems, num_panels)
+        # Restore the reference class's implicit row of zeros.
+        coefficients = jnp.concatenate(
+            [jnp.zeros((thetas.shape[0], 1), dtype=thetas.dtype), thetas], axis=1
+        )[1:, :]  # drop the intercept row: it is not a marginal effect
+        weighted = class_probs @ coefficients.T  # (panels, dem_vars)
+        # d pi_ns / d z_nm = pi_ns (theta_sm - sum_r pi_nr theta_rm)
+        derivative = class_probs[:, None, :] * (
+            coefficients[None, :, :] - weighted[:, :, None]
+        )
+        return jnp.mean(derivative, axis=0)
+
+    def membership_marginal_effects(self) -> pl.DataFrame:
+        """Return average marginal effects of demographics on class membership.
+
+        The membership coefficients are log-odds against an arbitrary reference
+        class, which makes them awkward to read and impossible to compare across
+        fits that landed on a different reference.  The average marginal effect
+        ``(1/N) sum_n d P(class = s | z_n) / d z_nm`` is free of that
+        normalisation, is denominated in probability points, and sums to zero
+        across classes for each demographic variable.
+
+        Returns
+        -------
+        pl.DataFrame
+            One row per (demographic variable, class) with the average marginal
+            effect and its Delta-method standard error.
+
+        Raises
+        ------
+        ValueError
+            If the model was fitted without a demographic membership regression.
+
+        Notes
+        -----
+        For a binary demographic this is the average of a derivative, not a
+        discrete difference in probabilities; the two agree only approximately.
+        """
+        if self.em_res.thetas is None:
+            raise ValueError(
+                "This model has no class-membership regression, so demographics "
+                "have no marginal effect on class membership."
+            )
+        if self.data.num_panels is None:
+            raise ValueError("Panel identifiers are required for marginal effects.")
+        effects, standard_errors = self._apply_delta_method(
+            self._calc_membership_marginal_effects,
+            self.flat_params,
+            dems=self.data.dems,
+            num_panels=self.data.num_panels,
+        )
+        effect_array = onp.asarray(effects)
+        se_array = onp.asarray(standard_errors)
+        rows = []
+        for variable_idx, variable in enumerate(self.model.dem_varnames or []):
+            for class_idx in range(self.model.num_classes):
+                rows.append(
+                    {
+                        "variable": variable,
+                        "label": _model_variable_label(self.model, variable),
+                        "class": class_idx,
+                        "marginal_effect": float(
+                            effect_array[variable_idx, class_idx]
+                        ),
+                        "std_error": float(se_array[variable_idx, class_idx]),
+                    }
+                )
+        return pl.DataFrame(rows)
+
     def class_shares(self) -> pl.DataFrame:
         """Return aggregate latent-class shares.
 
@@ -876,6 +967,142 @@ class LCLResults:
     def summarize(self, num_decimals: int = 3, *, show: bool = True) -> pl.DataFrame:
         """Alias for :meth:`summarize_betas`."""
         return self.summarize_betas(num_decimals=num_decimals, show=show)
+
+    def summarize_class_betas(
+        self,
+        num_decimals: int = 3,
+        *,
+        layout: Literal["auto", "wide", "dense"] = "auto",
+        include_shares: bool = True,
+        show: bool = True,
+    ) -> pl.DataFrame:
+        """Print and return class-specific utility coefficients.
+
+        :meth:`summarize_betas` reports the population mean and standard
+        deviation of each coefficient; this method reports the class-specific
+        coefficients those moments are computed from, in the same two-line
+        estimate-over-standard-error cell.
+
+        Parameters
+        ----------
+        num_decimals : int, default=3
+            Decimal places used in the printed tables.
+        layout : {"auto", "wide", "dense"}, default="auto"
+            ``"wide"`` puts one variable per row and one class per column, which
+            reads best for a handful of classes.  ``"dense"`` transposes to one
+            row per class, which keeps its width bounded by the number of
+            utility variables and therefore stays readable at many classes.
+            ``"auto"`` switches to ``"dense"`` at nine classes.
+        include_shares : bool, default=True
+            Append each class's aggregate share to the printed table.
+        show : bool, default=True
+            Emit LaTeX and terminal renderings.
+
+        Returns
+        -------
+        pl.DataFrame
+            The long-format frame from :meth:`class_coefficients`, unchanged, so
+            printing and programmatic use share one source of truth.
+        """
+        table = self.class_coefficients()
+        if show:
+            shares = None
+            share_standard_errors = None
+            if include_shares:
+                share_frame = self.class_shares()
+                shares = share_frame["share"].to_list()
+                share_standard_errors = share_frame["std_error"].to_list()
+            log_or_print(
+                logger,
+                "%s",
+                format_class_coefficients(
+                    table,
+                    self.model.num_classes,
+                    num_decimals,
+                    layout=layout,
+                    shares=shares,
+                    share_standard_errors=share_standard_errors,
+                ),
+            )
+        return table
+
+    def summarize_membership(
+        self,
+        num_decimals: int = 3,
+        *,
+        layout: Literal["auto", "wide", "dense"] = "auto",
+        include_shares: bool = True,
+        marginal_effects: bool = True,
+        show: bool = True,
+    ) -> pl.DataFrame:
+        """Print and return the class-membership demographic regression.
+
+        The reference class is printed as an explicit row (or column) of zeros
+        rather than omitted, and the rendering carries the normalisation note, so
+        a reader can see which class the log-odds are measured against without
+        consulting the documentation.
+
+        Parameters
+        ----------
+        num_decimals : int, default=3
+            Decimal places used in the printed tables.
+        layout : {"auto", "wide", "dense"}, default="auto"
+            ``"dense"`` gives one row per class and one column per demographic
+            variable, the layout that scales to many classes; ``"wide"``
+            transposes it.  ``"auto"`` switches to ``"dense"`` at nine classes.
+        include_shares : bool, default=True
+            Show each class's aggregate share beside its coefficients.
+        marginal_effects : bool, default=True
+            Also print :meth:`membership_marginal_effects`, which restates the
+            same regression in probability points and without the reference-class
+            normalisation.
+        show : bool, default=True
+            Emit LaTeX and terminal renderings.
+
+        Returns
+        -------
+        pl.DataFrame
+            The long-format frame from :meth:`membership_coefficients`.
+
+        Raises
+        ------
+        ValueError
+            If the fitted model has no demographic class-membership regression.
+        """
+        if self.em_res.thetas is None:
+            raise ValueError(
+                "This model has no class-membership regression: it was fitted "
+                "without demographics, so class shares are constant across "
+                "panels. Use class_shares() instead."
+            )
+        table = self.membership_coefficients()
+        if show:
+            shares = (
+                self.class_shares()["share"].to_list() if include_shares else None
+            )
+            log_or_print(
+                logger,
+                "%s",
+                format_membership_coefficients(
+                    table,
+                    self.model.num_classes,
+                    num_decimals,
+                    layout=layout,
+                    shares=shares,
+                ),
+            )
+            if marginal_effects:
+                log_or_print(
+                    logger,
+                    "%s",
+                    format_membership_marginal_effects(
+                        self.membership_marginal_effects(),
+                        self.model.num_classes,
+                        num_decimals,
+                        layout=layout,
+                    ),
+                )
+        return table
 
     def spec_summary(self) -> str:
         """Return a human-readable model specification summary."""
@@ -1166,6 +1393,25 @@ class LCLResults:
                         else "ok"
                     ),
                     "message": "Small numeraires can dominate WTP/tradeoff ratios.",
+                }
+            )
+            linear = numeraire_enters_linearly(self.model)
+            rows.append(
+                {
+                    "section": "coefficients",
+                    "check": "numeraire_enters_linearly",
+                    "value": float(linear),
+                    "status": "ok" if linear else "warning",
+                    "message": (
+                        "Whether the numeraire enters utility as a bare column. "
+                        "Consumer surplus and willingness to pay divide by "
+                        "-dV/d(numeraire), which equals -beta only when the "
+                        "numeraire is untransformed. Under a transform such as "
+                        "log(price) the ratio is per unit of the transform, not "
+                        "per dollar, and the constant-marginal-utility-of-income "
+                        "assumption behind the log-sum welfare formula no longer "
+                        "holds."
+                    ),
                 }
             )
 

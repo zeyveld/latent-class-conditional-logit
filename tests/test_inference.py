@@ -47,7 +47,7 @@ def test_conditional_logit_is_affine_equivariant() -> None:
         "cases_col": "case",
         "choice_col": "choice",
         "case_varnames": ["price", "quality"],
-        "optimization_options": OptimizationOptions(gradient_tol=1e-8),
+        "optimization_options": OptimizationOptions(newton_decrement_tol=1e-8),
         "inference": InferenceOptions(skip=True),
     }
     reference = ConditionalLogit(numeraire="price").fit(data, **kwargs)
@@ -74,6 +74,7 @@ def test_frequency_weighted_meat_matches_literal_replication() -> None:
         scores,
         finite_sample_correction=False,
         weights=weights,
+        weight_type="frequency",
     )
     replicated = _robust_covariance(
         bread,
@@ -81,6 +82,39 @@ def test_frequency_weighted_meat_matches_literal_replication() -> None:
         finite_sample_correction=False,
     )
     np.testing.assert_allclose(weighted, replicated, rtol=1e-12, atol=1e-12)
+
+
+def test_probability_weighted_meat_squares_the_weights() -> None:
+    """Survey weights enter the meat squared, matching Stata's pweight."""
+    scores = np.array([[1.0, -2.0], [0.5, 3.0], [-1.5, 0.25]])
+    weights = np.array([1.0, 3.0, 2.0])
+    bread = np.array([[0.8, 0.1], [0.1, 0.6]])
+    actual = _robust_covariance(
+        bread,
+        scores,
+        finite_sample_correction=False,
+        weights=weights,
+        weight_type="probability",
+    )
+    weighted_scores = scores * weights[:, None]
+    expected = bread @ (weighted_scores.T @ weighted_scores) @ bread
+    np.testing.assert_allclose(actual, expected, rtol=1e-12, atol=1e-12)
+
+
+def test_weight_types_agree_when_every_weight_is_one() -> None:
+    """The unweighted default is untouched by the weight-type distinction."""
+    scores = np.array([[1.0, -2.0], [0.5, 3.0], [-1.5, 0.25]])
+    bread = np.array([[0.8, 0.1], [0.1, 0.6]])
+    unweighted = _robust_covariance(bread, scores)
+    for weight_type in ("probability", "frequency"):
+        np.testing.assert_allclose(
+            _robust_covariance(
+                bread, scores, weights=np.ones(3), weight_type=weight_type
+            ),
+            unweighted,
+            rtol=1e-12,
+            atol=1e-12,
+        )
 
 
 def test_constrained_cl_exposes_structural_covariance() -> None:
@@ -171,3 +205,108 @@ def test_elasticity_uses_original_ids_and_full_formula_chain_rule() -> None:
     slope = float(coefficients[0] + 2 * coefficients[1] * price[air_index])
     expected = slope * price[air_index] * (1.0 - probs[air_index])
     assert own == pytest.approx(expected, rel=2e-6, abs=2e-7)
+
+
+def test_conditional_logit_weight_types_share_estimates_and_differ_in_variance() -> None:
+    """Survey and frequency weights change only the sandwich, and only when they vary."""
+    data = _synthetic_cl(num_cases=400)
+    rng = np.random.default_rng(2)
+    weights = 1.0 + rng.integers(0, 4, size=data["case"].n_unique()).astype(float)
+    weight_map = dict(zip(sorted(set(data["case"].to_list())), weights))
+    data = data.with_columns(
+        pl.col("case").replace_strict(weight_map).alias("sampling_weight")
+    )
+    common = dict(
+        alts_col="alt",
+        cases_col="case",
+        choice_col="choice",
+        case_varnames=["price", "quality"],
+        weights="sampling_weight",
+        inference=InferenceOptions(covariance="robust"),
+    )
+    probability = ConditionalLogit().fit(data, weight_type="probability", **common)
+    frequency = ConditionalLogit().fit(data, weight_type="frequency", **common)
+
+    np.testing.assert_allclose(
+        np.asarray(probability.coeff_), np.asarray(frequency.coeff_)
+    )
+    assert float(probability.loglikelihood) == pytest.approx(
+        float(frequency.loglikelihood)
+    )
+    assert not np.allclose(
+        np.asarray(probability.stderr), np.asarray(frequency.stderr)
+    )
+
+    # The scores of the weighted objective are w_i s_i, so the probability meat
+    # squares the weights.
+    scores = np.asarray(probability.grad_n) * np.asarray(probability.case_weights)[
+        :, None
+    ]
+    bread = np.asarray(probability.hess_inv)
+    n = scores.shape[0]
+    expected = bread @ (scores.T @ scores) @ bread * (n / (n - 1))
+    np.testing.assert_allclose(
+        np.asarray(probability.latent_cov_matrix), expected, rtol=1e-10, atol=1e-14
+    )
+
+
+def test_unweighted_fits_are_identical_under_either_weight_type() -> None:
+    """The default path is untouched by the weight-type distinction."""
+    data = _synthetic_cl(num_cases=200)
+    common = dict(
+        alts_col="alt",
+        cases_col="case",
+        choice_col="choice",
+        case_varnames=["price", "quality"],
+        inference=InferenceOptions(covariance="robust"),
+    )
+    probability = ConditionalLogit().fit(data, weight_type="probability", **common)
+    frequency = ConditionalLogit().fit(data, weight_type="frequency", **common)
+    np.testing.assert_allclose(
+        np.asarray(probability.cov_matrix), np.asarray(frequency.cov_matrix)
+    )
+
+
+def test_conditional_logit_bootstrap_wtp_respects_the_sign_constraint() -> None:
+    """Ratio draws are taken where the numeraire coefficient cannot change sign.
+
+    Drawing structural coefficients directly puts mass on a positive numeraire,
+    which the softplus parameterization excludes; the ratios that follow are
+    heavy tailed and inflate the bootstrap standard error several fold.
+    """
+    data = _synthetic_cl(seed=31, num_cases=150)
+    result = ConditionalLogit(numeraire="price").fit(
+        data,
+        alts_col="alt",
+        cases_col="case",
+        choice_col="choice",
+        case_varnames=["price", "quality"],
+        inference=InferenceOptions(covariance="robust"),
+    )
+    prediction = result.predict(data)
+    delta = float(prediction.wtp("quality", se="delta")["std_error"][0])
+    bootstrap = float(
+        prediction.wtp(
+            "quality", se="bootstrap", bootstrap_draws=8000, bootstrap_seed=1
+        )["std_error"][0]
+    )
+    # Both estimate the same asymptotic standard error; the bootstrap only picks
+    # up curvature, so it should be close rather than a multiple.
+    assert bootstrap == pytest.approx(delta, rel=0.25)
+
+    # The draws themselves stay inside the constrained region.
+    from lcl._case_utils import _to_structural_betas
+
+    covariance = np.asarray(result.latent_cov_matrix)
+    rng = np.random.default_rng(1)
+    draws = np.asarray(result.latent_coeff_) + rng.multivariate_normal(
+        np.zeros(covariance.shape[0]), covariance, size=4000
+    )
+    structural = np.asarray(
+        jax.vmap(
+            lambda p: _to_structural_betas(
+                p, result.model.numeraire_idx, result.model.numeraire_min_abs
+            )
+        )(jnp.asarray(draws))
+    )
+    assert np.all(structural[:, result.model.numeraire_idx] < 0.0)

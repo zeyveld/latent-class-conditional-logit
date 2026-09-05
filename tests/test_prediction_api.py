@@ -109,8 +109,10 @@ def test_lcl_rich_inference_and_weighted_bootstrap_wtp() -> None:
         inference=InferenceOptions(skip=True),
     )
     # Inject a finite covariance to isolate reporting transformations from the
-    # deliberately tiny sample's information-rank limitations.
-    result.cov_matrix = jnp.eye(result.num_params) * 1e-4
+    # deliberately tiny sample's information-rank limitations.  Inference reads
+    # the latent-space matrix; the public one is its structural counterpart.
+    result.latent_cov_matrix = jnp.eye(result.num_params) * 1e-4
+    result.cov_matrix = result._structural_covariance(result.latent_cov_matrix)
 
     assert isinstance(result, ResultsProtocol)
     assert {"coefficient", "std_error"}.issubset(result.class_coefficients().columns)

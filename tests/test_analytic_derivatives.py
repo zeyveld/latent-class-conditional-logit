@@ -107,7 +107,12 @@ def test_analytic_scores_and_hessian_match_autodiff(
 
 
 def test_fitted_covariance_matches_autodiff_formulation() -> None:
-    """End to end: LCLResults.cov_matrix equals the autodiff sandwich exactly."""
+    """End to end: both public covariances equal their autodiff formulations.
+
+    ``latent_cov_matrix`` is the sandwich in the optimizer's unconstrained
+    parameterization; ``cov_matrix`` is that matrix pushed through the softplus
+    Jacobian so its rows match the coefficients ``parameter_names`` labels.
+    """
     rng = onp.random.default_rng(3)
     num_panels, cases_per_panel, num_alts = 25, 4, 3
     betas_by_class = {0: onp.array([-1.5, 0.5]), 1: onp.array([-0.3, 1.5])}
@@ -162,7 +167,25 @@ def test_fitted_covariance_matches_autodiff_formulation() -> None:
     expected = 0.5 * (expected + expected.T)
 
     onp.testing.assert_allclose(
-        onp.asarray(results.cov_matrix), expected, rtol=1e-8, atol=1e-10
+        onp.asarray(results.latent_cov_matrix), expected, rtol=1e-8, atol=1e-10
+    )
+
+    jacobian = jax.jacfwd(results._structural_from_latent)(results.flat_params)
+    structural_expected = onp.asarray(jacobian) @ expected @ onp.asarray(jacobian).T
+    structural_expected = 0.5 * (structural_expected + structural_expected.T)
+    onp.testing.assert_allclose(
+        onp.asarray(results.cov_matrix), structural_expected, rtol=1e-8, atol=1e-10
+    )
+    # The reported standard errors are the ones a user reads off cov_matrix.
+    onp.testing.assert_allclose(
+        onp.sqrt(onp.diag(onp.asarray(results.cov_matrix)))[
+            : results.model.num_classes
+        ],
+        results.class_coefficients()
+        .filter(pl.col("variable") == "price")["std_error"]
+        .to_numpy(),
+        rtol=1e-8,
+        atol=1e-10,
     )
 
     results.inference = InferenceOptions(covariance="unadjusted")

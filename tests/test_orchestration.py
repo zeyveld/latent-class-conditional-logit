@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-import inspect
 import importlib
+import inspect
+import itertools
 from typing import Any
 
 import jax.numpy as jnp
@@ -25,7 +26,7 @@ from lcl._params import ParamPacking
 from lcl._prediction import _apply_wtp_partition
 from lcl._results import _parsed_prediction_arrays
 from lcl.options import PartitionType, WTPRequest
-from lcl._struct import EMVars
+from lcl._struct import EMStepDiagnostics, EMVars
 from lcl.conditional_logit import ConditionalLogit
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 from lcl.spec import resolve_lcl_spec
@@ -210,61 +211,57 @@ def test_fitted_encoder_is_immutable_and_public_loglik_reuses_it() -> None:
         model._encoder.case_varnames = ["changed"]
 
 
-@pytest.mark.parametrize(
-    ("strict_logliks", "max_em_iter", "expected_converged"),
-    [
-        ([-99.99970, -99.99955, -99.99950], 10, True),
-        ([-99.99970, -99.99955], 7, False),
-    ],
-    ids=["strict-continuation-converges", "strict-continuation-hits-cap"],
-)
-def test_failed_strict_refit_continues_within_total_em_budget(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
-    strict_logliks: list[float],
-    max_em_iter: int,
-    expected_converged: bool,
+def _fake_em_state(data: Any, num_classes: int, loglik: float) -> EMVars:
+    """Build a minimal EM state for stopping-rule tests."""
+    assert data.num_panels is not None
+    betas = jnp.zeros((data.num_alt_vars, num_classes))
+    return EMVars(
+        latent_betas=betas,
+        structural_betas=betas,
+        thetas=None,
+        shares=jnp.full(num_classes, 1.0 / num_classes),
+        unconditional_loglik=jnp.array(loglik),
+        class_probs_by_panel=jnp.full(
+            (data.num_panels, num_classes), 1.0 / num_classes
+        ),
+    )
+
+
+@pytest.mark.parametrize("rate", [0.5, 0.9], ids=["fast-rate", "slow-rate"])
+def test_em_stops_on_the_aitken_extrapolated_gap(
+    monkeypatch: pytest.MonkeyPatch, rate: float
 ) -> None:
-    standard_logliks = [-100.0, -99.99998, -99.99996, -99.99994, -99.99992]
-    remaining_logliks = standard_logliks + strict_logliks
-    optimization_calls: list[OptimizationOptions] = []
-    progress_events: list[dict[str, Any]] = []
+    """The stopping rule targets the remaining ascent, not one step's change.
+
+    A geometric log-likelihood sequence with rate ``r`` still has
+    ``d * r / (1 - r)`` to gain after an increment of ``d``.  At ``r = 0.9`` that
+    tail is nine times the increment, so a rule that looked at the increment
+    alone would stop while a ninth of the ascent was still outstanding.
+    """
+    em_tol = 1e-3
+    max_em_iter = 300
+    increments = [rate**step for step in range(max_em_iter + 5)]
+    logliks = list(itertools.accumulate(increments, initial=-99.0))[1:]
+    remaining = list(logliks)
 
     def fake_starting_values(
-        _diff: Any,
-        data: Any,
-        num_classes: int,
-        *_args: Any,
+        _diff: Any, data: Any, num_classes: int, *_args: Any
     ) -> EMVars:
-        assert data.num_panels is not None
-        betas = jnp.zeros((data.num_alt_vars, num_classes))
-        return EMVars(
-            latent_betas=betas,
-            structural_betas=betas,
-            thetas=None,
-            shares=jnp.full(num_classes, 1.0 / num_classes),
-            unconditional_loglik=jnp.array(-100.1),
-            class_probs_by_panel=jnp.full(
-                (data.num_panels, num_classes), 1.0 / num_classes
-            ),
-        )
+        return _fake_em_state(data, num_classes, -99.0)
 
     def fake_em_step(
-        em_vars: EMVars,
-        _diff: Any,
-        _data: Any,
-        _num_classes: int,
-        optimization_options: OptimizationOptions,
-        *_args: Any,
-    ) -> EMVars:
-        optimization_calls.append(optimization_options)
-        return em_vars._replace(
-            unconditional_loglik=jnp.array(remaining_logliks.pop(0))
+        em_vars: EMVars, _diff: Any, _data: Any, *_args: Any
+    ) -> tuple[EMVars, EMStepDiagnostics]:
+        return (
+            em_vars._replace(unconditional_loglik=jnp.array(remaining.pop(0))),
+            EMStepDiagnostics(
+                beta_newton_error=jnp.zeros(2),
+                membership_newton_error=jnp.array(0.0),
+            ),
         )
 
     monkeypatch.setattr(_lcl_model_module, "_get_starting_vals", fake_starting_values)
     monkeypatch.setattr(_lcl_model_module, "_em_step", fake_em_step)
-    caplog.set_level("INFO", logger="lcl.latent_class_conditional_logit")
 
     result = LatentClassConditionalLogit(num_classes=2).fit(
         _choice_rows(),
@@ -274,43 +271,94 @@ def test_failed_strict_refit_continues_within_total_em_budget(
         choice_col="choice",
         case_varnames=["x"],
         fit_options=FitOptions(
-            max_em_iter=max_em_iter,
-            em_tol=1e-6,
-            check_interval=5,
-            num_devices=1,
-        ),
-        optimization_options=OptimizationOptions(
-            maxiter=2,
-            gradient_tol=1e-4,
+            max_em_iter=max_em_iter, em_tol=em_tol, polish=False, num_devices=1
         ),
         inference=InferenceOptions(skip=True),
-        progress_callback=progress_events.append,
     )
 
-    expected_total = len(standard_logliks) + len(strict_logliks)
-    assert result.converged is expected_converged
-    assert result.total_recursions == expected_total
-    assert result.total_recursions <= max_em_iter
-    assert result.em_history_.height == expected_total
-    assert result.em_history_["phase"].to_list() == [
-        *(["standard"] * len(standard_logliks)),
-        *(["strict"] * len(strict_logliks)),
-    ]
-    assert [
-        event["phase"] for event in progress_events if event["event"] == "em_step"
-    ] == result.em_history_["phase"].to_list()
+    assert result.em_criterion_met
+    assert result.total_recursions < max_em_iter
+    threshold = em_tol * result.data.num_panels
+    tail_factor = rate / (1.0 - rate)
+    realized = result.em_history_["loglik"].to_list()
+    steps = [after - before for before, after in zip(realized, realized[1:])]
 
-    strict_options = optimization_calls[len(standard_logliks) :]
-    assert len(strict_options) == len(strict_logliks)
-    assert all(option.gradient_tol == 1e-8 for option in strict_options)
-    assert all(option.maxiter == 500 for option in strict_options)
-    assert "continuing strict EM" in caplog.text
-    if expected_converged:
-        assert remaining_logliks == []
-        assert "maximum of" not in caplog.text
+    # It stopped at the first iteration whose extrapolated tail cleared the
+    # tolerance, and not before.
+    assert steps[-1] * tail_factor <= threshold
+    assert steps[-2] * tail_factor > threshold
+    naive_stop = next(
+        index for index, step in enumerate(steps) if step <= threshold
+    )
+    if rate > 0.5:
+        # A naive log-likelihood-change rule would have stopped strictly earlier,
+        # with the geometric tail still outstanding.
+        assert naive_stop < len(steps) - 1
     else:
-        assert result.total_recursions == max_em_iter
-        assert "maximum of 7 EM recursions was reached" in caplog.text
+        # At r = 0.5 the tail equals the increment, so the two rules coincide.
+        assert naive_stop == len(steps) - 1
+
+
+def test_em_respects_the_iteration_cap_when_the_criterion_is_never_met(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crawling sequence runs the full budget and reports the criterion unmet."""
+    max_em_iter = 9
+    remaining = [-99.0 + 0.5 * step for step in range(1, max_em_iter + 5)]
+
+    def fake_starting_values(
+        _diff: Any, data: Any, num_classes: int, *_args: Any
+    ) -> EMVars:
+        return _fake_em_state(data, num_classes, -99.0)
+
+    def fake_em_step(
+        em_vars: EMVars, _diff: Any, _data: Any, *_args: Any
+    ) -> tuple[EMVars, EMStepDiagnostics]:
+        return (
+            em_vars._replace(unconditional_loglik=jnp.array(remaining.pop(0))),
+            EMStepDiagnostics(
+                beta_newton_error=jnp.zeros(2),
+                membership_newton_error=jnp.array(0.0),
+            ),
+        )
+
+    monkeypatch.setattr(_lcl_model_module, "_get_starting_vals", fake_starting_values)
+    monkeypatch.setattr(_lcl_model_module, "_em_step", fake_em_step)
+
+    result = LatentClassConditionalLogit(num_classes=2).fit(
+        _choice_rows(),
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["x"],
+        fit_options=FitOptions(
+            max_em_iter=max_em_iter, em_tol=1e-8, polish=False, num_devices=1
+        ),
+        inference=InferenceOptions(skip=True),
+    )
+    assert result.total_recursions == max_em_iter
+    assert result.em_criterion_met is False
+    assert result.em_history_.height == max_em_iter
+
+
+def test_converged_flag_tracks_the_observed_data_score() -> None:
+    """A stationary point, not a small log-likelihood change, defines convergence."""
+    df = _choice_rows()
+    result = LatentClassConditionalLogit(num_classes=2).fit(
+        df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["x"],
+        fit_options=FitOptions(max_em_iter=2, polish=False, num_devices=1),
+        inference=InferenceOptions(skip=True),
+    )
+    assert result.converged is (result.observed_score_max <= result.score_tol)
+    diagnostics = result.diagnostics().to_frame()
+    score_row = diagnostics.filter(pl.col("check") == "observed_score_max")
+    assert (score_row["status"][0] == "ok") is result.converged
 
 
 def test_held_out_formula_scoring_keeps_training_categorical_columns() -> None:

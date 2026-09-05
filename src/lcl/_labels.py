@@ -95,3 +95,28 @@ def _label_formulaic_categorical(variable: str, labels: Mapping[str, str]) -> st
     if raw_variable not in labels:
         return variable
     return f"{labels[raw_variable]}: {match.group('level')}"
+
+
+_TRANSFORM_MARKERS = ("(", ")", "[", "]", ":", "**", " ")
+"""Characters a Formulaic-expanded term carries but a bare column name does not."""
+
+
+def numeraire_enters_linearly(model: object) -> bool:
+    """Report whether the numeraire is an untransformed design column.
+
+    Money-metric welfare divides by the marginal utility of income,
+    ``-dV/d(numeraire)``.  That derivative equals ``-beta`` only when the
+    numeraire enters utility linearly; under ``np.log(price)``, ``I(price**2)``,
+    a spline, or an interaction it is a function of the evaluation point, and a
+    surplus or willingness-to-pay figure formed as ``value / -beta`` is
+    denominated in units of the transform rather than in money.
+
+    The test is deliberately syntactic -- a Formulaic-expanded term carries
+    parentheses, brackets, an interaction colon, or a power operator, while a
+    bare column reference does not -- so it needs neither the original frame nor
+    a re-evaluation of the model spec.
+    """
+    numeraire = getattr(model, "numeraire", None)
+    if numeraire is None:
+        return True
+    return not any(marker in str(numeraire) for marker in _TRANSFORM_MARKERS)

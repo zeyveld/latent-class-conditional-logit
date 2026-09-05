@@ -748,6 +748,79 @@ def test_variable_labels_flow_to_wtp_tables_and_class_tradeoffs(
     assert "Travel time by Income quintile" in captured.out
 
 
+def _posterior_wtp_df(seed: int = 5, num_panels: int = 120) -> pl.DataFrame:
+    """Two-class panel data large enough to identify a full covariance."""
+    rng = onp.random.default_rng(seed)
+    cost_by_class = onp.array([-1.6, -0.4])
+    time_by_class = onp.array([-0.3, -1.7])
+    latent = rng.choice(2, size=num_panels, p=[0.5, 0.5])
+    rows = []
+    for panel in range(num_panels):
+        quintile = f"q{panel % 5}"
+        for case in range(4):
+            cost = rng.uniform(0.5, 3.0, size=3)
+            travel_time = rng.uniform(0.2, 4.0, size=3)
+            utility = (
+                cost_by_class[latent[panel]] * cost
+                + time_by_class[latent[panel]] * travel_time
+                + rng.gumbel(size=3)
+            )
+            chosen = int(onp.argmax(utility))
+            for alt in range(3):
+                rows.append(
+                    {
+                        "panel": panel,
+                        "case": panel * 4 + case,
+                        "alt": alt,
+                        "choice": alt == chosen,
+                        "cost": float(cost[alt]),
+                        "time": float(travel_time[alt]),
+                        "income_quintile": quintile,
+                    }
+                )
+    return pl.DataFrame(rows)
+
+
+def test_posterior_wtp_has_finite_delta_and_bootstrap_standard_errors() -> None:
+    """Differentiating through the Bayes update yields usable WTP uncertainty."""
+    df = _posterior_wtp_df()
+    results = LatentClassConditionalLogit(num_classes=2, numeraire="cost").fit(
+        data=df,
+        alts_col="alt",
+        cases_col="case",
+        panels_col="panel",
+        choice_col="choice",
+        case_varnames=["cost", "time"],
+        fit_options=FitOptions(seed=3, num_devices=1),
+        inference=InferenceOptions(covariance="clustered"),
+    )
+    assert results.converged
+    prediction = results.predict(data=df, past_choices=df)
+    assert prediction.class_probabilities_source == "posterior"
+    request = WTPRequest(
+        alt_var="time",
+        demographic_var="income_quintile",
+        partition_type=PartitionType.CATEGORICAL,
+    )
+    delta = next(iter(prediction.compute_wtp(request, show=False).values()))
+    bootstrap = next(
+        iter(
+            prediction.compute_wtp(
+                request, se="bootstrap", bootstrap_draws=200, show=False
+            ).values()
+        )
+    )
+    assert onp.all(onp.isfinite(delta["Standard_Error"].to_numpy()))
+    assert onp.all(delta["Standard_Error"].to_numpy() > 0.0)
+    # The two methods estimate the same asymptotic quantity, so they should agree
+    # to within bootstrap noise.
+    onp.testing.assert_allclose(
+        bootstrap["Mean_Marginal_WTP"].to_numpy(),
+        delta["Mean_Marginal_WTP"].to_numpy(),
+        rtol=1e-10,
+    )
+
+
 def test_wtp_uses_stored_posterior_class_probs_with_past_choices() -> None:
     df = _small_wtp_df()
     model = LatentClassConditionalLogit(num_classes=2, numeraire="cost")
@@ -771,14 +844,21 @@ def test_wtp_uses_stored_posterior_class_probs_with_past_choices() -> None:
 
     prediction = results.predict(data=df, past_choices=df)
     assert prediction.class_probabilities_source == "posterior"
-    with pytest.raises(NotImplementedError, match="posterior class update"):
-        prediction.compute_wtp(
-            WTPRequest(
-                alt_var="time",
-                demographic_var="income_quintile",
-                partition_type=PartitionType.CATEGORICAL,
-            )
-        )
+    # Posterior-updated WTP is differentiated through the Bayes update, so the
+    # delta method reports finite uncertainty rather than refusing the request.
+    delta_tables = prediction.compute_wtp(
+        WTPRequest(
+            alt_var="time",
+            demographic_var="income_quintile",
+            partition_type=PartitionType.CATEGORICAL,
+        ),
+        show=False,
+    )
+    delta_df = next(iter(delta_tables.values()))
+    assert delta_df["SE_Method"].to_list() == ["delta"] * delta_df.height
+    # This fit skipped covariance estimation, so the standard errors are NaN by
+    # construction; the point is that the request is answered, not refused.
+    assert onp.all(onp.isnan(delta_df["Standard_Error"].to_numpy()))
 
     tables = prediction.compute_wtp(
         WTPRequest(

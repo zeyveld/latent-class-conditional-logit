@@ -42,7 +42,7 @@ def test_two_class_parameter_recovery_up_to_canonical_order() -> None:
         choice_col="choice",
         case_varnames=["x1", "x2"],
         fit_options=FitOptions(max_em_iter=150, em_tol=1e-7, check_interval=5),
-        optimization_options=OptimizationOptions(gradient_tol=1e-7),
+        optimization_options=OptimizationOptions(newton_decrement_tol=1e-7),
         inference=InferenceOptions(skip=True),
     )
 

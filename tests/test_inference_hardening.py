@@ -15,7 +15,7 @@ import polars as pl
 import pytest
 
 import lcl  # noqa: F401  (enables x64)
-from lcl.options import InferenceOptions
+from lcl.options import FitOptions, InferenceOptions
 from lcl.conditional_logit import ConditionalLogit
 from lcl.constraints import (
     NegativeCoefficient,
@@ -289,3 +289,195 @@ def test_numeraire_z_and_p_values_are_suppressed() -> None:
     # The estimate and standard error remain reportable.
     assert onp.isfinite(numeraire_row["estimate"][0])
     assert onp.isfinite(numeraire_row["std_error"][0])
+
+
+def test_a_zero_gradient_block_reports_convergence_immediately() -> None:
+    """A flat block is stationary, not a case for escalating diagonal shifts.
+
+    Class padding on a multi-device mesh feeds the solver all-zero weights, and a
+    collapsed latent class can underflow to the same state.  Requiring strict
+    descent there would leave the decrement infinite and burn the whole iteration
+    budget on zero-length steps.
+    """
+    from lcl._optimize import exact_newton_minimize
+
+    def value_fn(params):
+        return jnp.zeros(())
+
+    def value_grad_hess_fn(params):
+        return (
+            jnp.zeros(()),
+            jnp.zeros(params.shape),
+            jnp.zeros((params.size, params.size)),
+        )
+
+    start = jnp.array([0.3, -1.2])
+    state = exact_newton_minimize(
+        value_fn, value_grad_hess_fn, start, tol=1e-6, maxiter=50
+    )
+    assert float(state.error) == 0.0
+    assert int(state.step_num) == 0
+    onp.testing.assert_allclose(onp.asarray(state.params), onp.asarray(start))
+
+
+def test_a_nonzero_gradient_is_never_mistaken_for_a_stationary_point() -> None:
+    """The stationarity shortcut fires only when the gradient really has vanished."""
+    from lcl._optimize import exact_newton_minimize
+
+    def value_fn(params):
+        return jnp.sum(params)
+
+    def value_grad_hess_fn(params):
+        # No curvature, but a slope: diagonal shifts turn this into a descent
+        # direction, so the solver must keep stepping rather than declare victory.
+        return (
+            jnp.sum(params),
+            jnp.ones(params.shape),
+            jnp.zeros((params.size, params.size)),
+        )
+
+    state = exact_newton_minimize(
+        value_fn, value_grad_hess_fn, jnp.zeros(2), tol=1e-6, maxiter=3
+    )
+    assert float(state.error) > 0.0
+    assert int(state.step_num) == 3
+    assert float(state.loss) < 0.0
+
+
+def test_an_unusable_hessian_reports_an_infinite_decrement() -> None:
+    """A direction that cannot be repaired is a failure, not a stationary point."""
+    from lcl._optimize import exact_newton_minimize
+
+    def value_fn(params):
+        return jnp.sum(params)
+
+    def value_grad_hess_fn(params):
+        return (
+            jnp.sum(params),
+            jnp.ones(params.shape),
+            jnp.full((params.size, params.size), jnp.nan),
+        )
+
+    state = exact_newton_minimize(
+        value_fn, value_grad_hess_fn, jnp.zeros(2), tol=1e-6, maxiter=2
+    )
+    assert not onp.isfinite(float(state.error))
+
+
+def test_between_class_spread_without_variation_has_no_standard_error() -> None:
+    """A coefficient common to every class has an unidentified standard deviation.
+
+    The square root of a variance is not differentiable at zero, so a floored
+    square root would report a spuriously exact spread of zero.
+    """
+    from lcl import ChoiceIds, LCLSpec, NegativeCoefficient
+    from lcl import fit as lcl_fit
+
+    rng = onp.random.default_rng(11)
+    rows = []
+    for panel in range(80):
+        for case in range(4):
+            price = rng.uniform(0.5, 3.0, size=3)
+            quality = rng.uniform(0.0, 5.0, size=3)
+            utility = -1.2 * price + 1.0 * quality + rng.gumbel(size=3)
+            chosen = int(onp.argmax(utility))
+            for alt in range(3):
+                rows.append(
+                    {
+                        "panel": panel,
+                        "case": panel * 4 + case,
+                        "alt": alt,
+                        "choice": alt == chosen,
+                        "price": float(price[alt]),
+                        "quality": float(quality[alt]),
+                    }
+                )
+    df = pl.DataFrame(rows)
+    spec = LCLSpec(
+        ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
+        utility_formula="choice ~ price + quality",
+        classes=2,
+        constraints={"price": NegativeCoefficient()},
+    )
+    results = lcl_fit(
+        df,
+        spec,
+        fit_options=FitOptions(seed=1, max_em_iter=4, polish=False, num_devices=1),
+        inference=InferenceOptions(covariance="unadjusted"),
+    )
+    # Force the two classes to coincide, which is the degenerate case.
+    latent = results.em_res.latent_betas.at[:, 1].set(results.em_res.latent_betas[:, 0])
+    results.em_res = results.em_res._replace(
+        latent_betas=latent,
+        structural_betas=results._param_packing.to_structural(latent),
+    )
+    results.flat_params = results._pack_params()
+    summary = results.beta_summary()
+    assert onp.all(onp.asarray(summary["sd"]) == 0.0)
+    assert onp.all(onp.isnan(onp.asarray(summary["sd_se"])))
+
+
+def test_the_polish_reaches_a_stationary_point_and_never_lowers_the_likelihood() -> None:
+    """Newton steps on the observed-data likelihood finish what EM starts."""
+    from lcl import ChoiceIds, LCLSpec, NegativeCoefficient
+    from lcl import fit as lcl_fit
+
+    rng = onp.random.default_rng(6)
+    latent_class = rng.choice(2, size=100, p=[0.5, 0.5])
+    price_by_class = onp.array([-1.7, -0.5])
+    quality_by_class = onp.array([0.3, 1.5])
+    rows = []
+    for panel in range(100):
+        for case in range(4):
+            price = rng.uniform(0.5, 3.0, size=3)
+            quality = rng.uniform(0.0, 5.0, size=3)
+            utility = (
+                price_by_class[latent_class[panel]] * price
+                + quality_by_class[latent_class[panel]] * quality
+                + rng.gumbel(size=3)
+            )
+            chosen = int(onp.argmax(utility))
+            for alt in range(3):
+                rows.append(
+                    {
+                        "panel": panel,
+                        "case": panel * 4 + case,
+                        "alt": alt,
+                        "choice": alt == chosen,
+                        "price": float(price[alt]),
+                        "quality": float(quality[alt]),
+                    }
+                )
+    df = pl.DataFrame(rows)
+    spec = LCLSpec(
+        ids=ChoiceIds(alt="alt", case="case", panel="panel", choice="choice"),
+        utility_formula="choice ~ price + quality",
+        classes=2,
+        constraints={"price": NegativeCoefficient()},
+    )
+    common = dict(inference=InferenceOptions(covariance="clustered"))
+    # A deliberately short EM run leaves the score far from zero.
+    unpolished = lcl_fit(
+        df,
+        spec,
+        fit_options=FitOptions(seed=3, max_em_iter=6, polish=False, num_devices=1),
+        **common,
+    )
+    polished = lcl_fit(
+        df,
+        spec,
+        fit_options=FitOptions(seed=3, max_em_iter=6, polish=True, num_devices=1),
+        **common,
+    )
+
+    assert unpolished.observed_score_max > polished.observed_score_max
+    assert polished.observed_score_max <= polished.score_tol
+    assert polished.converged
+    assert not unpolished.converged
+    assert float(polished.em_res.unconditional_loglik) >= float(
+        unpolished.em_res.unconditional_loglik
+    )
+    report = polished.polish_report
+    assert report is not None and report.accepted
+    assert report.loglik_after >= report.loglik_before
+    assert report.score_after < report.score_before
