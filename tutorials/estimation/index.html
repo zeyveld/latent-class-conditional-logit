@@ -1,0 +1,1492 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A JAX-accelerated Python package for latent-class conditional logit models.">
+      
+      
+      
+        <link rel="canonical" href="https://zeyveld.github.io/latent-class-conditional-logit/tutorials/estimation/">
+      
+      
+        <link rel="prev" href="../..">
+      
+      
+        <link rel="next" href="../cross_validation/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Estimation & counterfactuals - LCL</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#estimation-counterfactuals" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="LCL" class="md-header__button md-logo" aria-label="LCL" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LCL
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Estimation & counterfactuals
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/zeyveld/latent-class-conditional-logit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../api/specification/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="LCL" class="md-nav__button md-logo" aria-label="LCL" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    LCL
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/zeyveld/latent-class-conditional-logit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Estimation & counterfactuals
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Estimation & counterfactuals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-reshape-the-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Reshape the data
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-estimate-the-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Estimate the model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-inspect-the-fit-with-the-diagnostic-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Inspect the fit with the diagnostic tools
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#score-observed-choices-without-refitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Score observed choices without refitting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-a-counterfactual-fare-increase-conditioned-on-observed-choices" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. A counterfactual fare increase, conditioned on observed choices
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-elasticities" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Elasticities
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-marginal-willingness-to-pay" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Marginal willingness-to-pay
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cross_validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cross-validation & model selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" >
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/specification/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Specification & options
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/latent_class/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Latent-class conditional logit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/conditional_logit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conditional logit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../api/cross_validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cross-validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#1-reshape-the-data" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        1. Reshape the data
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#2-estimate-the-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        2. Estimate the model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#3-inspect-the-fit-with-the-diagnostic-tools" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        3. Inspect the fit with the diagnostic tools
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#score-observed-choices-without-refitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Score observed choices without refitting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#4-a-counterfactual-fare-increase-conditioned-on-observed-choices" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        4. A counterfactual fare increase, conditioned on observed choices
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#5-elasticities" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        5. Elasticities
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#6-marginal-willingness-to-pay" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        6. Marginal willingness-to-pay
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="estimation-counterfactuals">Estimation &amp; counterfactuals</h1>
+<p>This tutorial fits a three-class latent-class conditional logit model to Apollo's
+<code>modeChoice</code> data. It then evaluates a counterfactual fare increase and summarizes
+the value of travel time across income groups.</p>
+<h2 id="1-reshape-the-data">1. Reshape the data</h2>
+<p>LCL expects long-format data: one row for each decision-maker, choice situation,
+and available alternative. Apollo provides these data in wide format, so we first
+reshape them.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">polars</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pl</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">df_wide</span> <span class="o">=</span> <span class="p">(</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    <span class="n">pl</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="s2">&quot;https://www.apollochoicemodelling.com/files/examples/data/apollo_modeChoiceData.csv&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>      <span class="o">.</span><span class="n">with_row_index</span><span class="p">(</span><span class="s2">&quot;qID&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="p">)</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="n">alts_map</span> <span class="o">=</span> <span class="p">{</span><span class="mi">1</span><span class="p">:</span> <span class="s2">&quot;car&quot;</span><span class="p">,</span> <span class="mi">2</span><span class="p">:</span> <span class="s2">&quot;bus&quot;</span><span class="p">,</span> <span class="mi">3</span><span class="p">:</span> <span class="s2">&quot;air&quot;</span><span class="p">,</span> <span class="mi">4</span><span class="p">:</span> <span class="s2">&quot;rail&quot;</span><span class="p">}</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="n">dfs</span> <span class="o">=</span> <span class="p">[]</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="k">for</span> <span class="n">num</span><span class="p">,</span> <span class="n">name</span> <span class="ow">in</span> <span class="n">alts_map</span><span class="o">.</span><span class="n">items</span><span class="p">():</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a>    <span class="n">dfs</span><span class="o">.</span><span class="n">append</span><span class="p">(</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a>        <span class="n">df_wide</span><span class="o">.</span><span class="n">select</span><span class="p">([</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a>            <span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;ID&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>            <span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;qID&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a>            <span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;income&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a>            <span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;female&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>            <span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;time_</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s2">&quot;time&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a>            <span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;cost_</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s2">&quot;cost&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a>            <span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;av_</span><span class="si">{</span><span class="n">name</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s2">&quot;av&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a>            <span class="p">(</span><span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;choice&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="n">num</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s2">&quot;choice&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a>        <span class="p">])</span><span class="o">.</span><span class="n">with_columns</span><span class="p">(</span><span class="n">pl</span><span class="o">.</span><span class="n">lit</span><span class="p">(</span><span class="n">name</span><span class="p">)</span><span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s2">&quot;alt&quot;</span><span class="p">))</span>
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a>    <span class="p">)</span>
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>
+<a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="n">df_long</span> <span class="o">=</span> <span class="p">(</span>
+<a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a>    <span class="n">pl</span><span class="o">.</span><span class="n">concat</span><span class="p">(</span><span class="n">dfs</span><span class="p">)</span>
+<a id="__codelineno-0-27" name="__codelineno-0-27" href="#__codelineno-0-27"></a>      <span class="o">.</span><span class="n">filter</span><span class="p">(</span><span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;av&quot;</span><span class="p">)</span> <span class="o">==</span> <span class="mi">1</span><span class="p">)</span>        <span class="c1"># Drop unavailable alternatives</span>
+<a id="__codelineno-0-28" name="__codelineno-0-28" href="#__codelineno-0-28"></a>      <span class="o">.</span><span class="n">sort</span><span class="p">([</span><span class="s2">&quot;ID&quot;</span><span class="p">,</span> <span class="s2">&quot;qID&quot;</span><span class="p">,</span> <span class="s2">&quot;alt&quot;</span><span class="p">])</span>       <span class="c1"># Required: panel, then case, then alt</span>
+<a id="__codelineno-0-29" name="__codelineno-0-29" href="#__codelineno-0-29"></a><span class="p">)</span>
+<a id="__codelineno-0-30" name="__codelineno-0-30" href="#__codelineno-0-30"></a><span class="nb">print</span><span class="p">(</span><span class="n">df_long</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">8</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>shape: (8, 9)
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>┌─────┬─────┬────────┬────────┬───┬──────┬─────┬────────┬──────┐
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>│ ID  ┆ qID ┆ income ┆ female ┆ … ┆ cost ┆ av  ┆ choice ┆ alt  │
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>│ --- ┆ --- ┆ ---    ┆ ---    ┆   ┆ ---  ┆ --- ┆ ---    ┆ ---  │
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>│ i64 ┆ u32 ┆ i64    ┆ i64    ┆   ┆ i64  ┆ i64 ┆ bool   ┆ str  │
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>╞═════╪═════╪════════╪════════╪═══╪══════╪═════╪════════╪══════╡
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>│ 1   ┆ 0   ┆ 46705  ┆ 0      ┆ … ┆ 80   ┆ 1   ┆ false  ┆ air  │
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>│ 1   ┆ 0   ┆ 46705  ┆ 0      ┆ … ┆ 55   ┆ 1   ┆ true   ┆ rail │
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>│ 1   ┆ 1   ┆ 46705  ┆ 0      ┆ … ┆ 80   ┆ 1   ┆ false  ┆ air  │
+<a id="__codelineno-1-10" name="__codelineno-1-10" href="#__codelineno-1-10"></a>│ 1   ┆ 1   ┆ 46705  ┆ 0      ┆ … ┆ 45   ┆ 1   ┆ true   ┆ rail │
+<a id="__codelineno-1-11" name="__codelineno-1-11" href="#__codelineno-1-11"></a>│ 1   ┆ 2   ┆ 46705  ┆ 0      ┆ … ┆ 50   ┆ 1   ┆ false  ┆ air  │
+<a id="__codelineno-1-12" name="__codelineno-1-12" href="#__codelineno-1-12"></a>│ 1   ┆ 2   ┆ 46705  ┆ 0      ┆ … ┆ 35   ┆ 1   ┆ true   ┆ rail │
+<a id="__codelineno-1-13" name="__codelineno-1-13" href="#__codelineno-1-13"></a>│ 1   ┆ 3   ┆ 46705  ┆ 0      ┆ … ┆ 65   ┆ 1   ┆ false  ┆ air  │
+<a id="__codelineno-1-14" name="__codelineno-1-14" href="#__codelineno-1-14"></a>│ 1   ┆ 3   ┆ 46705  ┆ 0      ┆ … ┆ 75   ┆ 1   ┆ true   ┆ rail │
+<a id="__codelineno-1-15" name="__codelineno-1-15" href="#__codelineno-1-15"></a>└─────┴─────┴────────┴────────┴───┴──────┴─────┴────────┴──────┘
+</code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Why the availability filter matters</p>
+<p>Unless removed, an unavailable alternative still enters the denominator of
+the logit probability. That changes the choice set and biases the estimates.</p>
+</div>
+<h2 id="2-estimate-the-model">2. Estimate the model</h2>
+<p>We estimate three latent classes and treat fare as the numeraire, constraining its
+coefficient to be strictly negative through a softplus reparameterization. Formulaic
+uses familiar Wilkinson-style formulas to construct the utility and membership
+designs:</p>
+<ul>
+<li><code>C(alt)</code> creates alternative-specific constants for bus, car, and rail, with air
+  as the reference alternative. The fitted encoder preserves that coding during
+  prediction.</li>
+<li><code>C(income_band)</code> adds a categorical panel characteristic to the class-membership
+  model without manual indicator columns.</li>
+</ul>
+<p>We also attach presentation labels. They appear in printed tables and dedicated
+<code>label</code> columns, while formulas and programmatic lookups continue to use the raw
+variable names.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">lcl</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">lcl</span><span class="w"> </span><span class="kn">import</span> <span class="p">(</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a>    <span class="n">ChoiceIds</span><span class="p">,</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">FitOptions</span><span class="p">,</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">InferenceOptions</span><span class="p">,</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="n">LCLSpec</span><span class="p">,</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>    <span class="n">NegativeCoefficient</span><span class="p">,</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a>    <span class="n">Options</span><span class="p">,</span>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a>    <span class="n">OptimizationOptions</span><span class="p">,</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="p">)</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="c1"># A string categorical demographic; income is constant within a decision-maker.</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="n">df_long</span> <span class="o">=</span> <span class="n">df_long</span><span class="o">.</span><span class="n">with_columns</span><span class="p">(</span>
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a>    <span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;income&quot;</span><span class="p">)</span>
+<a id="__codelineno-2-15" name="__codelineno-2-15" href="#__codelineno-2-15"></a>      <span class="o">.</span><span class="n">qcut</span><span class="p">(</span><span class="mi">3</span><span class="p">,</span> <span class="n">labels</span><span class="o">=</span><span class="p">[</span><span class="s2">&quot;low&quot;</span><span class="p">,</span> <span class="s2">&quot;mid&quot;</span><span class="p">,</span> <span class="s2">&quot;high&quot;</span><span class="p">])</span>
+<a id="__codelineno-2-16" name="__codelineno-2-16" href="#__codelineno-2-16"></a>      <span class="o">.</span><span class="n">cast</span><span class="p">(</span><span class="n">pl</span><span class="o">.</span><span class="n">String</span><span class="p">)</span>
+<a id="__codelineno-2-17" name="__codelineno-2-17" href="#__codelineno-2-17"></a>      <span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s2">&quot;income_band&quot;</span><span class="p">)</span>
+<a id="__codelineno-2-18" name="__codelineno-2-18" href="#__codelineno-2-18"></a><span class="p">)</span>
+<a id="__codelineno-2-19" name="__codelineno-2-19" href="#__codelineno-2-19"></a>
+<a id="__codelineno-2-20" name="__codelineno-2-20" href="#__codelineno-2-20"></a><span class="n">spec</span> <span class="o">=</span> <span class="n">LCLSpec</span><span class="p">(</span>
+<a id="__codelineno-2-21" name="__codelineno-2-21" href="#__codelineno-2-21"></a>    <span class="n">ids</span><span class="o">=</span><span class="n">ChoiceIds</span><span class="p">(</span><span class="n">alt</span><span class="o">=</span><span class="s2">&quot;alt&quot;</span><span class="p">,</span> <span class="n">case</span><span class="o">=</span><span class="s2">&quot;qID&quot;</span><span class="p">,</span> <span class="n">panel</span><span class="o">=</span><span class="s2">&quot;ID&quot;</span><span class="p">,</span> <span class="n">choice</span><span class="o">=</span><span class="s2">&quot;choice&quot;</span><span class="p">),</span>
+<a id="__codelineno-2-22" name="__codelineno-2-22" href="#__codelineno-2-22"></a>    <span class="n">utility_formula</span><span class="o">=</span><span class="s2">&quot;choice ~ cost + time + C(alt)&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-23" name="__codelineno-2-23" href="#__codelineno-2-23"></a>    <span class="n">membership_formula</span><span class="o">=</span><span class="s2">&quot;~ C(income_band) + female&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-24" name="__codelineno-2-24" href="#__codelineno-2-24"></a>    <span class="n">classes</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+<a id="__codelineno-2-25" name="__codelineno-2-25" href="#__codelineno-2-25"></a>    <span class="n">constraints</span><span class="o">=</span><span class="p">{</span><span class="s2">&quot;cost&quot;</span><span class="p">:</span> <span class="n">NegativeCoefficient</span><span class="p">(</span><span class="n">units</span><span class="o">=</span><span class="s2">&quot;dollars&quot;</span><span class="p">)},</span>
+<a id="__codelineno-2-26" name="__codelineno-2-26" href="#__codelineno-2-26"></a>    <span class="n">variable_labels</span><span class="o">=</span><span class="p">{</span>
+<a id="__codelineno-2-27" name="__codelineno-2-27" href="#__codelineno-2-27"></a>        <span class="s2">&quot;cost&quot;</span><span class="p">:</span> <span class="s2">&quot;Fare&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-28" name="__codelineno-2-28" href="#__codelineno-2-28"></a>        <span class="s2">&quot;time&quot;</span><span class="p">:</span> <span class="s2">&quot;Travel time&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-29" name="__codelineno-2-29" href="#__codelineno-2-29"></a>        <span class="s2">&quot;alt&quot;</span><span class="p">:</span> <span class="s2">&quot;Travel mode&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-30" name="__codelineno-2-30" href="#__codelineno-2-30"></a>        <span class="s2">&quot;income_band&quot;</span><span class="p">:</span> <span class="s2">&quot;Household income band&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-31" name="__codelineno-2-31" href="#__codelineno-2-31"></a>        <span class="s2">&quot;female&quot;</span><span class="p">:</span> <span class="s2">&quot;Female traveler&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-32" name="__codelineno-2-32" href="#__codelineno-2-32"></a>    <span class="p">},</span>
+<a id="__codelineno-2-33" name="__codelineno-2-33" href="#__codelineno-2-33"></a><span class="p">)</span>
+<a id="__codelineno-2-34" name="__codelineno-2-34" href="#__codelineno-2-34"></a>
+<a id="__codelineno-2-35" name="__codelineno-2-35" href="#__codelineno-2-35"></a><span class="n">results</span> <span class="o">=</span> <span class="n">lcl</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-2-36" name="__codelineno-2-36" href="#__codelineno-2-36"></a>    <span class="n">df_long</span><span class="p">,</span>
+<a id="__codelineno-2-37" name="__codelineno-2-37" href="#__codelineno-2-37"></a>    <span class="n">spec</span><span class="p">,</span>
+<a id="__codelineno-2-38" name="__codelineno-2-38" href="#__codelineno-2-38"></a>    <span class="n">options</span><span class="o">=</span><span class="n">Options</span><span class="p">(</span>
+<a id="__codelineno-2-39" name="__codelineno-2-39" href="#__codelineno-2-39"></a>        <span class="n">fit</span><span class="o">=</span><span class="n">FitOptions</span><span class="p">(</span>
+<a id="__codelineno-2-40" name="__codelineno-2-40" href="#__codelineno-2-40"></a>            <span class="n">seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span>
+<a id="__codelineno-2-41" name="__codelineno-2-41" href="#__codelineno-2-41"></a>            <span class="n">starts</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+<a id="__codelineno-2-42" name="__codelineno-2-42" href="#__codelineno-2-42"></a>            <span class="n">max_em_iter</span><span class="o">=</span><span class="mi">60</span><span class="p">,</span>
+<a id="__codelineno-2-43" name="__codelineno-2-43" href="#__codelineno-2-43"></a>            <span class="n">num_devices</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span>
+<a id="__codelineno-2-44" name="__codelineno-2-44" href="#__codelineno-2-44"></a>        <span class="p">),</span>
+<a id="__codelineno-2-45" name="__codelineno-2-45" href="#__codelineno-2-45"></a>        <span class="n">optimization</span><span class="o">=</span><span class="n">OptimizationOptions</span><span class="p">(</span><span class="n">maxiter</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span> <span class="n">gradient_tol</span><span class="o">=</span><span class="mf">1e-5</span><span class="p">),</span>
+<a id="__codelineno-2-46" name="__codelineno-2-46" href="#__codelineno-2-46"></a>        <span class="n">inference</span><span class="o">=</span><span class="n">InferenceOptions</span><span class="p">(</span><span class="n">covariance</span><span class="o">=</span><span class="s2">&quot;clustered&quot;</span><span class="p">),</span>
+<a id="__codelineno-2-47" name="__codelineno-2-47" href="#__codelineno-2-47"></a>    <span class="p">),</span>
+<a id="__codelineno-2-48" name="__codelineno-2-48" href="#__codelineno-2-48"></a><span class="p">)</span>
+<a id="__codelineno-2-49" name="__codelineno-2-49" href="#__codelineno-2-49"></a>
+<a id="__codelineno-2-50" name="__codelineno-2-50" href="#__codelineno-2-50"></a><span class="n">summary</span> <span class="o">=</span> <span class="n">results</span><span class="o">.</span><span class="n">summarize_betas</span><span class="p">()</span>
+<a id="__codelineno-2-51" name="__codelineno-2-51" href="#__codelineno-2-51"></a><span class="nb">print</span><span class="p">(</span><span class="n">results</span><span class="p">)</span>
+</code></pre></div>
+<p><code>max_em_iter</code> is a hard cap on all complete EM recursions, including the strict
+final-refit phase. The estimator reserves one recursion for that phase. If the
+strict recursion moves the relative log likelihood by more than <code>em_tol</code>, it keeps
+running EM with the stricter M-step settings until a consecutive strict recursion
+moves by at most <code>em_tol</code> or the remaining recursion budget is exhausted. This
+usually adds only a few recursions near the optimum while preventing a loose
+M-step convergence check from being reported as final convergence.</p>
+<p>Representative output (the exact optimum can vary with the JAX version and
+available hardware):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>--- LaTeX Output ---
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>\toprule
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>Variable &amp; Means (\beta&#39;s) &amp; Standard deviations (\sigma&#39;s) \\
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>\midrule
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>%
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>Fare &amp; -0.061 &amp; 0.024 \\
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a> &amp; (0.002) &amp; (0.002) \\
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a>Travel time &amp; -0.011 &amp; 0.001 \\
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a> &amp; (0.001) &amp; (0.001) \\
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>Travel mode: bus &amp; -1.749 &amp; 1.371 \\
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a> &amp; (0.229) &amp; (0.313) \\
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>Travel mode: car &amp; 1.085 &amp; 0.742 \\
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a> &amp; (0.130) &amp; (0.150) \\
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>Travel mode: rail &amp; 0.418 &amp; 0.321 \\
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a> &amp; (0.057) &amp; (0.066) \\
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>%
+<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>\bottomrule
+<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>
+<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>--- Table preview ---
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>
+<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>┌───────────────────┬───────────────┬─────────────────────────────┐
+<a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>│ Variable          │ Means (β&#39;s)   │ Standard deviations (σ&#39;s)   │
+<a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>├───────────────────┼───────────────┼─────────────────────────────┤
+<a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>│ Fare              │ -0.061        │ 0.024                       │
+<a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>│                   │ (0.002)       │ (0.002)                     │
+<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>│ Travel time       │ -0.011        │ 0.001                       │
+<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>│                   │ (0.001)       │ (0.001)                     │
+<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>│ Travel mode: bus  │ -1.749        │ 1.371                       │
+<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>│                   │ (0.229)       │ (0.313)                     │
+<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>│ Travel mode: car  │ 1.085         │ 0.742                       │
+<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>│                   │ (0.130)       │ (0.150)                     │
+<a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a>│ Travel mode: rail │ 0.418         │ 0.321                       │
+<a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>│                   │ (0.057)       │ (0.066)                     │
+<a id="__codelineno-3-35" name="__codelineno-3-35" href="#__codelineno-3-35"></a>└───────────────────┴───────────────┴─────────────────────────────┘
+<a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a>
+<a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a>&lt;LCLResults: 3 Classes | Converged | Log likelihood: -6413.8 | CAIC: 12993.6 | BIC: 12970.6 | Adj. BIC: 12897.6&gt;
+</code></pre></div>
+<div class="admonition note">
+<p class="admonition-title">Formulas or explicit lists?</p>
+<p><code>LCLSpec</code> also accepts <code>utility=[...]</code> and <code>membership=[...]</code> when the input
+columns are already model-ready. Use formulas for categorical expansion,
+interactions, or transformations. Keep utility and class-membership designs
+in their separate fields so each design remains easy to audit and reuse.</p>
+</div>
+<div class="admonition tip">
+<p class="admonition-title">Use several starts for reported mixture models</p>
+<p><code>FitOptions(starts=3, seed=42)</code> runs three independent panel-partition starts
+with seeds 42, 43, and 44, then refits the best start with the requested
+inference settings. Increase <code>starts</code> for consequential analyses.</p>
+</div>
+<div class="admonition tip">
+<p class="admonition-title">Watching the EM iterations</p>
+<p>LCL sends iterative progress to Python's <code>logging</code> module. Enable it with
+<code>logging.basicConfig(level=logging.INFO)</code> when you need the full optimization
+trace. Fitting does not write timing messages directly to standard output.</p>
+</div>
+<p><code>summarize_betas()</code> reports the share-weighted mean and standard deviation of each
+structural coefficient, with delta-method standard errors in parentheses. The table
+uses labels such as <strong>Travel mode: bus</strong>; the returned frame also retains Formulaic's
+raw name, <code>C(alt)[T.bus]</code>. Use <code>results.class_coefficients()</code> for class-specific
+coefficients and <code>results.class_shares()</code> for the estimated class composition.
+In a pipeline that provides its own display, use
+<code>results.summarize_betas(show=False)</code> (or the <code>results.summarize(show=False)</code>
+alias) to obtain the same frame without printing LaTeX and terminal tables.</p>
+<h2 id="3-inspect-the-fit-with-the-diagnostic-tools">3. Inspect the fit with the diagnostic tools</h2>
+<p>Before interpreting the estimates, inspect the built-in diagnostics.
+<code>results.diagnostics()</code> returns structured fit, data, class, and coefficient checks.
+Use <code>.print()</code> for a readable table or <code>.to_frame()</code> for programmatic validation.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="n">results</span><span class="o">.</span><span class="n">diagnostics</span><span class="p">()</span><span class="o">.</span><span class="n">print</span><span class="p">()</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>section       check                   status           value  message
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>------------  ----------------------  --------  ------------  ----------------------------------------------------------
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>fit           converged               ok            1         EM convergence flag.
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>fit           log_likelihood          ok        -6413.84      Final unconditional log likelihood.
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>fit           observed_score_max      ok            2.1e-07   Maximum absolute final observed-data score.
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>data          panels                  ok          500         Number of decision-maker panels.
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>data          cases                   ok         8000         Number of choice situations.
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>latent_class  posterior_entropy_mean  ok            0.27833   Mean entropy of posterior class membership.
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>latent_class  min_class_share         ok            0.241938  Small classes can indicate weakly identified local optima.
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>latent_class  min_effective_panels    ok          120.969     Smallest posterior panel mass across classes.
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>coefficients  max_abs_beta            ok            3.74783   Largest absolute structural coefficient.
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a>coefficients  min_abs_numeraire       ok            0.035545  Small numeraires can dominate WTP/tradeoff ratios.
+</code></pre></div>
+<p>Configure warning thresholds with <code>DiagnosticsOptions</code> at fit time. For example,
+<code>DiagnosticsOptions(large_coefficient_threshold=10.0)</code> changes the large-coefficient
+check. <code>convergence_report()</code> provides a compact optimization summary:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nb">print</span><span class="p">(</span><span class="n">results</span><span class="o">.</span><span class="n">convergence_report</span><span class="p">())</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>Converged: True
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>EM recursions: 30
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>Final log likelihood: -6413.84
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>Warnings: 0
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>Last EM history row: {&#39;em_iter&#39;: 30, &#39;loglik&#39;: -6413.840782946274, &#39;class_0_share&#39;: 0.45298103347438456, &#39;class_1_share&#39;: 0.24193776632753392, &#39;class_2_share&#39;: 0.3050812001980814}
+</code></pre></div>
+<p><code>class_shares()</code> reports each class's aggregate share, its delta-method standard
+error, and posterior panel mass. <code>class_coefficients()</code> returns structural
+coefficients and their class-specific standard errors. Membership logits use class
+0 as the reference and are available from <code>membership_coefficients()</code>.
+<code>classification_diagnostics()</code> reports modal class sizes, average posterior
+probabilities, odds of correct classification, and entropy R-squared. Treat these
+as separation diagnostics rather than a class-count objective: near-degenerate
+extra classes can make entropy look deceptively strong.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="nb">print</span><span class="p">(</span><span class="n">results</span><span class="o">.</span><span class="n">class_shares</span><span class="p">())</span>
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">results</span><span class="o">.</span><span class="n">class_coefficients</span><span class="p">())</span>
+<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="nb">print</span><span class="p">(</span><span class="n">results</span><span class="o">.</span><span class="n">membership_coefficients</span><span class="p">())</span>
+<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="nb">print</span><span class="p">(</span><span class="n">results</span><span class="o">.</span><span class="n">classification_diagnostics</span><span class="p">())</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>shape: (3, 4)
+<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a>┌───────┬──────────┬─────────────┬──────────────────┐
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>│ class ┆ share    ┆ std_error   ┆ effective_panels │
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a>│ ---   ┆ ---      ┆ ---              │
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a>│ i64   ┆ f64      ┆ f64              │
+<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a>╞═══════╪══════════╪══════════════════╡
+<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>│ 0     ┆ 0.452981 ┆ 226.490521       │
+<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a>│ 1     ┆ 0.241938 ┆ 120.968878       │
+<a id="__codelineno-9-9" name="__codelineno-9-9" href="#__codelineno-9-9"></a>│ 2     ┆ 0.305081 ┆ 152.5406         │
+<a id="__codelineno-9-10" name="__codelineno-9-10" href="#__codelineno-9-10"></a>└───────┴──────────┴──────────────────┘
+<a id="__codelineno-9-11" name="__codelineno-9-11" href="#__codelineno-9-11"></a>shape: (15, 6)
+<a id="__codelineno-9-12" name="__codelineno-9-12" href="#__codelineno-9-12"></a>┌────────────────┬───────────────────┬───────┬─────────────┬───────────┬─────────────┐
+<a id="__codelineno-9-13" name="__codelineno-9-13" href="#__codelineno-9-13"></a>│ variable       ┆ label             ┆ class ┆ coefficient ┆ std_error ┆ constrained │
+<a id="__codelineno-9-14" name="__codelineno-9-14" href="#__codelineno-9-14"></a>│ ---            ┆ ---               ┆ ---   ┆ ---         ┆ ---         │
+<a id="__codelineno-9-15" name="__codelineno-9-15" href="#__codelineno-9-15"></a>│ str            ┆ str               ┆ i64   ┆ f64         ┆ bool        │
+<a id="__codelineno-9-16" name="__codelineno-9-16" href="#__codelineno-9-16"></a>╞════════════════╪═══════════════════╪═══════╪═════════════╪═════════════╡
+<a id="__codelineno-9-17" name="__codelineno-9-17" href="#__codelineno-9-17"></a>│ cost           ┆ Fare              ┆ 0     ┆ -0.056118   ┆ true        │
+<a id="__codelineno-9-18" name="__codelineno-9-18" href="#__codelineno-9-18"></a>│ cost           ┆ Fare              ┆ 1     ┆ -0.10024    ┆ true        │
+<a id="__codelineno-9-19" name="__codelineno-9-19" href="#__codelineno-9-19"></a>│ cost           ┆ Fare              ┆ 2     ┆ -0.035545   ┆ true        │
+<a id="__codelineno-9-20" name="__codelineno-9-20" href="#__codelineno-9-20"></a>│ time           ┆ Travel time       ┆ 0     ┆ -0.010986   ┆ false       │
+<a id="__codelineno-9-21" name="__codelineno-9-21" href="#__codelineno-9-21"></a>│ time           ┆ Travel time       ┆ 1     ┆ -0.013059   ┆ false       │
+<a id="__codelineno-9-22" name="__codelineno-9-22" href="#__codelineno-9-22"></a>│ …              ┆ …                 ┆ …     ┆ …           ┆ …           │
+<a id="__codelineno-9-23" name="__codelineno-9-23" href="#__codelineno-9-23"></a>│ C(alt)[T.car]  ┆ Travel mode: car  ┆ 1     ┆ 2.061444    ┆ false       │
+<a id="__codelineno-9-24" name="__codelineno-9-24" href="#__codelineno-9-24"></a>│ C(alt)[T.car]  ┆ Travel mode: car  ┆ 2     ┆ 0.07853     ┆ false       │
+<a id="__codelineno-9-25" name="__codelineno-9-25" href="#__codelineno-9-25"></a>│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 0     ┆ 0.418737    ┆ false       │
+<a id="__codelineno-9-26" name="__codelineno-9-26" href="#__codelineno-9-26"></a>│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 1     ┆ 0.904207    ┆ false       │
+<a id="__codelineno-9-27" name="__codelineno-9-27" href="#__codelineno-9-27"></a>│ C(alt)[T.rail] ┆ Travel mode: rail ┆ 2     ┆ 0.031596    ┆ false       │
+<a id="__codelineno-9-28" name="__codelineno-9-28" href="#__codelineno-9-28"></a>└────────────────┴───────────────────┴───────┴─────────────┴─────────────┘
+</code></pre></div>
+<p>The class-specific estimates reveal heterogeneity that population averages conceal.
+<code>results.audit_report()</code> combines the specification, fit statistics, class shares,
+and diagnostics in a text report. <code>results.em_history_</code> and
+<code>results.optimization_history_</code> expose iteration histories as Polars frames.</p>
+<h2 id="score-observed-choices-without-refitting">Score observed choices without refitting</h2>
+<p>Use <code>loglik</code> to evaluate a validation or test sample with the fitted model. The
+method reuses the training encoder, including Formulaic's categorical levels and
+expanded column order.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="n">validation_ll</span> <span class="o">=</span> <span class="n">results</span><span class="o">.</span><span class="n">loglik</span><span class="p">(</span><span class="n">validation_long</span><span class="p">)</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="n">validation_by_panel</span> <span class="o">=</span> <span class="n">results</span><span class="o">.</span><span class="n">loglik</span><span class="p">(</span><span class="n">validation_long</span><span class="p">,</span> <span class="n">per_panel</span><span class="o">=</span><span class="kc">True</span><span class="p">)</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="nb">print</span><span class="p">(</span><span class="n">validation_ll</span><span class="p">)</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="nb">print</span><span class="p">(</span><span class="n">validation_by_panel</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">3</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>-1927.846
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a>shape: (3, 2)
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a>┌───────┬────────────────┐
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>│ panel ┆ log_likelihood │
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a>│ ---   ┆ ---            │
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a>│ i64   ┆ f64            │
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a>╞═══════╪════════════════╡
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a>│ 12    ┆ -11.4902       │
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a>│ 27    ┆ -13.0018       │
+<a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>│ 31    ┆ -10.7725       │
+<a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a>└───────┴────────────────┘
+</code></pre></div>
+<p>The numbers above are illustrative; the returned <code>panel</code> column always contains
+the original panel IDs. An unseen categorical level produces Formulaic's warning
+instead of being silently assigned a different code.</p>
+<h2 id="4-a-counterfactual-fare-increase-conditioned-on-observed-choices">4. A counterfactual fare increase, conditioned on observed choices</h2>
+<p>Suppose bus and rail fares rise by 25%. <code>predict</code> reuses the fitted encoder, so the
+counterfactual requires only a modified DataFrame. Passing <code>past_choices</code> updates
+each decision-maker's demographic class prior with an observed choice history. We
+use the estimation choices here; an applied analysis might supply a separate
+pre-policy history.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="n">cf_df</span> <span class="o">=</span> <span class="n">df_long</span><span class="o">.</span><span class="n">with_columns</span><span class="p">(</span>
+<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a>    <span class="n">pl</span><span class="o">.</span><span class="n">when</span><span class="p">(</span><span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;alt&quot;</span><span class="p">)</span><span class="o">.</span><span class="n">is_in</span><span class="p">([</span><span class="s2">&quot;bus&quot;</span><span class="p">,</span> <span class="s2">&quot;rail&quot;</span><span class="p">]))</span>
+<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a>      <span class="o">.</span><span class="n">then</span><span class="p">(</span><span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;cost&quot;</span><span class="p">)</span> <span class="o">*</span> <span class="mf">1.25</span><span class="p">)</span>
+<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a>      <span class="o">.</span><span class="n">otherwise</span><span class="p">(</span><span class="n">pl</span><span class="o">.</span><span class="n">col</span><span class="p">(</span><span class="s2">&quot;cost&quot;</span><span class="p">))</span>
+<a id="__codelineno-12-5" name="__codelineno-12-5" href="#__codelineno-12-5"></a>      <span class="o">.</span><span class="n">alias</span><span class="p">(</span><span class="s2">&quot;cost&quot;</span><span class="p">)</span>
+<a id="__codelineno-12-6" name="__codelineno-12-6" href="#__codelineno-12-6"></a><span class="p">)</span>
+<a id="__codelineno-12-7" name="__codelineno-12-7" href="#__codelineno-12-7"></a>
+<a id="__codelineno-12-8" name="__codelineno-12-8" href="#__codelineno-12-8"></a><span class="n">prediction</span> <span class="o">=</span> <span class="n">results</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">data</span><span class="o">=</span><span class="n">cf_df</span><span class="p">,</span> <span class="n">past_choices</span><span class="o">=</span><span class="n">df_long</span><span class="p">)</span>
+<a id="__codelineno-12-9" name="__codelineno-12-9" href="#__codelineno-12-9"></a><span class="nb">print</span><span class="p">(</span><span class="n">prediction</span><span class="o">.</span><span class="n">predicted_probs</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">8</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>shape: (8, 4)
+<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a>┌────────┬───────┬──────┬──────────────┐
+<a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a>│ panels ┆ cases ┆ alts ┆ choice_probs │
+<a id="__codelineno-13-4" name="__codelineno-13-4" href="#__codelineno-13-4"></a>│ ---    ┆ ---   ┆ ---  ┆ ---          │
+<a id="__codelineno-13-5" name="__codelineno-13-5" href="#__codelineno-13-5"></a>│ i64    ┆ u32   ┆ str  ┆ f64          │
+<a id="__codelineno-13-6" name="__codelineno-13-6" href="#__codelineno-13-6"></a>╞════════╪═══════╪══════╪══════════════╡
+<a id="__codelineno-13-7" name="__codelineno-13-7" href="#__codelineno-13-7"></a>│ 1      ┆ 0     ┆ air  ┆ 0.369339     │
+<a id="__codelineno-13-8" name="__codelineno-13-8" href="#__codelineno-13-8"></a>│ 1      ┆ 0     ┆ rail ┆ 0.630661     │
+<a id="__codelineno-13-9" name="__codelineno-13-9" href="#__codelineno-13-9"></a>│ 1      ┆ 1     ┆ air  ┆ 0.205966     │
+<a id="__codelineno-13-10" name="__codelineno-13-10" href="#__codelineno-13-10"></a>│ 1      ┆ 1     ┆ rail ┆ 0.794034     │
+<a id="__codelineno-13-11" name="__codelineno-13-11" href="#__codelineno-13-11"></a>│ 1      ┆ 2     ┆ air  ┆ 0.556787     │
+<a id="__codelineno-13-12" name="__codelineno-13-12" href="#__codelineno-13-12"></a>│ 1      ┆ 2     ┆ rail ┆ 0.443213     │
+<a id="__codelineno-13-13" name="__codelineno-13-13" href="#__codelineno-13-13"></a>│ 1      ┆ 3     ┆ air  ┆ 0.879016     │
+<a id="__codelineno-13-14" name="__codelineno-13-14" href="#__codelineno-13-14"></a>│ 1      ┆ 3     ┆ rail ┆ 0.120984     │
+<a id="__codelineno-13-15" name="__codelineno-13-15" href="#__codelineno-13-15"></a>└────────┴───────┴──────┴──────────────┘
+</code></pre></div>
+<p>The resulting <code>prediction.class_probs_by_panel</code> contains the updated class
+probabilities used for choice probabilities, elasticities, and welfare measures.
+Callers who already manage encoded arrays may pass <code>PastChoicesData</code> instead of a
+DataFrame.</p>
+<p><code>past_choices</code> must contain exactly the same panel IDs as the counterfactual data.
+LCL validates that set before matching posterior class probabilities to prediction
+panels, preventing silent reassignment when one input contains missing or extra
+decision-makers.</p>
+<p><code>LCLPrediction</code> also reports expected consumer surplus by choice situation and a
+panel-level willingness-to-pay frame for downstream welfare analysis. The surplus
+frame labels its units as <code>money</code> when a numeraire exists and <code>utils</code> otherwise.
+Utility levels depend on normalization; compute an identified change with
+<code>baseline_prediction.surplus_change(counterfactual_prediction)</code>.</p>
+<div class="admonition tip">
+<p class="admonition-title">Prefer tabular prediction when possible</p>
+<p><code>results.predict(data=...)</code> is the safest interface because the fitted encoder
+aligns formulas and panel characteristics. For array-style prediction, pass
+<code>dem_panel_ids</code> alongside <code>dems</code>; LCL validates and reorders the demographic
+rows. Without IDs, demographic rows must follow sorted unique panel-ID order.
+A demographic membership model cannot be predicted without <code>dems</code>. The same
+alignment rule applies to <code>PastChoicesData(dems=..., dem_panel_ids=...)</code>.</p>
+</div>
+<h2 id="5-elasticities">5. Elasticities</h2>
+<p>LCL computes own- and cross-elasticities for every pair of alternatives in each
+choice situation.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="n">elast_df</span> <span class="o">=</span> <span class="n">prediction</span><span class="o">.</span><span class="n">elasticities</span><span class="p">([</span><span class="s2">&quot;cost&quot;</span><span class="p">,</span> <span class="s2">&quot;time&quot;</span><span class="p">])</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">elast_df</span><span class="o">.</span><span class="n">head</span><span class="p">(</span><span class="mi">8</span><span class="p">))</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>shape: (8, 6)
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a>┌────────┬───────┬──────┬─────────────┬─────────────────┬─────────────────┐
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a>│ panels ┆ cases ┆ alts ┆ target_alts ┆ elasticity_cost ┆ elasticity_time │
+<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a>│ ---    ┆ ---   ┆ ---  ┆ ---         ┆ ---             ┆ ---             │
+<a id="__codelineno-15-5" name="__codelineno-15-5" href="#__codelineno-15-5"></a>│ i64    ┆ u32   ┆ str  ┆ str         ┆ f64             ┆ f64             │
+<a id="__codelineno-15-6" name="__codelineno-15-6" href="#__codelineno-15-6"></a>╞════════╪═══════╪══════╪═════════════╪═════════════════╪═════════════════╡
+<a id="__codelineno-15-7" name="__codelineno-15-7" href="#__codelineno-15-7"></a>│ 1      ┆ 0     ┆ air  ┆ air         ┆ -3.966785       ┆ -0.370332       │
+<a id="__codelineno-15-8" name="__codelineno-15-8" href="#__codelineno-15-8"></a>│ 1      ┆ 0     ┆ air  ┆ rail        ┆ 3.408956        ┆ 1.036931        │
+<a id="__codelineno-15-9" name="__codelineno-15-9" href="#__codelineno-15-9"></a>│ 1      ┆ 0     ┆ rail ┆ air         ┆ 2.323102        ┆ 0.216881        │
+<a id="__codelineno-15-10" name="__codelineno-15-10" href="#__codelineno-15-10"></a>│ 1      ┆ 0     ┆ rail ┆ rail        ┆ -1.996415       ┆ -0.607266       │
+<a id="__codelineno-15-11" name="__codelineno-15-11" href="#__codelineno-15-11"></a>│ 1      ┆ 1     ┆ air  ┆ air         ┆ -4.431907       ┆ -0.612719       │
+<a id="__codelineno-15-12" name="__codelineno-15-12" href="#__codelineno-15-12"></a>│ 1      ┆ 1     ┆ air  ┆ rail        ┆ 3.116184        ┆ 1.488032        │
+<a id="__codelineno-15-13" name="__codelineno-15-13" href="#__codelineno-15-13"></a>│ 1      ┆ 1     ┆ rail ┆ air         ┆ 1.149604        ┆ 0.158935        │
+<a id="__codelineno-15-14" name="__codelineno-15-14" href="#__codelineno-15-14"></a>│ 1      ┆ 1     ┆ rail ┆ rail        ┆ -0.808315       ┆ -0.385984       │
+<a id="__codelineno-15-15" name="__codelineno-15-15" href="#__codelineno-15-15"></a>└────────┴───────┴──────┴─────────────┴─────────────────┴─────────────────┘
+</code></pre></div>
+<p><code>alts</code> identifies the alternative whose probability changes; <code>target_alts</code> identifies
+the alternative whose attribute changes. Rows where the two are equal contain own
+elasticities, and the remaining rows contain cross-elasticities. The calculation uses
+the stored posterior class probabilities.</p>
+<p>Do not take a plain mean of row elasticities. <code>aggregate_elasticities()</code> weights
+each affected row by its predicted demand contribution, yielding the elasticity
+of aggregate demand. Optional panel weights are resolved when prediction is made:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="n">weighted_prediction</span> <span class="o">=</span> <span class="n">results</span><span class="o">.</span><span class="n">predict</span><span class="p">(</span><span class="n">cf_df</span><span class="p">,</span> <span class="n">panel_weights</span><span class="o">=</span><span class="s2">&quot;survey_weight&quot;</span><span class="p">)</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">weighted_prediction</span><span class="o">.</span><span class="n">market_shares</span><span class="p">())</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="nb">print</span><span class="p">(</span><span class="n">weighted_prediction</span><span class="o">.</span><span class="n">aggregate_elasticities</span><span class="p">([</span><span class="s2">&quot;cost&quot;</span><span class="p">,</span> <span class="s2">&quot;time&quot;</span><span class="p">]))</span>
+</code></pre></div>
+<h2 id="6-marginal-willingness-to-pay">6. Marginal willingness-to-pay</h2>
+<p>Because <code>cost</code> is the numeraire, LCL computes the value of travel time as
+<span class="arithmatex">\(-\beta_{\text{time}}/\beta_{\text{cost}}\)</span>. We summarize it by income band and
+gender. The raw <code>income_band</code> column remains available for grouping even though
+Formulaic expands it internally for estimation.</p>
+<p>Because <code>prediction</code> stores choice-updated probabilities, we request
+<code>class_probabilities="prior"</code> for this population summary. Delta-method standard
+errors currently propagate through the demographic prior, not through the posterior
+update. Use <code>se="none"</code> to weight point estimates by stored posteriors.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">lcl</span><span class="w"> </span><span class="kn">import</span> <span class="n">PartitionType</span><span class="p">,</span> <span class="n">WTPRequest</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a>
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="n">wtp_tables</span> <span class="o">=</span> <span class="n">prediction</span><span class="o">.</span><span class="n">compute_wtp</span><span class="p">(</span>
+<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a>    <span class="n">WTPRequest</span><span class="p">(</span><span class="n">alt_var</span><span class="o">=</span><span class="s2">&quot;time&quot;</span><span class="p">,</span> <span class="n">demographic_var</span><span class="o">=</span><span class="s2">&quot;income_band&quot;</span><span class="p">,</span>
+<a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a>               <span class="n">partition_type</span><span class="o">=</span><span class="n">PartitionType</span><span class="o">.</span><span class="n">CATEGORICAL</span><span class="p">),</span>
+<a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a>    <span class="n">WTPRequest</span><span class="p">(</span><span class="n">alt_var</span><span class="o">=</span><span class="s2">&quot;time&quot;</span><span class="p">,</span> <span class="n">demographic_var</span><span class="o">=</span><span class="s2">&quot;female&quot;</span><span class="p">,</span>
+<a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a>               <span class="n">partition_type</span><span class="o">=</span><span class="n">PartitionType</span><span class="o">.</span><span class="n">CATEGORICAL</span><span class="p">),</span>
+<a id="__codelineno-17-8" name="__codelineno-17-8" href="#__codelineno-17-8"></a>    <span class="n">class_probabilities</span><span class="o">=</span><span class="s2">&quot;prior&quot;</span><span class="p">,</span>
+<a id="__codelineno-17-9" name="__codelineno-17-9" href="#__codelineno-17-9"></a>    <span class="n">se</span><span class="o">=</span><span class="s2">&quot;bootstrap&quot;</span><span class="p">,</span>
+<a id="__codelineno-17-10" name="__codelineno-17-10" href="#__codelineno-17-10"></a>    <span class="n">bootstrap_draws</span><span class="o">=</span><span class="mi">1_000</span><span class="p">,</span>
+<a id="__codelineno-17-11" name="__codelineno-17-11" href="#__codelineno-17-11"></a><span class="p">)</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>Marginal WTP for Travel time by Household income band (categorical)
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>--- LaTeX Output ---
+<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a>
+<a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a>\toprule
+<a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a>Household income band &amp; Mean marginal WTP \\
+<a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a>\midrule
+<a id="__codelineno-18-8" name="__codelineno-18-8" href="#__codelineno-18-8"></a>%
+<a id="__codelineno-18-9" name="__codelineno-18-9" href="#__codelineno-18-9"></a>mid &amp; -0.2173 \\
+<a id="__codelineno-18-10" name="__codelineno-18-10" href="#__codelineno-18-10"></a> &amp; (0.0124) \\
+<a id="__codelineno-18-11" name="__codelineno-18-11" href="#__codelineno-18-11"></a>...
+<a id="__codelineno-18-12" name="__codelineno-18-12" href="#__codelineno-18-12"></a>%
+<a id="__codelineno-18-13" name="__codelineno-18-13" href="#__codelineno-18-13"></a>\bottomrule
+<a id="__codelineno-18-14" name="__codelineno-18-14" href="#__codelineno-18-14"></a>
+<a id="__codelineno-18-15" name="__codelineno-18-15" href="#__codelineno-18-15"></a>--- Table preview ---
+<a id="__codelineno-18-16" name="__codelineno-18-16" href="#__codelineno-18-16"></a>
+<a id="__codelineno-18-17" name="__codelineno-18-17" href="#__codelineno-18-17"></a>┌─────────────────────────┬─────────────────────┐
+<a id="__codelineno-18-18" name="__codelineno-18-18" href="#__codelineno-18-18"></a>│ Household income band   │ Mean marginal WTP   │
+<a id="__codelineno-18-19" name="__codelineno-18-19" href="#__codelineno-18-19"></a>├─────────────────────────┼─────────────────────┤
+<a id="__codelineno-18-20" name="__codelineno-18-20" href="#__codelineno-18-20"></a>│ mid                     │ -0.2173             │
+<a id="__codelineno-18-21" name="__codelineno-18-21" href="#__codelineno-18-21"></a>│                         │ (0.0124)            │
+<a id="__codelineno-18-22" name="__codelineno-18-22" href="#__codelineno-18-22"></a>│ high                    │ -0.2421             │
+<a id="__codelineno-18-23" name="__codelineno-18-23" href="#__codelineno-18-23"></a>│                         │ (0.0158)            │
+<a id="__codelineno-18-24" name="__codelineno-18-24" href="#__codelineno-18-24"></a>│ low                     │ -0.1818             │
+<a id="__codelineno-18-25" name="__codelineno-18-25" href="#__codelineno-18-25"></a>│                         │ (0.0114)            │
+<a id="__codelineno-18-26" name="__codelineno-18-26" href="#__codelineno-18-26"></a>└─────────────────────────┴─────────────────────┘
+<a id="__codelineno-18-27" name="__codelineno-18-27" href="#__codelineno-18-27"></a>
+<a id="__codelineno-18-28" name="__codelineno-18-28" href="#__codelineno-18-28"></a>Marginal WTP for Travel time by Female traveler (categorical)
+<a id="__codelineno-18-29" name="__codelineno-18-29" href="#__codelineno-18-29"></a>
+<a id="__codelineno-18-30" name="__codelineno-18-30" href="#__codelineno-18-30"></a>--- LaTeX Output ---
+<a id="__codelineno-18-31" name="__codelineno-18-31" href="#__codelineno-18-31"></a>
+<a id="__codelineno-18-32" name="__codelineno-18-32" href="#__codelineno-18-32"></a>\toprule
+<a id="__codelineno-18-33" name="__codelineno-18-33" href="#__codelineno-18-33"></a>Female traveler &amp; Mean marginal WTP \\
+<a id="__codelineno-18-34" name="__codelineno-18-34" href="#__codelineno-18-34"></a>\midrule
+<a id="__codelineno-18-35" name="__codelineno-18-35" href="#__codelineno-18-35"></a>%
+<a id="__codelineno-18-36" name="__codelineno-18-36" href="#__codelineno-18-36"></a>0.0 &amp; -0.2120 \\
+<a id="__codelineno-18-37" name="__codelineno-18-37" href="#__codelineno-18-37"></a> &amp; (0.0118) \\
+<a id="__codelineno-18-38" name="__codelineno-18-38" href="#__codelineno-18-38"></a>1.0 &amp; -0.2165 \\
+<a id="__codelineno-18-39" name="__codelineno-18-39" href="#__codelineno-18-39"></a> &amp; (0.0122) \\
+<a id="__codelineno-18-40" name="__codelineno-18-40" href="#__codelineno-18-40"></a>%
+<a id="__codelineno-18-41" name="__codelineno-18-41" href="#__codelineno-18-41"></a>\bottomrule
+<a id="__codelineno-18-42" name="__codelineno-18-42" href="#__codelineno-18-42"></a>
+<a id="__codelineno-18-43" name="__codelineno-18-43" href="#__codelineno-18-43"></a>--- Table preview ---
+<a id="__codelineno-18-44" name="__codelineno-18-44" href="#__codelineno-18-44"></a>
+<a id="__codelineno-18-45" name="__codelineno-18-45" href="#__codelineno-18-45"></a>┌───────────────────┬─────────────────────┐
+<a id="__codelineno-18-46" name="__codelineno-18-46" href="#__codelineno-18-46"></a>│   Female traveler │ Mean marginal WTP   │
+<a id="__codelineno-18-47" name="__codelineno-18-47" href="#__codelineno-18-47"></a>├───────────────────┼─────────────────────┤
+<a id="__codelineno-18-48" name="__codelineno-18-48" href="#__codelineno-18-48"></a>│            0.0000 │ -0.2120             │
+<a id="__codelineno-18-49" name="__codelineno-18-49" href="#__codelineno-18-49"></a>│                   │ (0.0118)            │
+<a id="__codelineno-18-50" name="__codelineno-18-50" href="#__codelineno-18-50"></a>│            1.0000 │ -0.2165             │
+<a id="__codelineno-18-51" name="__codelineno-18-51" href="#__codelineno-18-51"></a>│                   │ (0.0122)            │
+<a id="__codelineno-18-52" name="__codelineno-18-52" href="#__codelineno-18-52"></a>└───────────────────┴─────────────────────┘
+</code></pre></div>
+<p>Categorical groups retain their first-observed order. Numeric quintiles and custom
+break partitions are returned in numeric bin order. Tied values are never split;
+when five groups are not attainable, the output reports the actual number of
+quantile groups. Each WTP row includes <code>Panel_Count</code> and
+<code>Effective_Panel_Weight</code>.</p>
+<p>The estimate varies more across income bands than across gender. Its sign follows the
+coefficient convention: travel time enters utility as a disamenity.</p>
+<p><code>wtp_tables</code> is a dictionary whose keys are the displayed titles and whose values
+are the corresponding Polars frames. Use <code>show=False</code> when a notebook, test, or
+application should receive those frames without terminal and LaTeX output.
+<code>se="bootstrap"</code> is an asymptotic parametric bootstrap over the fitted parameter
+distribution; use <code>bootstrap_seed=</code> for reproducibility. It is not a panel
+resample-and-refit bootstrap.</p>
+<div class="admonition note">
+<p class="admonition-title">No manual one-hot encoding</p>
+<p><code>C(income_band)</code> handles estimation coding while <code>compute_wtp</code> groups on the
+original string column. Use <code>dummy_vars=</code> only when the grouping variable was
+encoded outside the fitted formula.</p>
+</div>
+<p><code>wtp_by_class</code> returns each class-specific ratio.
+<code>denominator_diagnostics</code> reports the corresponding numeraire coefficients and flags
+the scale information needed to diagnose unstable ratios.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="nb">print</span><span class="p">(</span><span class="n">prediction</span><span class="o">.</span><span class="n">wtp_by_class</span><span class="p">(</span><span class="s2">&quot;time&quot;</span><span class="p">))</span>
+<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="nb">print</span><span class="p">(</span><span class="n">prediction</span><span class="o">.</span><span class="n">denominator_diagnostics</span><span class="p">())</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>shape: (3, 7)
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>┌──────────┬─────────────┬─────────────┬───────────────────┬───────┬───────────┬───────────────────┐
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>│ variable ┆ label       ┆ denominator ┆ denominator_label ┆ class ┆ tradeoff  ┆ denominator_value │
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a>│ str      ┆ str         ┆ str         ┆ str               ┆ i64   ┆ f64       ┆ f64               │
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a>╞══════════╪═════════════╪═════════════╪═══════════════════╪═══════╪═══════════╪═══════════════════╡
+<a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a>│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 0     ┆ -0.195762 ┆ 0.056118          │
+<a id="__codelineno-20-7" name="__codelineno-20-7" href="#__codelineno-20-7"></a>│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 1     ┆ -0.130273 ┆ 0.10024           │
+<a id="__codelineno-20-8" name="__codelineno-20-8" href="#__codelineno-20-8"></a>│ time     ┆ Travel time ┆ cost        ┆ Fare              ┆ 2     ┆ -0.308005 ┆ 0.035545          │
+<a id="__codelineno-20-9" name="__codelineno-20-9" href="#__codelineno-20-9"></a>└──────────┴─────────────┴─────────────┴───────────────────┴───────┴───────────┴───────────────────┘
+<a id="__codelineno-20-10" name="__codelineno-20-10" href="#__codelineno-20-10"></a>shape: (3, 6)
+<a id="__codelineno-20-11" name="__codelineno-20-11" href="#__codelineno-20-11"></a>┌───────┬─────────────┬───────────────────┬───────────────────┬─────────────────┬───────────────┐
+<a id="__codelineno-20-12" name="__codelineno-20-12" href="#__codelineno-20-12"></a>│ class ┆ denominator ┆ denominator_label ┆ denominator_value ┆ abs_denominator ┆ min_abs_floor │
+<a id="__codelineno-20-13" name="__codelineno-20-13" href="#__codelineno-20-13"></a>│ i64   ┆ str         ┆ str               ┆ f64               ┆ f64             ┆ f64           │
+<a id="__codelineno-20-14" name="__codelineno-20-14" href="#__codelineno-20-14"></a>╞═══════╪═════════════╪═══════════════════╪═══════════════════╪═════════════════╪═══════════════╡
+<a id="__codelineno-20-15" name="__codelineno-20-15" href="#__codelineno-20-15"></a>│ 0     ┆ cost        ┆ Fare              ┆ 0.056118          ┆ 0.056118        ┆ 0.00001       │
+<a id="__codelineno-20-16" name="__codelineno-20-16" href="#__codelineno-20-16"></a>│ 1     ┆ cost        ┆ Fare              ┆ 0.10024           ┆ 0.10024         ┆ 0.00001       │
+<a id="__codelineno-20-17" name="__codelineno-20-17" href="#__codelineno-20-17"></a>│ 2     ┆ cost        ┆ Fare              ┆ 0.035545          ┆ 0.035545        ┆ 0.00001       │
+<a id="__codelineno-20-18" name="__codelineno-20-18" href="#__codelineno-20-18"></a>└───────┴─────────────┴───────────────────┴───────────────────┴─────────────────┴───────────────┘
+</code></pre></div>
+<p>The smallest fare coefficient produces the largest-magnitude tradeoff. All reported
+denominators remain comfortably above the configured floor.</p>
+<p>WTP groups need not appear in the membership model. Any panel-constant prediction
+column can define a partition; use <code>partition_data=...</code> when the grouping variable
+lives in a separate table.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="n">income_quintiles</span> <span class="o">=</span> <span class="n">prediction</span><span class="o">.</span><span class="n">compute_wtp</span><span class="p">(</span>
+<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a>    <span class="n">WTPRequest</span><span class="p">(</span><span class="n">alt_var</span><span class="o">=</span><span class="s2">&quot;time&quot;</span><span class="p">,</span> <span class="n">demographic_var</span><span class="o">=</span><span class="s2">&quot;income&quot;</span><span class="p">,</span>
+<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a>               <span class="n">partition_type</span><span class="o">=</span><span class="n">PartitionType</span><span class="o">.</span><span class="n">QUINTILES</span><span class="p">),</span>
+<a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a>    <span class="n">class_probabilities</span><span class="o">=</span><span class="s2">&quot;prior&quot;</span><span class="p">,</span>
+<a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a>    <span class="n">show</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span>
+<a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a><span class="p">)</span>
+</code></pre></div>
+<p>The fitted <code>LCLResults</code> object remains available for additional counterfactuals;
+<code>predict</code> does not mutate the model.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "navigation.top", "content.code.copy", "content.code.annotate", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>

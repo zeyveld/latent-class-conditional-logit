@@ -1,0 +1,3885 @@
+
+<!doctype html>
+<html lang="en" class="no-js">
+  <head>
+    
+      <meta charset="utf-8">
+      <meta name="viewport" content="width=device-width,initial-scale=1">
+      
+        <meta name="description" content="A JAX-accelerated Python package for latent-class conditional logit models.">
+      
+      
+      
+        <link rel="canonical" href="https://zeyveld.github.io/latent-class-conditional-logit/api/specification/">
+      
+      
+        <link rel="prev" href="../../tutorials/cross_validation/">
+      
+      
+        <link rel="next" href="../latent_class/">
+      
+      
+        
+      
+      
+      <link rel="icon" href="../../assets/favicon.svg">
+      <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
+    
+    
+      
+        <title>Specification & options - LCL</title>
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      
+        
+        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
+
+
+    
+    
+      
+    
+    
+      
+    
+    
+      <link rel="stylesheet" href="../../assets/_mkdocstrings.css">
+    
+      <link rel="stylesheet" href="../../stylesheets/extra.css">
+    
+    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
+
+    
+    
+  </head>
+  
+  
+    
+    
+      
+    
+    
+    
+    
+    <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom">
+  
+    
+    <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
+    <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
+    <label class="md-overlay" for="__drawer"></label>
+    <div data-md-component="skip">
+      
+        
+        <a href="#specification-options" class="md-skip">
+          Skip to content
+        </a>
+      
+    </div>
+    <div data-md-component="announce">
+      
+    </div>
+    
+    
+      
+
+<header class="md-header" data-md-component="header">
+  <nav class="md-header__inner md-grid" aria-label="Header">
+    <a href="../.." title="LCL" class="md-header__button md-logo" aria-label="LCL" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    <label class="md-header__button md-icon" for="__drawer">
+      
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
+    </label>
+    <div class="md-header__title" data-md-component="header-title">
+      <div class="md-header__ellipsis">
+        <div class="md-header__topic">
+          <span class="md-ellipsis">
+            LCL
+          </span>
+        </div>
+        <div class="md-header__topic" data-md-component="header-topic">
+          <span class="md-ellipsis">
+            
+              Specification & options
+            
+          </span>
+        </div>
+      </div>
+    </div>
+    
+      
+        <form class="md-header__option" data-md-component="palette">
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
+    
+      <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
+      </label>
+    
+  
+    
+    
+    
+    <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="custom" data-md-color-accent="custom"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
+    
+      <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
+      </label>
+    
+  
+</form>
+      
+    
+    
+      <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
+    
+    
+    
+      
+      
+        <label class="md-header__button md-icon" for="__search">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        </label>
+        <div class="md-search" data-md-component="search" role="dialog">
+  <label class="md-search__overlay" for="__search"></label>
+  <div class="md-search__inner" role="search">
+    <form class="md-search__form" name="search">
+      <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
+      <label class="md-search__icon md-icon" for="__search">
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
+        
+        <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
+      </label>
+      <nav class="md-search__options" aria-label="Search">
+        
+        <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
+          
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
+        </button>
+      </nav>
+      
+    </form>
+    <div class="md-search__output">
+      <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
+        <div class="md-search-result" data-md-component="search-result">
+          <div class="md-search-result__meta">
+            Initializing search
+          </div>
+          <ol class="md-search-result__list" role="presentation"></ol>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+      
+    
+    
+      <div class="md-header__source">
+        <a href="https://github.com/zeyveld/latent-class-conditional-logit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+      </div>
+    
+  </nav>
+  
+</header>
+    
+    <div class="md-container" data-md-component="container">
+      
+      
+        
+          
+            
+<nav class="md-tabs" aria-label="Tabs" data-md-component="tabs">
+  <div class="md-grid">
+    <ul class="md-tabs__list">
+      
+        
+  
+  
+  
+  
+    <li class="md-tabs__item">
+      <a href="../.." class="md-tabs__link">
+        
+  
+  
+    
+  
+  Home
+
+      </a>
+    </li>
+  
+
+      
+        
+  
+  
+  
+  
+    
+    
+      <li class="md-tabs__item">
+        <a href="../../tutorials/estimation/" class="md-tabs__link">
+          
+  
+  
+    
+  
+  Tutorials
+
+        </a>
+      </li>
+    
+  
+
+      
+        
+  
+  
+  
+    
+  
+  
+    
+    
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
+          
+  
+  
+    
+  
+  API Reference
+
+        </a>
+      </li>
+    
+  
+
+      
+    </ul>
+  </div>
+</nav>
+          
+        
+      
+      <main class="md-main" data-md-component="main">
+        <div class="md-main__inner md-grid">
+          
+            
+              
+              <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+
+  
+
+
+<nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
+  <label class="md-nav__title" for="__drawer">
+    <a href="../.." title="LCL" class="md-nav__button md-logo" aria-label="LCL" data-md-component="logo">
+      
+  <img src="../../assets/logo.svg" alt="logo">
+
+    </a>
+    LCL
+  </label>
+  
+    <div class="md-nav__source">
+      <a href="https://github.com/zeyveld/latent-class-conditional-logit" title="Go to repository" class="md-source" data-md-component="source">
+  <div class="md-source__icon md-icon">
+    
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
+  </div>
+  <div class="md-source__repository">
+    GitHub
+  </div>
+</a>
+    </div>
+  
+  <ul class="md-nav__list" data-md-scrollfix>
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../.." class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Home
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_2" >
+        
+          
+          <label class="md-nav__link" for="__nav_2" id="__nav_2_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Tutorials
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_2_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_2">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Tutorials
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/estimation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Estimation & counterfactuals
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../tutorials/cross_validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cross-validation & model selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+    
+  
+  
+  
+    
+    
+      
+        
+      
+        
+      
+        
+      
+        
+      
+    
+    
+    
+      
+        
+        
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_3" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_3" id="__nav_3_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Reference
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_3_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_3">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    API Reference
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Specification & options
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Specification & options
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#fitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fitting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.fit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        fit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#model-specification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Model specification
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.LCLSpec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LCLSpec
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="LCLSpec">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.negative_constraint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        negative_constraint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.negative_constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        negative_constraints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.numeraire" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        numeraire
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.numeraire_min_abs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        numeraire_min_abs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.constraint_rows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        constraint_rows
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.summary_lines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        summary_lines
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.ChoiceIds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ChoiceIds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NegativeCoefficient
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="NegativeCoefficient">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.bind" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        bind
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.forward" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        forward
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.hessian_diag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        hessian_diag
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.jacobian_diag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        jacobian_diag
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.FitOptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FitOptions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="FitOptions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.FitOptions.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.OptimizationOptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OptimizationOptions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OptimizationOptions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.OptimizationOptions.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.InferenceOptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        InferenceOptions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="InferenceOptions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.InferenceOptions.cluster_column" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cluster_column
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.InferenceOptions.clusters_at_panel" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        clusters_at_panel
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.InferenceOptions.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.DiagnosticsOptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DiagnosticsOptions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.Options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../latent_class/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Latent-class conditional logit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../conditional_logit/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Conditional logit
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../cross_validation/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Cross-validation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+  </ul>
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+            
+              
+              <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
+                <div class="md-sidebar__scrollwrap">
+                  <div class="md-sidebar__inner">
+                    
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#fitting" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Fitting
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.fit" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        fit
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#model-specification" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Model specification
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.LCLSpec" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        LCLSpec
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="LCLSpec">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.negative_constraint" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        negative_constraint
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.negative_constraints" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        negative_constraints
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.numeraire" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        numeraire
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.numeraire_min_abs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        numeraire_min_abs
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.constraint_rows" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        constraint_rows
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.LCLSpec.summary_lines" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        summary_lines
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.ChoiceIds" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        ChoiceIds
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        NegativeCoefficient
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="NegativeCoefficient">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.bind" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        bind
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.forward" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        forward
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.hessian_diag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        hessian_diag
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.NegativeCoefficient.jacobian_diag" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        jacobian_diag
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.FitOptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        FitOptions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="FitOptions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.FitOptions.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.OptimizationOptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        OptimizationOptions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="OptimizationOptions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.OptimizationOptions.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.InferenceOptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        InferenceOptions
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="InferenceOptions">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.InferenceOptions.cluster_column" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        cluster_column
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.InferenceOptions.clusters_at_panel" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        clusters_at_panel
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#lcl.options.InferenceOptions.__post_init__" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        __post_init__
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.DiagnosticsOptions" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        DiagnosticsOptions
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#lcl.options.Options" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Options
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+                  </div>
+                </div>
+              </div>
+            
+          
+          
+            <div class="md-content" data-md-component="content">
+              
+              <article class="md-content__inner md-typeset">
+                
+                  
+
+
+  
+  
+
+
+<h1 id="specification-options">Specification &amp; options</h1>
+<p>Define a model with <a class="autorefs autorefs-internal" title="lcl.LCLSpec(ids, utility=None, membership=None, classes=2, constraints=None, utility_formula=None, membership_formula=None, variable_labels=None)
+
+  
+      dataclass
+  " href="#lcl.LCLSpec"><code>LCLSpec</code></a>, then estimate it with
+<a class="autorefs autorefs-internal" title="lcl.fit(data, spec, *, options=None, fit_options=None, optimization_options=None, inference=None, diagnostics=None, variable_labels=None, dems_data=None, progress_callback=None)" href="#lcl.fit"><code>lcl.fit</code></a>. The four focused option objects can be collected in one
+<a class="autorefs autorefs-internal" title="lcl.options.Options(fit=FitOptions(), optimization=OptimizationOptions(), inference=InferenceOptions(), diagnostics=DiagnosticsOptions())
+
+  
+      dataclass
+  " href="#lcl.options.Options"><code>Options</code></a> bundle shared by every fitting entry point.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="kn">import</span><span class="w"> </span><span class="nn">lcl</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="kn">from</span><span class="w"> </span><span class="nn">lcl</span><span class="w"> </span><span class="kn">import</span> <span class="n">FitOptions</span><span class="p">,</span> <span class="n">InferenceOptions</span><span class="p">,</span> <span class="n">OptimizationOptions</span><span class="p">,</span> <span class="n">Options</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">results</span> <span class="o">=</span> <span class="n">lcl</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>    <span class="n">data</span><span class="p">,</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    <span class="n">spec</span><span class="p">,</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>    <span class="n">options</span><span class="o">=</span><span class="n">Options</span><span class="p">(</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>        <span class="n">fit</span><span class="o">=</span><span class="n">FitOptions</span><span class="p">(</span><span class="n">seed</span><span class="o">=</span><span class="mi">42</span><span class="p">,</span> <span class="n">starts</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span> <span class="n">max_em_iter</span><span class="o">=</span><span class="mi">500</span><span class="p">),</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>        <span class="n">optimization</span><span class="o">=</span><span class="n">OptimizationOptions</span><span class="p">(</span><span class="n">maxiter</span><span class="o">=</span><span class="mi">75</span><span class="p">,</span> <span class="n">gradient_tol</span><span class="o">=</span><span class="mf">1e-5</span><span class="p">),</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a>        <span class="n">inference</span><span class="o">=</span><span class="n">InferenceOptions</span><span class="p">(</span><span class="n">covariance</span><span class="o">=</span><span class="s2">&quot;clustered&quot;</span><span class="p">),</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a>    <span class="p">),</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="p">)</span>
+</code></pre></div>
+<p>The legacy <code>fit_options=</code>, <code>optimization_options=</code>, <code>inference=</code>, and
+<code>diagnostics=</code> keywords remain available, but do not mix them with <code>options=</code>;
+ambiguous partial merges raise an error.</p>
+<p>Use separate <code>utility_formula</code> and <code>membership_formula</code> fields for formula-based
+designs. <code>LCLSpec</code> is immutable, so it can be reused safely across fitting and
+cross-validation.</p>
+<h2 id="fitting">Fitting</h2>
+
+
+<div class="doc doc-object doc-function">
+
+
+<h2 id="lcl.fit" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">data</span><span class="p">,</span> <span class="n">spec</span><span class="p">,</span> <span class="o">*</span><span class="p">,</span> <span class="n">options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">fit_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">optimization_options</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">inference</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">diagnostics</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">variable_labels</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">dems_data</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">progress_callback</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+        <p>Fit a latent-class conditional-logit model from an :class:<code>LCLSpec</code>.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>data</code>
+            </td>
+            <td>
+                  <code><span title="object">object</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Long-format choice data.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>spec</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="lcl.LCLSpec(ids, utility=None, membership=None, classes=2, constraints=None, utility_formula=None, membership_formula=None, variable_labels=None)
+
+  
+      dataclass
+   (lcl.spec.LCLSpec)" href="#lcl.LCLSpec">LCLSpec</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Declarative model specification.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>fit_options</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="lcl.options.FitOptions(seed=0, max_em_iter=2000, em_tol=1e-08, score_tol=0.0001, polish=True, polish_maxiter=25, num_devices=device_count(), check_interval=1, starts=1, start_method='panel_partition')
+
+  
+      dataclass
+   (lcl.options.FitOptions)" href="#lcl.options.FitOptions">FitOptions</a> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>EM algorithm options.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>optimization_options</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="lcl.options.OptimizationOptions(maxiter=75, newton_decrement_tol=DEFAULT_NEWTON_DECREMENT_TOL, hessian_damping=0.0, max_step_norm=1000.0, initial_trust_radius=1.0, line_search_maxiter=40, accept_any_decrease=False, gradient_tol=DEFAULT_NEWTON_DECREMENT_TOL)
+
+  
+      dataclass
+   (lcl.options.OptimizationOptions)" href="#lcl.options.OptimizationOptions">OptimizationOptions</a> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>M-step optimizer options.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>inference</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="lcl.options.InferenceOptions(covariance='clustered', cluster='panel', finite_sample_correction=True, skip=False)
+
+  
+      dataclass
+   (lcl.options.InferenceOptions)" href="#lcl.options.InferenceOptions">InferenceOptions</a> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Covariance and standard-error options.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>diagnostics</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="lcl.options.DiagnosticsOptions(check_separation=True, check_collinearity=True, warn_near_zero_numeraire=True, warn_large_coefficients=True, separation_threshold=1e-08, near_zero_numeraire_threshold=0.001, large_coefficient_threshold=25.0)
+
+  
+      dataclass
+   (lcl.options.DiagnosticsOptions)" href="#lcl.options.DiagnosticsOptions">DiagnosticsOptions</a> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Diagnostic thresholds and switches.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>variable_labels</code>
+            </td>
+            <td>
+                  <code><span title="Mapping">Mapping</span>[<span title="str">str</span>, <span title="str">str</span>] | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional display labels for raw model/DataFrame variable names.  Labels
+supplement any labels stored on <code>spec</code> and are used only in
+presentation tables.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="lcl.results.LCLResults(model_spec, em_vars, estimation_data, em_recursion, converged, inference, estim_time_sec, diagnostics_config=None, em_history=None, optimization_history=None, observed_score_max=float('nan'), score_tol=0.0001, em_criterion_met=False, polish_report=None, cluster_ids=None, num_clusters=None, param_packing=None) (lcl.results.LCLResults)" href="../latent_class/#lcl.results.LCLResults">LCLResults</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Fitted latent-class results.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<details class="note" open>
+  <summary>Notes</summary>
+  <p>Latent-class estimation does not accept case or survey weights.  Use
+:class:<code>~lcl.conditional_logit.ConditionalLogit</code> when weighting is required.</p>
+</details>
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/__init__.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-53"> 53</a></span>
+<span class="normal"><a href="#__codelineno-0-54"> 54</a></span>
+<span class="normal"><a href="#__codelineno-0-55"> 55</a></span>
+<span class="normal"><a href="#__codelineno-0-56"> 56</a></span>
+<span class="normal"><a href="#__codelineno-0-57"> 57</a></span>
+<span class="normal"><a href="#__codelineno-0-58"> 58</a></span>
+<span class="normal"><a href="#__codelineno-0-59"> 59</a></span>
+<span class="normal"><a href="#__codelineno-0-60"> 60</a></span>
+<span class="normal"><a href="#__codelineno-0-61"> 61</a></span>
+<span class="normal"><a href="#__codelineno-0-62"> 62</a></span>
+<span class="normal"><a href="#__codelineno-0-63"> 63</a></span>
+<span class="normal"><a href="#__codelineno-0-64"> 64</a></span>
+<span class="normal"><a href="#__codelineno-0-65"> 65</a></span>
+<span class="normal"><a href="#__codelineno-0-66"> 66</a></span>
+<span class="normal"><a href="#__codelineno-0-67"> 67</a></span>
+<span class="normal"><a href="#__codelineno-0-68"> 68</a></span>
+<span class="normal"><a href="#__codelineno-0-69"> 69</a></span>
+<span class="normal"><a href="#__codelineno-0-70"> 70</a></span>
+<span class="normal"><a href="#__codelineno-0-71"> 71</a></span>
+<span class="normal"><a href="#__codelineno-0-72"> 72</a></span>
+<span class="normal"><a href="#__codelineno-0-73"> 73</a></span>
+<span class="normal"><a href="#__codelineno-0-74"> 74</a></span>
+<span class="normal"><a href="#__codelineno-0-75"> 75</a></span>
+<span class="normal"><a href="#__codelineno-0-76"> 76</a></span>
+<span class="normal"><a href="#__codelineno-0-77"> 77</a></span>
+<span class="normal"><a href="#__codelineno-0-78"> 78</a></span>
+<span class="normal"><a href="#__codelineno-0-79"> 79</a></span>
+<span class="normal"><a href="#__codelineno-0-80"> 80</a></span>
+<span class="normal"><a href="#__codelineno-0-81"> 81</a></span>
+<span class="normal"><a href="#__codelineno-0-82"> 82</a></span>
+<span class="normal"><a href="#__codelineno-0-83"> 83</a></span>
+<span class="normal"><a href="#__codelineno-0-84"> 84</a></span>
+<span class="normal"><a href="#__codelineno-0-85"> 85</a></span>
+<span class="normal"><a href="#__codelineno-0-86"> 86</a></span>
+<span class="normal"><a href="#__codelineno-0-87"> 87</a></span>
+<span class="normal"><a href="#__codelineno-0-88"> 88</a></span>
+<span class="normal"><a href="#__codelineno-0-89"> 89</a></span>
+<span class="normal"><a href="#__codelineno-0-90"> 90</a></span>
+<span class="normal"><a href="#__codelineno-0-91"> 91</a></span>
+<span class="normal"><a href="#__codelineno-0-92"> 92</a></span>
+<span class="normal"><a href="#__codelineno-0-93"> 93</a></span>
+<span class="normal"><a href="#__codelineno-0-94"> 94</a></span>
+<span class="normal"><a href="#__codelineno-0-95"> 95</a></span>
+<span class="normal"><a href="#__codelineno-0-96"> 96</a></span>
+<span class="normal"><a href="#__codelineno-0-97"> 97</a></span>
+<span class="normal"><a href="#__codelineno-0-98"> 98</a></span>
+<span class="normal"><a href="#__codelineno-0-99"> 99</a></span>
+<span class="normal"><a href="#__codelineno-0-100">100</a></span>
+<span class="normal"><a href="#__codelineno-0-101">101</a></span>
+<span class="normal"><a href="#__codelineno-0-102">102</a></span>
+<span class="normal"><a href="#__codelineno-0-103">103</a></span>
+<span class="normal"><a href="#__codelineno-0-104">104</a></span>
+<span class="normal"><a href="#__codelineno-0-105">105</a></span>
+<span class="normal"><a href="#__codelineno-0-106">106</a></span>
+<span class="normal"><a href="#__codelineno-0-107">107</a></span>
+<span class="normal"><a href="#__codelineno-0-108">108</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-53" name="__codelineno-0-53"></a><span class="k">def</span><span class="w"> </span><span class="nf">fit</span><span class="p">(</span>
+<a id="__codelineno-0-54" name="__codelineno-0-54"></a>    <span class="n">data</span><span class="p">:</span> <span class="nb">object</span><span class="p">,</span>
+<a id="__codelineno-0-55" name="__codelineno-0-55"></a>    <span class="n">spec</span><span class="p">:</span> <span class="n">LCLSpec</span><span class="p">,</span>
+<a id="__codelineno-0-56" name="__codelineno-0-56"></a>    <span class="o">*</span><span class="p">,</span>
+<a id="__codelineno-0-57" name="__codelineno-0-57"></a>    <span class="n">options</span><span class="p">:</span> <span class="n">Options</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-0-58" name="__codelineno-0-58"></a>    <span class="n">fit_options</span><span class="p">:</span> <span class="n">FitOptions</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-0-59" name="__codelineno-0-59"></a>    <span class="n">optimization_options</span><span class="p">:</span> <span class="n">OptimizationOptions</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-0-60" name="__codelineno-0-60"></a>    <span class="n">inference</span><span class="p">:</span> <span class="n">InferenceOptions</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-0-61" name="__codelineno-0-61"></a>    <span class="n">diagnostics</span><span class="p">:</span> <span class="n">DiagnosticsOptions</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-0-62" name="__codelineno-0-62"></a>    <span class="n">variable_labels</span><span class="p">:</span> <span class="n">_Mapping</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">str</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-0-63" name="__codelineno-0-63"></a>    <span class="n">dems_data</span><span class="p">:</span> <span class="nb">object</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-0-64" name="__codelineno-0-64"></a>    <span class="n">progress_callback</span><span class="p">:</span> <span class="n">_Callable</span><span class="p">[[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]],</span> <span class="kc">None</span><span class="p">]</span> <span class="o">|</span> <span class="kc">None</span> <span class="o">=</span> <span class="kc">None</span><span class="p">,</span>
+<a id="__codelineno-0-65" name="__codelineno-0-65"></a><span class="p">)</span> <span class="o">-&gt;</span> <span class="n">LCLResults</span><span class="p">:</span>
+<a id="__codelineno-0-66" name="__codelineno-0-66"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Fit a latent-class conditional-logit model from an :class:`LCLSpec`.</span>
+<a id="__codelineno-0-67" name="__codelineno-0-67"></a>
+<a id="__codelineno-0-68" name="__codelineno-0-68"></a><span class="sd">    Parameters</span>
+<a id="__codelineno-0-69" name="__codelineno-0-69"></a><span class="sd">    ----------</span>
+<a id="__codelineno-0-70" name="__codelineno-0-70"></a><span class="sd">    data : object</span>
+<a id="__codelineno-0-71" name="__codelineno-0-71"></a><span class="sd">        Long-format choice data.</span>
+<a id="__codelineno-0-72" name="__codelineno-0-72"></a><span class="sd">    spec : LCLSpec</span>
+<a id="__codelineno-0-73" name="__codelineno-0-73"></a><span class="sd">        Declarative model specification.</span>
+<a id="__codelineno-0-74" name="__codelineno-0-74"></a><span class="sd">    fit_options : FitOptions | None, optional</span>
+<a id="__codelineno-0-75" name="__codelineno-0-75"></a><span class="sd">        EM algorithm options.</span>
+<a id="__codelineno-0-76" name="__codelineno-0-76"></a><span class="sd">    optimization_options : OptimizationOptions | None, optional</span>
+<a id="__codelineno-0-77" name="__codelineno-0-77"></a><span class="sd">        M-step optimizer options.</span>
+<a id="__codelineno-0-78" name="__codelineno-0-78"></a><span class="sd">    inference : InferenceOptions | None, optional</span>
+<a id="__codelineno-0-79" name="__codelineno-0-79"></a><span class="sd">        Covariance and standard-error options.</span>
+<a id="__codelineno-0-80" name="__codelineno-0-80"></a><span class="sd">    diagnostics : DiagnosticsOptions | None, optional</span>
+<a id="__codelineno-0-81" name="__codelineno-0-81"></a><span class="sd">        Diagnostic thresholds and switches.</span>
+<a id="__codelineno-0-82" name="__codelineno-0-82"></a><span class="sd">    variable_labels : Mapping[str, str] | None, optional</span>
+<a id="__codelineno-0-83" name="__codelineno-0-83"></a><span class="sd">        Optional display labels for raw model/DataFrame variable names.  Labels</span>
+<a id="__codelineno-0-84" name="__codelineno-0-84"></a><span class="sd">        supplement any labels stored on ``spec`` and are used only in</span>
+<a id="__codelineno-0-85" name="__codelineno-0-85"></a><span class="sd">        presentation tables.</span>
+<a id="__codelineno-0-86" name="__codelineno-0-86"></a>
+<a id="__codelineno-0-87" name="__codelineno-0-87"></a><span class="sd">    Returns</span>
+<a id="__codelineno-0-88" name="__codelineno-0-88"></a><span class="sd">    -------</span>
+<a id="__codelineno-0-89" name="__codelineno-0-89"></a><span class="sd">    LCLResults</span>
+<a id="__codelineno-0-90" name="__codelineno-0-90"></a><span class="sd">        Fitted latent-class results.</span>
+<a id="__codelineno-0-91" name="__codelineno-0-91"></a>
+<a id="__codelineno-0-92" name="__codelineno-0-92"></a><span class="sd">    Notes</span>
+<a id="__codelineno-0-93" name="__codelineno-0-93"></a><span class="sd">    -----</span>
+<a id="__codelineno-0-94" name="__codelineno-0-94"></a><span class="sd">    Latent-class estimation does not accept case or survey weights.  Use</span>
+<a id="__codelineno-0-95" name="__codelineno-0-95"></a><span class="sd">    :class:`~lcl.conditional_logit.ConditionalLogit` when weighting is required.</span>
+<a id="__codelineno-0-96" name="__codelineno-0-96"></a><span class="sd">    &quot;&quot;&quot;</span>
+<a id="__codelineno-0-97" name="__codelineno-0-97"></a>    <span class="n">model</span> <span class="o">=</span> <span class="n">LatentClassConditionalLogit</span><span class="p">(</span><span class="n">spec</span><span class="o">=</span><span class="n">spec</span><span class="p">)</span>
+<a id="__codelineno-0-98" name="__codelineno-0-98"></a>    <span class="k">return</span> <span class="n">model</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span>
+<a id="__codelineno-0-99" name="__codelineno-0-99"></a>        <span class="n">data</span><span class="o">=</span><span class="n">data</span><span class="p">,</span>
+<a id="__codelineno-0-100" name="__codelineno-0-100"></a>        <span class="n">options</span><span class="o">=</span><span class="n">options</span><span class="p">,</span>
+<a id="__codelineno-0-101" name="__codelineno-0-101"></a>        <span class="n">fit_options</span><span class="o">=</span><span class="n">fit_options</span><span class="p">,</span>
+<a id="__codelineno-0-102" name="__codelineno-0-102"></a>        <span class="n">optimization_options</span><span class="o">=</span><span class="n">optimization_options</span><span class="p">,</span>
+<a id="__codelineno-0-103" name="__codelineno-0-103"></a>        <span class="n">inference</span><span class="o">=</span><span class="n">inference</span><span class="p">,</span>
+<a id="__codelineno-0-104" name="__codelineno-0-104"></a>        <span class="n">diagnostics</span><span class="o">=</span><span class="n">diagnostics</span><span class="p">,</span>
+<a id="__codelineno-0-105" name="__codelineno-0-105"></a>        <span class="n">variable_labels</span><span class="o">=</span><span class="n">variable_labels</span><span class="p">,</span>
+<a id="__codelineno-0-106" name="__codelineno-0-106"></a>        <span class="n">dems_data</span><span class="o">=</span><span class="n">dems_data</span><span class="p">,</span>
+<a id="__codelineno-0-107" name="__codelineno-0-107"></a>        <span class="n">progress_callback</span><span class="o">=</span><span class="n">progress_callback</span><span class="p">,</span>
+<a id="__codelineno-0-108" name="__codelineno-0-108"></a>    <span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div><h2 id="model-specification">Model specification</h2>
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="lcl.LCLSpec" class="doc doc-heading">
+              <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">LCLSpec</span><span class="p">(</span><span class="n">ids</span><span class="p">,</span> <span class="n">utility</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">membership</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">classes</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">constraints</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">utility_formula</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">membership_formula</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">variable_labels</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Declarative latent-class conditional-logit specification.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>ids</code>
+            </td>
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="lcl.ChoiceIds(alt, case, panel, choice)
+
+  
+      dataclass
+   (lcl.spec.ChoiceIds)" href="#lcl.ChoiceIds">ChoiceIds</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Identifier and choice columns for the long-format dataset.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>utility</code>
+            </td>
+            <td>
+                  <code><span title="collections.abc.Sequence">Sequence</span>[<span title="str">str</span>] | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Alternative-specific variables in the utility specification.  Omit when
+<code>utility_formula</code> provides the utility design.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>membership</code>
+            </td>
+            <td>
+                  <code><span title="collections.abc.Sequence">Sequence</span>[<span title="str">str</span>] | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Panel-level variables for class-membership probabilities.  Omit when
+<code>membership_formula</code> provides the demographic design.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>classes</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Number of latent classes.</p>
+              </div>
+            </td>
+            <td>
+                  <code>2</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>constraints</code>
+            </td>
+            <td>
+                  <code><span title="mapping">mapping</span> or <span title="sequence">sequence</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Coefficient constraints.  The current estimation engine supports one
+negative coefficient, typically a price, cost, or travel-time numeraire.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>utility_formula</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Formulaic string for the alternative-specific utility specification, such
+as <code>"choice ~ cost + C(mode)"</code>.  A right-hand-side-only utility formula
+is permitted when the choice column is supplied by :class:<code>ChoiceIds</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>membership_formula</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Right-hand-side Formulaic string for the class-membership demographic
+regression, such as <code>"~ income + C(segment)"</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>variable_labels</code>
+            </td>
+            <td>
+                  <code><span title="collections.abc.Mapping">Mapping</span>[<span title="str">str</span>, <span title="str">str</span>] | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional mapping from raw DataFrame/model variable names to human-readable
+labels used in printed coefficient and WTP/tradeoff tables.  Exact
+Formulaic-expanded names may also be labeled directly; otherwise labels
+for raw categorical columns are reused for terms such as
+<code>"C(segment)[T.high]"</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="lcl.LCLSpec.negative_constraint" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">negative_constraint</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return the single negative constraint, if present.</p>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="lcl.LCLSpec.negative_constraints" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">negative_constraints</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return normalized negative-coefficient constraints.</p>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="lcl.LCLSpec.numeraire" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">numeraire</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return the constrained variable used as the numeraire.</p>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="lcl.LCLSpec.numeraire_min_abs" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">numeraire_min_abs</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return the numeraire floor implied by the specification.</p>
+
+    </div>
+
+</div>
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.LCLSpec.__post_init__" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">__post_init__</span><span class="p">()</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Validate internal consistency.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/spec.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-84">84</a></span>
+<span class="normal"><a href="#__codelineno-0-85">85</a></span>
+<span class="normal"><a href="#__codelineno-0-86">86</a></span>
+<span class="normal"><a href="#__codelineno-0-87">87</a></span>
+<span class="normal"><a href="#__codelineno-0-88">88</a></span>
+<span class="normal"><a href="#__codelineno-0-89">89</a></span>
+<span class="normal"><a href="#__codelineno-0-90">90</a></span>
+<span class="normal"><a href="#__codelineno-0-91">91</a></span>
+<span class="normal"><a href="#__codelineno-0-92">92</a></span>
+<span class="normal"><a href="#__codelineno-0-93">93</a></span>
+<span class="normal"><a href="#__codelineno-0-94">94</a></span>
+<span class="normal"><a href="#__codelineno-0-95">95</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-84" name="__codelineno-0-84"></a><span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-85" name="__codelineno-0-85"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Validate internal consistency.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-86" name="__codelineno-0-86"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">classes</span> <span class="o">&lt;</span> <span class="mi">2</span><span class="p">:</span>
+<a id="__codelineno-0-87" name="__codelineno-0-87"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;LCLSpec.classes must be at least 2.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-88" name="__codelineno-0-88"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">utility_formula</span> <span class="ow">is</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="bp">self</span><span class="o">.</span><span class="n">utility</span><span class="p">:</span>
+<a id="__codelineno-0-89" name="__codelineno-0-89"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;LCLSpec requires either utility variables or a formula.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-90" name="__codelineno-0-90"></a>    <span class="k">if</span> <span class="nb">len</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">negative_constraints</span><span class="p">)</span> <span class="o">&gt;</span> <span class="mi">1</span><span class="p">:</span>
+<a id="__codelineno-0-91" name="__codelineno-0-91"></a>        <span class="k">raise</span> <span class="ne">NotImplementedError</span><span class="p">(</span>
+<a id="__codelineno-0-92" name="__codelineno-0-92"></a>            <span class="s2">&quot;The current latent-class estimator supports one negative &quot;</span>
+<a id="__codelineno-0-93" name="__codelineno-0-93"></a>            <span class="s2">&quot;coefficient constraint. Multiple constraints can be added once &quot;</span>
+<a id="__codelineno-0-94" name="__codelineno-0-94"></a>            <span class="s2">&quot;the optimizer is generalized beyond a single numeraire row.&quot;</span>
+<a id="__codelineno-0-95" name="__codelineno-0-95"></a>        <span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.LCLSpec.constraint_rows" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">constraint_rows</span><span class="p">()</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return serializable constraint metadata.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/spec.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-161">161</a></span>
+<span class="normal"><a href="#__codelineno-0-162">162</a></span>
+<span class="normal"><a href="#__codelineno-0-163">163</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-161" name="__codelineno-0-161"></a><span class="k">def</span><span class="w"> </span><span class="nf">constraint_rows</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">dict</span><span class="p">[</span><span class="nb">str</span><span class="p">,</span> <span class="nb">object</span><span class="p">]]:</span>
+<a id="__codelineno-0-162" name="__codelineno-0-162"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return serializable constraint metadata.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-163" name="__codelineno-0-163"></a>    <span class="k">return</span> <span class="n">constraint_summary_rows</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">negative_constraints</span><span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.LCLSpec.summary_lines" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">summary_lines</span><span class="p">()</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return a compact, human-readable specification summary.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/spec.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-122">122</a></span>
+<span class="normal"><a href="#__codelineno-0-123">123</a></span>
+<span class="normal"><a href="#__codelineno-0-124">124</a></span>
+<span class="normal"><a href="#__codelineno-0-125">125</a></span>
+<span class="normal"><a href="#__codelineno-0-126">126</a></span>
+<span class="normal"><a href="#__codelineno-0-127">127</a></span>
+<span class="normal"><a href="#__codelineno-0-128">128</a></span>
+<span class="normal"><a href="#__codelineno-0-129">129</a></span>
+<span class="normal"><a href="#__codelineno-0-130">130</a></span>
+<span class="normal"><a href="#__codelineno-0-131">131</a></span>
+<span class="normal"><a href="#__codelineno-0-132">132</a></span>
+<span class="normal"><a href="#__codelineno-0-133">133</a></span>
+<span class="normal"><a href="#__codelineno-0-134">134</a></span>
+<span class="normal"><a href="#__codelineno-0-135">135</a></span>
+<span class="normal"><a href="#__codelineno-0-136">136</a></span>
+<span class="normal"><a href="#__codelineno-0-137">137</a></span>
+<span class="normal"><a href="#__codelineno-0-138">138</a></span>
+<span class="normal"><a href="#__codelineno-0-139">139</a></span>
+<span class="normal"><a href="#__codelineno-0-140">140</a></span>
+<span class="normal"><a href="#__codelineno-0-141">141</a></span>
+<span class="normal"><a href="#__codelineno-0-142">142</a></span>
+<span class="normal"><a href="#__codelineno-0-143">143</a></span>
+<span class="normal"><a href="#__codelineno-0-144">144</a></span>
+<span class="normal"><a href="#__codelineno-0-145">145</a></span>
+<span class="normal"><a href="#__codelineno-0-146">146</a></span>
+<span class="normal"><a href="#__codelineno-0-147">147</a></span>
+<span class="normal"><a href="#__codelineno-0-148">148</a></span>
+<span class="normal"><a href="#__codelineno-0-149">149</a></span>
+<span class="normal"><a href="#__codelineno-0-150">150</a></span>
+<span class="normal"><a href="#__codelineno-0-151">151</a></span>
+<span class="normal"><a href="#__codelineno-0-152">152</a></span>
+<span class="normal"><a href="#__codelineno-0-153">153</a></span>
+<span class="normal"><a href="#__codelineno-0-154">154</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-122" name="__codelineno-0-122"></a><span class="k">def</span><span class="w"> </span><span class="nf">summary_lines</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="nb">list</span><span class="p">[</span><span class="nb">str</span><span class="p">]:</span>
+<a id="__codelineno-0-123" name="__codelineno-0-123"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a compact, human-readable specification summary.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-124" name="__codelineno-0-124"></a>    <span class="n">lines</span> <span class="o">=</span> <span class="p">[</span>
+<a id="__codelineno-0-125" name="__codelineno-0-125"></a>        <span class="s2">&quot;Latent-class conditional logit&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-126" name="__codelineno-0-126"></a>        <span class="sa">f</span><span class="s2">&quot;Classes: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">classes</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-127" name="__codelineno-0-127"></a>        <span class="sa">f</span><span class="s2">&quot;Panel id: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">ids</span><span class="o">.</span><span class="n">panel</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-128" name="__codelineno-0-128"></a>        <span class="sa">f</span><span class="s2">&quot;Case id: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">ids</span><span class="o">.</span><span class="n">case</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-129" name="__codelineno-0-129"></a>        <span class="sa">f</span><span class="s2">&quot;Alternative id: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">ids</span><span class="o">.</span><span class="n">alt</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-130" name="__codelineno-0-130"></a>        <span class="sa">f</span><span class="s2">&quot;Choice column: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">ids</span><span class="o">.</span><span class="n">choice</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-131" name="__codelineno-0-131"></a>        <span class="s2">&quot;&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-132" name="__codelineno-0-132"></a>        <span class="s2">&quot;Utility variables:&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-133" name="__codelineno-0-133"></a>    <span class="p">]</span>
+<a id="__codelineno-0-134" name="__codelineno-0-134"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">utility_formula</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-135" name="__codelineno-0-135"></a>        <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  formula: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">utility_formula</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-136" name="__codelineno-0-136"></a>    <span class="k">else</span><span class="p">:</span>
+<a id="__codelineno-0-137" name="__codelineno-0-137"></a>        <span class="k">for</span> <span class="n">variable</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">utility</span> <span class="ow">or</span> <span class="p">[]:</span>
+<a id="__codelineno-0-138" name="__codelineno-0-138"></a>            <span class="n">suffix</span> <span class="o">=</span> <span class="s2">&quot;&quot;</span>
+<a id="__codelineno-0-139" name="__codelineno-0-139"></a>            <span class="k">for</span> <span class="n">constraint</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">negative_constraints</span><span class="p">:</span>
+<a id="__codelineno-0-140" name="__codelineno-0-140"></a>                <span class="k">if</span> <span class="n">constraint</span><span class="o">.</span><span class="n">variable</span> <span class="o">==</span> <span class="n">variable</span><span class="p">:</span>
+<a id="__codelineno-0-141" name="__codelineno-0-141"></a>                    <span class="n">suffix</span> <span class="o">=</span> <span class="sa">f</span><span class="s2">&quot; [negative, min_abs=</span><span class="si">{</span><span class="n">constraint</span><span class="o">.</span><span class="n">min_abs</span><span class="si">:</span><span class="s2">g</span><span class="si">}</span><span class="s2">]&quot;</span>
+<a id="__codelineno-0-142" name="__codelineno-0-142"></a>            <span class="n">label</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">_display_variable</span><span class="p">(</span><span class="n">variable</span><span class="p">)</span>
+<a id="__codelineno-0-143" name="__codelineno-0-143"></a>            <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  </span><span class="si">{</span><span class="n">label</span><span class="si">}{</span><span class="n">suffix</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-144" name="__codelineno-0-144"></a>    <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-145" name="__codelineno-0-145"></a>    <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;Class-membership variables:&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-146" name="__codelineno-0-146"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">membership</span><span class="p">:</span>
+<a id="__codelineno-0-147" name="__codelineno-0-147"></a>        <span class="n">lines</span><span class="o">.</span><span class="n">extend</span><span class="p">(</span>
+<a id="__codelineno-0-148" name="__codelineno-0-148"></a>            <span class="sa">f</span><span class="s2">&quot;  </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">_display_variable</span><span class="p">(</span><span class="n">variable</span><span class="p">)</span><span class="si">}</span><span class="s2">&quot;</span> <span class="k">for</span> <span class="n">variable</span> <span class="ow">in</span> <span class="bp">self</span><span class="o">.</span><span class="n">membership</span>
+<a id="__codelineno-0-149" name="__codelineno-0-149"></a>        <span class="p">)</span>
+<a id="__codelineno-0-150" name="__codelineno-0-150"></a>    <span class="k">elif</span> <span class="bp">self</span><span class="o">.</span><span class="n">membership_formula</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-151" name="__codelineno-0-151"></a>        <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="sa">f</span><span class="s2">&quot;  formula: </span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">membership_formula</span><span class="si">}</span><span class="s2">&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-152" name="__codelineno-0-152"></a>    <span class="k">else</span><span class="p">:</span>
+<a id="__codelineno-0-153" name="__codelineno-0-153"></a>        <span class="n">lines</span><span class="o">.</span><span class="n">append</span><span class="p">(</span><span class="s2">&quot;  none&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-154" name="__codelineno-0-154"></a>    <span class="k">return</span> <span class="n">lines</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="lcl.ChoiceIds" class="doc doc-heading">
+              <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">ChoiceIds</span><span class="p">(</span><span class="n">alt</span><span class="p">,</span> <span class="n">case</span><span class="p">,</span> <span class="n">panel</span><span class="p">,</span> <span class="n">choice</span><span class="p">)</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Column names identifying a long-format choice dataset.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>alt</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Alternative identifier column.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>case</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Choice-situation identifier column.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>panel</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Decision-maker or panel identifier column.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>choice</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Boolean or binary chosen-alternative indicator column.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="lcl.NegativeCoefficient" class="doc doc-heading">
+              <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">NegativeCoefficient</span><span class="p">(</span><span class="n">variable</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">min_abs</span><span class="o">=</span><span class="n">DEFAULT_NEGATIVE_MIN_ABS</span><span class="p">,</span> <span class="n">units</span><span class="o">=</span><span class="kc">None</span><span class="p">,</span> <span class="n">warn_below</span><span class="o">=</span><span class="kc">None</span><span class="p">)</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Constrain a coefficient to be strictly negative.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>variable</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Name of the variable being constrained.  It may be omitted when the
+object is supplied in a mapping keyed by variable name.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>min_abs</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Minimum absolute magnitude of the structural coefficient.  The forward
+transform is <code>-(softplus(raw) + min_abs)</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1e-5</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>units</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional human-readable units for summaries and audit reports.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>warn_below</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Optional threshold used by diagnostics to flag weakly identified
+numeraires.</p>
+              </div>
+            </td>
+            <td>
+                  <code>None</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.NegativeCoefficient.__post_init__" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">__post_init__</span><span class="p">()</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Validate constraint settings.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/constraints.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-46">46</a></span>
+<span class="normal"><a href="#__codelineno-0-47">47</a></span>
+<span class="normal"><a href="#__codelineno-0-48">48</a></span>
+<span class="normal"><a href="#__codelineno-0-49">49</a></span>
+<span class="normal"><a href="#__codelineno-0-50">50</a></span>
+<span class="normal"><a href="#__codelineno-0-51">51</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-46" name="__codelineno-0-46"></a><span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-47" name="__codelineno-0-47"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Validate constraint settings.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-48" name="__codelineno-0-48"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_abs</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-49" name="__codelineno-0-49"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;NegativeCoefficient.min_abs must be positive.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-50" name="__codelineno-0-50"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">warn_below</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">warn_below</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-51" name="__codelineno-0-51"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;NegativeCoefficient.warn_below must be positive.&quot;</span><span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.NegativeCoefficient.bind" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">bind</span><span class="p">(</span><span class="n">variable</span><span class="p">)</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return a copy tied to <code>variable</code>.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>variable</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Variable name from a specification mapping.</p>
+              </div>
+            </td>
+            <td>
+                <em>required</em>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+    <p><span class="doc-section-title">Returns:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Type</th>
+          <th>Description</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                  <code><a class="autorefs autorefs-internal" title="lcl.NegativeCoefficient(variable=None, min_abs=DEFAULT_NEGATIVE_MIN_ABS, units=None, warn_below=None)
+
+  
+      dataclass
+   (lcl.constraints.NegativeCoefficient)" href="#lcl.NegativeCoefficient">NegativeCoefficient</a></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>A constraint with a concrete variable name.</p>
+              </div>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/constraints.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-53">53</a></span>
+<span class="normal"><a href="#__codelineno-0-54">54</a></span>
+<span class="normal"><a href="#__codelineno-0-55">55</a></span>
+<span class="normal"><a href="#__codelineno-0-56">56</a></span>
+<span class="normal"><a href="#__codelineno-0-57">57</a></span>
+<span class="normal"><a href="#__codelineno-0-58">58</a></span>
+<span class="normal"><a href="#__codelineno-0-59">59</a></span>
+<span class="normal"><a href="#__codelineno-0-60">60</a></span>
+<span class="normal"><a href="#__codelineno-0-61">61</a></span>
+<span class="normal"><a href="#__codelineno-0-62">62</a></span>
+<span class="normal"><a href="#__codelineno-0-63">63</a></span>
+<span class="normal"><a href="#__codelineno-0-64">64</a></span>
+<span class="normal"><a href="#__codelineno-0-65">65</a></span>
+<span class="normal"><a href="#__codelineno-0-66">66</a></span>
+<span class="normal"><a href="#__codelineno-0-67">67</a></span>
+<span class="normal"><a href="#__codelineno-0-68">68</a></span>
+<span class="normal"><a href="#__codelineno-0-69">69</a></span>
+<span class="normal"><a href="#__codelineno-0-70">70</a></span>
+<span class="normal"><a href="#__codelineno-0-71">71</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-53" name="__codelineno-0-53"></a><span class="k">def</span><span class="w"> </span><span class="nf">bind</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">variable</span><span class="p">:</span> <span class="nb">str</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="s2">&quot;NegativeCoefficient&quot;</span><span class="p">:</span>
+<a id="__codelineno-0-54" name="__codelineno-0-54"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return a copy tied to ``variable``.</span>
+<a id="__codelineno-0-55" name="__codelineno-0-55"></a>
+<a id="__codelineno-0-56" name="__codelineno-0-56"></a><span class="sd">    Parameters</span>
+<a id="__codelineno-0-57" name="__codelineno-0-57"></a><span class="sd">    ----------</span>
+<a id="__codelineno-0-58" name="__codelineno-0-58"></a><span class="sd">    variable : str</span>
+<a id="__codelineno-0-59" name="__codelineno-0-59"></a><span class="sd">        Variable name from a specification mapping.</span>
+<a id="__codelineno-0-60" name="__codelineno-0-60"></a>
+<a id="__codelineno-0-61" name="__codelineno-0-61"></a><span class="sd">    Returns</span>
+<a id="__codelineno-0-62" name="__codelineno-0-62"></a><span class="sd">    -------</span>
+<a id="__codelineno-0-63" name="__codelineno-0-63"></a><span class="sd">    NegativeCoefficient</span>
+<a id="__codelineno-0-64" name="__codelineno-0-64"></a><span class="sd">        A constraint with a concrete variable name.</span>
+<a id="__codelineno-0-65" name="__codelineno-0-65"></a><span class="sd">    &quot;&quot;&quot;</span>
+<a id="__codelineno-0-66" name="__codelineno-0-66"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">variable</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">variable</span> <span class="o">!=</span> <span class="n">variable</span><span class="p">:</span>
+<a id="__codelineno-0-67" name="__codelineno-0-67"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+<a id="__codelineno-0-68" name="__codelineno-0-68"></a>            <span class="s2">&quot;NegativeCoefficient variable mismatch: &quot;</span>
+<a id="__codelineno-0-69" name="__codelineno-0-69"></a>            <span class="sa">f</span><span class="s2">&quot;</span><span class="si">{</span><span class="bp">self</span><span class="o">.</span><span class="n">variable</span><span class="si">!r}</span><span class="s2"> != </span><span class="si">{</span><span class="n">variable</span><span class="si">!r}</span><span class="s2">.&quot;</span>
+<a id="__codelineno-0-70" name="__codelineno-0-70"></a>        <span class="p">)</span>
+<a id="__codelineno-0-71" name="__codelineno-0-71"></a>    <span class="k">return</span> <span class="n">replace</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">variable</span><span class="o">=</span><span class="n">variable</span><span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.NegativeCoefficient.forward" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">forward</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Map unconstrained parameters to negative structural coefficients.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/constraints.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-73">73</a></span>
+<span class="normal"><a href="#__codelineno-0-74">74</a></span>
+<span class="normal"><a href="#__codelineno-0-75">75</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-73" name="__codelineno-0-73"></a><span class="k">def</span><span class="w"> </span><span class="nf">forward</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">raw</span><span class="p">:</span> <span class="n">Float64</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s2">&quot;...&quot;</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Float64</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s2">&quot;...&quot;</span><span class="p">]:</span>
+<a id="__codelineno-0-74" name="__codelineno-0-74"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Map unconstrained parameters to negative structural coefficients.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-75" name="__codelineno-0-75"></a>    <span class="k">return</span> <span class="o">-</span><span class="p">(</span><span class="n">softplus</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span> <span class="o">+</span> <span class="bp">self</span><span class="o">.</span><span class="n">min_abs</span><span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.NegativeCoefficient.hessian_diag" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">hessian_diag</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return the diagonal second derivative of :meth:<code>forward</code>.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/constraints.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-81">81</a></span>
+<span class="normal"><a href="#__codelineno-0-82">82</a></span>
+<span class="normal"><a href="#__codelineno-0-83">83</a></span>
+<span class="normal"><a href="#__codelineno-0-84">84</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-81" name="__codelineno-0-81"></a><span class="k">def</span><span class="w"> </span><span class="nf">hessian_diag</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">raw</span><span class="p">:</span> <span class="n">Float64</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s2">&quot;...&quot;</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Float64</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s2">&quot;...&quot;</span><span class="p">]:</span>
+<a id="__codelineno-0-82" name="__codelineno-0-82"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return the diagonal second derivative of :meth:`forward`.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-83" name="__codelineno-0-83"></a>    <span class="n">d1</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">jacobian_diag</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+<a id="__codelineno-0-84" name="__codelineno-0-84"></a>    <span class="k">return</span> <span class="n">d1</span> <span class="o">*</span> <span class="p">(</span><span class="mf">1.0</span> <span class="o">+</span> <span class="n">d1</span><span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.NegativeCoefficient.jacobian_diag" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">jacobian_diag</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return the diagonal Jacobian element of :meth:<code>forward</code>.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/constraints.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-77">77</a></span>
+<span class="normal"><a href="#__codelineno-0-78">78</a></span>
+<span class="normal"><a href="#__codelineno-0-79">79</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-77" name="__codelineno-0-77"></a><span class="k">def</span><span class="w"> </span><span class="nf">jacobian_diag</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="n">raw</span><span class="p">:</span> <span class="n">Float64</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s2">&quot;...&quot;</span><span class="p">])</span> <span class="o">-&gt;</span> <span class="n">Float64</span><span class="p">[</span><span class="n">Array</span><span class="p">,</span> <span class="s2">&quot;...&quot;</span><span class="p">]:</span>
+<a id="__codelineno-0-78" name="__codelineno-0-78"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Return the diagonal Jacobian element of :meth:`forward`.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-79" name="__codelineno-0-79"></a>    <span class="k">return</span> <span class="o">-</span><span class="n">sigmoid</span><span class="p">(</span><span class="n">raw</span><span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div><h2 id="options">Options</h2>
+
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="lcl.options.FitOptions" class="doc doc-heading">
+              <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">options</span><span class="o">.</span><span class="n">FitOptions</span><span class="p">(</span><span class="n">seed</span><span class="o">=</span><span class="mi">0</span><span class="p">,</span> <span class="n">max_em_iter</span><span class="o">=</span><span class="mi">2000</span><span class="p">,</span> <span class="n">em_tol</span><span class="o">=</span><span class="mf">1e-08</span><span class="p">,</span> <span class="n">score_tol</span><span class="o">=</span><span class="mf">0.0001</span><span class="p">,</span> <span class="n">polish</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">polish_maxiter</span><span class="o">=</span><span class="mi">25</span><span class="p">,</span> <span class="n">num_devices</span><span class="o">=</span><span class="n">device_count</span><span class="p">(),</span> <span class="n">check_interval</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">starts</span><span class="o">=</span><span class="mi">1</span><span class="p">,</span> <span class="n">start_method</span><span class="o">=</span><span class="s1">&#39;panel_partition&#39;</span><span class="p">)</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Latent-class EM and multi-start settings.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>seed</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Base seed for the panel partition used to build starting values.</p>
+              </div>
+            </td>
+            <td>
+                  <code>0</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>max_em_iter</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Maximum number of EM recursions.</p>
+              </div>
+            </td>
+            <td>
+                  <code>2000</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>em_tol</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Stopping tolerance on the Aitken-extrapolated log-likelihood change per
+panel.  Because EM converges linearly, the raw iteration-to-iteration
+change understates the distance to the optimum by <code>1 / (1 - r)</code> where
+<code>r</code> is the observed rate; the criterion therefore compares the
+extrapolated limit rather than the raw change.  Normalizing by the panel
+count keeps the tolerance's meaning fixed as the sample grows.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1e-8</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>score_tol</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Stopping tolerance on the maximum absolute component of the observed-data
+score, per panel.  EM terminates when either criterion is met, and the
+public <code>converged</code> flag additionally requires this one.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1e-4</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>polish</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Run safeguarded Newton steps on the observed-data log likelihood after
+EM, using the exact analytic score and Hessian.  EM alone converges
+linearly and reliably stops short of a stationary point; the polish
+makes the reported optimum stationary, which is what the observed
+information and the sandwich covariance assume.  A polish step is kept
+only if it does not decrease the log likelihood.</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>polish_maxiter</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Maximum number of observed-data Newton iterations.</p>
+              </div>
+            </td>
+            <td>
+                  <code>25</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>num_devices</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Number of JAX devices across which class-specific M-steps are sharded.</p>
+              </div>
+            </td>
+            <td>
+                  <code><span title="jax.device_count">device_count</span>()</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>check_interval</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Number of EM recursions between convergence checks.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>starts</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Number of independent EM starts.  The start with the highest final log
+likelihood is kept.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>start_method</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Strategy used to build starting values.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#34;panel_partition&#34;</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<details class="note" open>
+  <summary>Notes</summary>
+  <p>The class is frozen so a configuration can be hashed and used as a static
+argument to a cached JIT-compiled M-step.</p>
+</details>
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.options.FitOptions.__post_init__" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">__post_init__</span><span class="p">()</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Validate EM and multi-start settings.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/options.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-157">157</a></span>
+<span class="normal"><a href="#__codelineno-0-158">158</a></span>
+<span class="normal"><a href="#__codelineno-0-159">159</a></span>
+<span class="normal"><a href="#__codelineno-0-160">160</a></span>
+<span class="normal"><a href="#__codelineno-0-161">161</a></span>
+<span class="normal"><a href="#__codelineno-0-162">162</a></span>
+<span class="normal"><a href="#__codelineno-0-163">163</a></span>
+<span class="normal"><a href="#__codelineno-0-164">164</a></span>
+<span class="normal"><a href="#__codelineno-0-165">165</a></span>
+<span class="normal"><a href="#__codelineno-0-166">166</a></span>
+<span class="normal"><a href="#__codelineno-0-167">167</a></span>
+<span class="normal"><a href="#__codelineno-0-168">168</a></span>
+<span class="normal"><a href="#__codelineno-0-169">169</a></span>
+<span class="normal"><a href="#__codelineno-0-170">170</a></span>
+<span class="normal"><a href="#__codelineno-0-171">171</a></span>
+<span class="normal"><a href="#__codelineno-0-172">172</a></span>
+<span class="normal"><a href="#__codelineno-0-173">173</a></span>
+<span class="normal"><a href="#__codelineno-0-174">174</a></span>
+<span class="normal"><a href="#__codelineno-0-175">175</a></span>
+<span class="normal"><a href="#__codelineno-0-176">176</a></span>
+<span class="normal"><a href="#__codelineno-0-177">177</a></span>
+<span class="normal"><a href="#__codelineno-0-178">178</a></span>
+<span class="normal"><a href="#__codelineno-0-179">179</a></span>
+<span class="normal"><a href="#__codelineno-0-180">180</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-157" name="__codelineno-0-157"></a><span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-158" name="__codelineno-0-158"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Validate EM and multi-start settings.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-159" name="__codelineno-0-159"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">em_tol</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-160" name="__codelineno-0-160"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;em_tol must be positive.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-161" name="__codelineno-0-161"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">score_tol</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-162" name="__codelineno-0-162"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;score_tol must be positive.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-163" name="__codelineno-0-163"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_em_iter</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">:</span>
+<a id="__codelineno-0-164" name="__codelineno-0-164"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;max_em_iter must be at least one.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-165" name="__codelineno-0-165"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">polish_maxiter</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-166" name="__codelineno-0-166"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;polish_maxiter must be nonnegative.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-167" name="__codelineno-0-167"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">check_interval</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-168" name="__codelineno-0-168"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;check_interval must be positive.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-169" name="__codelineno-0-169"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">starts</span> <span class="o">&lt;</span> <span class="mi">1</span><span class="p">:</span>
+<a id="__codelineno-0-170" name="__codelineno-0-170"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;starts must be at least 1.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-171" name="__codelineno-0-171"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">start_method</span> <span class="o">!=</span> <span class="s2">&quot;panel_partition&quot;</span><span class="p">:</span>
+<a id="__codelineno-0-172" name="__codelineno-0-172"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+<a id="__codelineno-0-173" name="__codelineno-0-173"></a>            <span class="s2">&quot;Only start_method=&#39;panel_partition&#39; is currently supported.&quot;</span>
+<a id="__codelineno-0-174" name="__codelineno-0-174"></a>        <span class="p">)</span>
+<a id="__codelineno-0-175" name="__codelineno-0-175"></a>    <span class="n">available_devices</span> <span class="o">=</span> <span class="n">device_count</span><span class="p">()</span>
+<a id="__codelineno-0-176" name="__codelineno-0-176"></a>    <span class="k">if</span> <span class="ow">not</span> <span class="mi">1</span> <span class="o">&lt;=</span> <span class="bp">self</span><span class="o">.</span><span class="n">num_devices</span> <span class="o">&lt;=</span> <span class="n">available_devices</span><span class="p">:</span>
+<a id="__codelineno-0-177" name="__codelineno-0-177"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+<a id="__codelineno-0-178" name="__codelineno-0-178"></a>            <span class="s2">&quot;num_devices must be between 1 and the number of available JAX &quot;</span>
+<a id="__codelineno-0-179" name="__codelineno-0-179"></a>            <span class="sa">f</span><span class="s2">&quot;devices (</span><span class="si">{</span><span class="n">available_devices</span><span class="si">}</span><span class="s2">).&quot;</span>
+<a id="__codelineno-0-180" name="__codelineno-0-180"></a>        <span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="lcl.options.OptimizationOptions" class="doc doc-heading">
+              <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">options</span><span class="o">.</span><span class="n">OptimizationOptions</span><span class="p">(</span><span class="n">maxiter</span><span class="o">=</span><span class="mi">75</span><span class="p">,</span> <span class="n">newton_decrement_tol</span><span class="o">=</span><span class="n">DEFAULT_NEWTON_DECREMENT_TOL</span><span class="p">,</span> <span class="n">hessian_damping</span><span class="o">=</span><span class="mf">0.0</span><span class="p">,</span> <span class="n">max_step_norm</span><span class="o">=</span><span class="mf">1000.0</span><span class="p">,</span> <span class="n">initial_trust_radius</span><span class="o">=</span><span class="mf">1.0</span><span class="p">,</span> <span class="n">line_search_maxiter</span><span class="o">=</span><span class="mi">40</span><span class="p">,</span> <span class="n">accept_any_decrease</span><span class="o">=</span><span class="kc">False</span><span class="p">,</span> <span class="n">gradient_tol</span><span class="o">=</span><span class="n">DEFAULT_NEWTON_DECREMENT_TOL</span><span class="p">)</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Safeguarded exact-Newton settings.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>maxiter</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Maximum number of Newton iterations.</p>
+              </div>
+            </td>
+            <td>
+                  <code>75</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>newton_decrement_tol</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Stopping tolerance on the Newton decrement
+:math:<code>\lambda = \sqrt{g' H^{-1} g}</code>, not on a raw gradient norm.  The
+decrement is invariant to nonsingular diagonal rescaling of the
+parameters and approximates :math:<code>\sqrt{2(f - f^\star)}</code>, so a value
+of <code>1e-5</code> on the package's per-observation objective corresponds to
+roughly <code>5e-11</code> in objective units.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1e-5</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>hessian_damping</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Initial diagonal shift used only when the undamped Cholesky solve does
+not produce a finite descent direction.</p>
+              </div>
+            </td>
+            <td>
+                  <code>0.0</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>max_step_norm</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Upper bound on the adaptive trust radius, in the local curvature metric.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1000.0</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>initial_trust_radius</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Starting trust radius, in the local curvature metric.  It expands or
+contracts with agreement between the quadratic model and the objective.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1.0</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>line_search_maxiter</code>
+            </td>
+            <td>
+                  <code><span title="int">int</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Maximum number of Armijo backtracking steps per Newton iteration.</p>
+              </div>
+            </td>
+            <td>
+                  <code>40</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>accept_any_decrease</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Accept a finite step that merely decreases the objective when the
+stricter Armijo sufficient-decrease rule is not met.</p>
+              </div>
+            </td>
+            <td>
+                  <code>False</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>gradient_tol</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Deprecated alias for <code>newton_decrement_tol</code>.  Reading it returns the
+resolved tolerance; passing it emits a :class:<code>DeprecationWarning</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code><span title="lcl.options.DEFAULT_NEWTON_DECREMENT_TOL">DEFAULT_NEWTON_DECREMENT_TOL</span></code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+<details class="note" open>
+  <summary>Notes</summary>
+  <p>The class is frozen so a configuration can be hashed and used as a static
+argument to a cached JIT-compiled M-step.  Use :func:<code>dataclasses.replace</code>
+to derive a modified configuration.</p>
+</details>
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.options.OptimizationOptions.__post_init__" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">__post_init__</span><span class="p">()</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Resolve the deprecated alias and validate supported settings.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/options.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-67">67</a></span>
+<span class="normal"><a href="#__codelineno-0-68">68</a></span>
+<span class="normal"><a href="#__codelineno-0-69">69</a></span>
+<span class="normal"><a href="#__codelineno-0-70">70</a></span>
+<span class="normal"><a href="#__codelineno-0-71">71</a></span>
+<span class="normal"><a href="#__codelineno-0-72">72</a></span>
+<span class="normal"><a href="#__codelineno-0-73">73</a></span>
+<span class="normal"><a href="#__codelineno-0-74">74</a></span>
+<span class="normal"><a href="#__codelineno-0-75">75</a></span>
+<span class="normal"><a href="#__codelineno-0-76">76</a></span>
+<span class="normal"><a href="#__codelineno-0-77">77</a></span>
+<span class="normal"><a href="#__codelineno-0-78">78</a></span>
+<span class="normal"><a href="#__codelineno-0-79">79</a></span>
+<span class="normal"><a href="#__codelineno-0-80">80</a></span>
+<span class="normal"><a href="#__codelineno-0-81">81</a></span>
+<span class="normal"><a href="#__codelineno-0-82">82</a></span>
+<span class="normal"><a href="#__codelineno-0-83">83</a></span>
+<span class="normal"><a href="#__codelineno-0-84">84</a></span>
+<span class="normal"><a href="#__codelineno-0-85">85</a></span>
+<span class="normal"><a href="#__codelineno-0-86">86</a></span>
+<span class="normal"><a href="#__codelineno-0-87">87</a></span>
+<span class="normal"><a href="#__codelineno-0-88">88</a></span>
+<span class="normal"><a href="#__codelineno-0-89">89</a></span>
+<span class="normal"><a href="#__codelineno-0-90">90</a></span>
+<span class="normal"><a href="#__codelineno-0-91">91</a></span>
+<span class="normal"><a href="#__codelineno-0-92">92</a></span>
+<span class="normal"><a href="#__codelineno-0-93">93</a></span>
+<span class="normal"><a href="#__codelineno-0-94">94</a></span>
+<span class="normal"><a href="#__codelineno-0-95">95</a></span>
+<span class="normal"><a href="#__codelineno-0-96">96</a></span>
+<span class="normal"><a href="#__codelineno-0-97">97</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-67" name="__codelineno-0-67"></a><span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-68" name="__codelineno-0-68"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Resolve the deprecated alias and validate supported settings.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-69" name="__codelineno-0-69"></a>    <span class="c1"># The two fields share a default, so &quot;explicitly set&quot; means &quot;not the</span>
+<a id="__codelineno-0-70" name="__codelineno-0-70"></a>    <span class="c1"># default&quot;.  An explicit newton_decrement_tol always wins, which keeps</span>
+<a id="__codelineno-0-71" name="__codelineno-0-71"></a>    <span class="c1"># dataclasses.replace well behaved on either spelling.</span>
+<a id="__codelineno-0-72" name="__codelineno-0-72"></a>    <span class="n">new_set</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">newton_decrement_tol</span> <span class="o">!=</span> <span class="n">DEFAULT_NEWTON_DECREMENT_TOL</span>
+<a id="__codelineno-0-73" name="__codelineno-0-73"></a>    <span class="n">old_set</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient_tol</span> <span class="o">!=</span> <span class="n">DEFAULT_NEWTON_DECREMENT_TOL</span>
+<a id="__codelineno-0-74" name="__codelineno-0-74"></a>    <span class="k">if</span> <span class="n">old_set</span><span class="p">:</span>
+<a id="__codelineno-0-75" name="__codelineno-0-75"></a>        <span class="n">warnings</span><span class="o">.</span><span class="n">warn</span><span class="p">(</span>
+<a id="__codelineno-0-76" name="__codelineno-0-76"></a>            <span class="s2">&quot;OptimizationOptions.gradient_tol is deprecated; use &quot;</span>
+<a id="__codelineno-0-77" name="__codelineno-0-77"></a>            <span class="s2">&quot;newton_decrement_tol. The value is a Newton-decrement &quot;</span>
+<a id="__codelineno-0-78" name="__codelineno-0-78"></a>            <span class="s2">&quot;tolerance, not a gradient norm.&quot;</span><span class="p">,</span>
+<a id="__codelineno-0-79" name="__codelineno-0-79"></a>            <span class="ne">DeprecationWarning</span><span class="p">,</span>
+<a id="__codelineno-0-80" name="__codelineno-0-80"></a>            <span class="n">stacklevel</span><span class="o">=</span><span class="mi">3</span><span class="p">,</span>
+<a id="__codelineno-0-81" name="__codelineno-0-81"></a>        <span class="p">)</span>
+<a id="__codelineno-0-82" name="__codelineno-0-82"></a>    <span class="n">tolerance</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">newton_decrement_tol</span> <span class="k">if</span> <span class="n">new_set</span> <span class="k">else</span> <span class="bp">self</span><span class="o">.</span><span class="n">gradient_tol</span>
+<a id="__codelineno-0-83" name="__codelineno-0-83"></a>    <span class="nb">object</span><span class="o">.</span><span class="fm">__setattr__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;newton_decrement_tol&quot;</span><span class="p">,</span> <span class="n">tolerance</span><span class="p">)</span>
+<a id="__codelineno-0-84" name="__codelineno-0-84"></a>    <span class="nb">object</span><span class="o">.</span><span class="fm">__setattr__</span><span class="p">(</span><span class="bp">self</span><span class="p">,</span> <span class="s2">&quot;gradient_tol&quot;</span><span class="p">,</span> <span class="n">tolerance</span><span class="p">)</span>
+<a id="__codelineno-0-85" name="__codelineno-0-85"></a>
+<a id="__codelineno-0-86" name="__codelineno-0-86"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">maxiter</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-87" name="__codelineno-0-87"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;maxiter must be nonnegative.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-88" name="__codelineno-0-88"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">newton_decrement_tol</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-89" name="__codelineno-0-89"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;newton_decrement_tol must be positive.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-90" name="__codelineno-0-90"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">hessian_damping</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-91" name="__codelineno-0-91"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;hessian_damping must be nonnegative.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-92" name="__codelineno-0-92"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">max_step_norm</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-93" name="__codelineno-0-93"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;max_step_norm must be positive.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-94" name="__codelineno-0-94"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">initial_trust_radius</span> <span class="o">&lt;=</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-95" name="__codelineno-0-95"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;initial_trust_radius must be positive.&quot;</span><span class="p">)</span>
+<a id="__codelineno-0-96" name="__codelineno-0-96"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">line_search_maxiter</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">:</span>
+<a id="__codelineno-0-97" name="__codelineno-0-97"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;line_search_maxiter must be nonnegative.&quot;</span><span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="lcl.options.InferenceOptions" class="doc doc-heading">
+              <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">options</span><span class="o">.</span><span class="n">InferenceOptions</span><span class="p">(</span><span class="n">covariance</span><span class="o">=</span><span class="s1">&#39;clustered&#39;</span><span class="p">,</span> <span class="n">cluster</span><span class="o">=</span><span class="s1">&#39;panel&#39;</span><span class="p">,</span> <span class="n">finite_sample_correction</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">skip</span><span class="o">=</span><span class="kc">False</span><span class="p">)</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Covariance and standard-error settings.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>covariance</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>One of <code>"clustered"</code>, <code>"robust"</code>, or <code>"unadjusted"</code>.  Latent-class
+models accept only <code>"clustered"</code> and <code>"unadjusted"</code>, because the
+latent class is shared within a panel.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#34;clustered&#34;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>cluster</code>
+            </td>
+            <td>
+                  <code><span title="str">str</span> | None</code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Grouping used when <code>covariance="clustered"</code>.  <code>"panel"</code> clusters at
+the decision-maker.  Any other string names a column of the estimation
+data holding a coarser grouping, which must be constant within each
+panel — a household, market, or region identifier, for instance.  The
+value is ignored when <code>covariance</code> is not <code>"clustered"</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>&#34;panel&#34;</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>finite_sample_correction</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Apply the <code>G / (G - 1)</code> cluster multiplier, or <code>n / (n - 1)</code> for the
+unclustered sandwich, matching Stata's maximum-likelihood convention.</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>skip</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Skip covariance estimation entirely and return a matrix of <code>NaN</code>.</p>
+              </div>
+            </td>
+            <td>
+                  <code>False</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="lcl.options.InferenceOptions.cluster_column" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">cluster_column</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Return the data column naming a coarser cluster, if any.</p>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-attribute">
+
+
+
+<h3 id="lcl.options.InferenceOptions.clusters_at_panel" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">clusters_at_panel</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-property"><code>property</code></small>
+  </span>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Report whether clustering uses the panel identifier itself.</p>
+
+    </div>
+
+</div>
+
+
+
+
+<div class="doc doc-object doc-function">
+
+
+<h3 id="lcl.options.InferenceOptions.__post_init__" class="doc doc-heading">
+            <code class="highlight language-python"><span class="n">__post_init__</span><span class="p">()</span></code>
+
+</h3>
+
+
+    <div class="doc doc-contents ">
+
+        <p>Normalize and validate covariance settings.</p>
+
+
+            <details class="mkdocstrings-source">
+              <summary>Source code in <code>src/lcl/options.py</code></summary>
+              <div class="highlight"><table class="highlighttable"><tr><td class="linenos"><div class="linenodiv"><pre><span></span><span class="normal"><a href="#__codelineno-0-211">211</a></span>
+<span class="normal"><a href="#__codelineno-0-212">212</a></span>
+<span class="normal"><a href="#__codelineno-0-213">213</a></span>
+<span class="normal"><a href="#__codelineno-0-214">214</a></span>
+<span class="normal"><a href="#__codelineno-0-215">215</a></span>
+<span class="normal"><a href="#__codelineno-0-216">216</a></span>
+<span class="normal"><a href="#__codelineno-0-217">217</a></span>
+<span class="normal"><a href="#__codelineno-0-218">218</a></span>
+<span class="normal"><a href="#__codelineno-0-219">219</a></span>
+<span class="normal"><a href="#__codelineno-0-220">220</a></span>
+<span class="normal"><a href="#__codelineno-0-221">221</a></span>
+<span class="normal"><a href="#__codelineno-0-222">222</a></span>
+<span class="normal"><a href="#__codelineno-0-223">223</a></span>
+<span class="normal"><a href="#__codelineno-0-224">224</a></span>
+<span class="normal"><a href="#__codelineno-0-225">225</a></span>
+<span class="normal"><a href="#__codelineno-0-226">226</a></span>
+<span class="normal"><a href="#__codelineno-0-227">227</a></span>
+<span class="normal"><a href="#__codelineno-0-228">228</a></span>
+<span class="normal"><a href="#__codelineno-0-229">229</a></span>
+<span class="normal"><a href="#__codelineno-0-230">230</a></span>
+<span class="normal"><a href="#__codelineno-0-231">231</a></span>
+<span class="normal"><a href="#__codelineno-0-232">232</a></span>
+<span class="normal"><a href="#__codelineno-0-233">233</a></span></pre></div></td><td class="code"><div><pre><span></span><code><a id="__codelineno-0-211" name="__codelineno-0-211"></a><span class="k">def</span><span class="w"> </span><span class="nf">__post_init__</span><span class="p">(</span><span class="bp">self</span><span class="p">)</span> <span class="o">-&gt;</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-212" name="__codelineno-0-212"></a><span class="w">    </span><span class="sd">&quot;&quot;&quot;Normalize and validate covariance settings.&quot;&quot;&quot;</span>
+<a id="__codelineno-0-213" name="__codelineno-0-213"></a>    <span class="n">covariance</span> <span class="o">=</span> <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span><span class="o">.</span><span class="n">lower</span><span class="p">()</span>
+<a id="__codelineno-0-214" name="__codelineno-0-214"></a>    <span class="k">if</span> <span class="n">covariance</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;none&quot;</span><span class="p">,</span> <span class="s2">&quot;unadjusted&quot;</span><span class="p">,</span> <span class="s2">&quot;hessian&quot;</span><span class="p">}:</span>
+<a id="__codelineno-0-215" name="__codelineno-0-215"></a>        <span class="n">covariance</span> <span class="o">=</span> <span class="s2">&quot;unadjusted&quot;</span>
+<a id="__codelineno-0-216" name="__codelineno-0-216"></a>    <span class="k">elif</span> <span class="n">covariance</span> <span class="o">==</span> <span class="s2">&quot;clustered&quot;</span><span class="p">:</span>
+<a id="__codelineno-0-217" name="__codelineno-0-217"></a>        <span class="n">covariance</span> <span class="o">=</span> <span class="s2">&quot;clustered&quot;</span>
+<a id="__codelineno-0-218" name="__codelineno-0-218"></a>    <span class="k">elif</span> <span class="n">covariance</span> <span class="ow">in</span> <span class="p">{</span><span class="s2">&quot;robust&quot;</span><span class="p">,</span> <span class="s2">&quot;sandwich&quot;</span><span class="p">,</span> <span class="s2">&quot;huber-white&quot;</span><span class="p">}:</span>
+<a id="__codelineno-0-219" name="__codelineno-0-219"></a>        <span class="n">covariance</span> <span class="o">=</span> <span class="s2">&quot;robust&quot;</span>
+<a id="__codelineno-0-220" name="__codelineno-0-220"></a>    <span class="k">else</span><span class="p">:</span>
+<a id="__codelineno-0-221" name="__codelineno-0-221"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+<a id="__codelineno-0-222" name="__codelineno-0-222"></a>            <span class="s2">&quot;InferenceOptions.covariance must be one of &#39;clustered&#39;, &quot;</span>
+<a id="__codelineno-0-223" name="__codelineno-0-223"></a>            <span class="s2">&quot;&#39;robust&#39;, &#39;sandwich&#39;, &#39;huber-white&#39;, &#39;unadjusted&#39;, or &#39;none&#39;.&quot;</span>
+<a id="__codelineno-0-224" name="__codelineno-0-224"></a>        <span class="p">)</span>
+<a id="__codelineno-0-225" name="__codelineno-0-225"></a>    <span class="bp">self</span><span class="o">.</span><span class="n">covariance</span> <span class="o">=</span> <span class="n">covariance</span>
+<a id="__codelineno-0-226" name="__codelineno-0-226"></a>    <span class="k">if</span> <span class="n">covariance</span> <span class="o">==</span> <span class="s2">&quot;clustered&quot;</span> <span class="ow">and</span> <span class="bp">self</span><span class="o">.</span><span class="n">cluster</span> <span class="ow">is</span> <span class="kc">None</span><span class="p">:</span>
+<a id="__codelineno-0-227" name="__codelineno-0-227"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span>
+<a id="__codelineno-0-228" name="__codelineno-0-228"></a>            <span class="s2">&quot;covariance=&#39;clustered&#39; requires a cluster grouping. Pass &quot;</span>
+<a id="__codelineno-0-229" name="__codelineno-0-229"></a>            <span class="s2">&quot;cluster=&#39;panel&#39; for decision-maker clustering, cluster=&#39;&lt;column&gt;&#39; &quot;</span>
+<a id="__codelineno-0-230" name="__codelineno-0-230"></a>            <span class="s2">&quot;for a coarser grouping, or covariance=&#39;robust&#39;/&#39;unadjusted&#39;.&quot;</span>
+<a id="__codelineno-0-231" name="__codelineno-0-231"></a>        <span class="p">)</span>
+<a id="__codelineno-0-232" name="__codelineno-0-232"></a>    <span class="k">if</span> <span class="bp">self</span><span class="o">.</span><span class="n">cluster</span> <span class="ow">is</span> <span class="ow">not</span> <span class="kc">None</span> <span class="ow">and</span> <span class="ow">not</span> <span class="nb">isinstance</span><span class="p">(</span><span class="bp">self</span><span class="o">.</span><span class="n">cluster</span><span class="p">,</span> <span class="nb">str</span><span class="p">):</span>
+<a id="__codelineno-0-233" name="__codelineno-0-233"></a>        <span class="k">raise</span> <span class="ne">ValueError</span><span class="p">(</span><span class="s2">&quot;InferenceOptions.cluster must be a string or None.&quot;</span><span class="p">)</span>
+</code></pre></div></td></tr></table></div>
+            </details>
+    </div>
+
+</div>
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="lcl.options.DiagnosticsOptions" class="doc doc-heading">
+              <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">options</span><span class="o">.</span><span class="n">DiagnosticsOptions</span><span class="p">(</span><span class="n">check_separation</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">check_collinearity</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">warn_near_zero_numeraire</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">warn_large_coefficients</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span> <span class="n">separation_threshold</span><span class="o">=</span><span class="mf">1e-08</span><span class="p">,</span> <span class="n">near_zero_numeraire_threshold</span><span class="o">=</span><span class="mf">0.001</span><span class="p">,</span> <span class="n">large_coefficient_threshold</span><span class="o">=</span><span class="mf">25.0</span><span class="p">)</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Diagnostic switches and warning thresholds.</p>
+
+
+<p><span class="doc-section-title">Parameters:</span></p>
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>Description</th>
+          <th>Default</th>
+        </tr>
+      </thead>
+      <tbody>
+          <tr class="doc-section-item">
+            <td>
+                <code>check_separation</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Report whether any demographic cell has a class-membership probability
+pinned at zero.  When one does, the membership coefficients for that cell
+are unbounded and the observed information is singular in that direction,
+which is the usual cause of an otherwise puzzling rank deficiency.</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>check_collinearity</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Report the rank and conditioning of the observed information.</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>warn_near_zero_numeraire</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Warn when a class's numeraire coefficient sits near its floor, which makes
+every willingness-to-pay ratio for that class unstable.</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>warn_large_coefficients</code>
+            </td>
+            <td>
+                  <code><span title="bool">bool</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Warn on implausibly large utility coefficients.</p>
+              </div>
+            </td>
+            <td>
+                  <code>True</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>separation_threshold</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Membership probability at or below which a cell counts as separated.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1e-8</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>near_zero_numeraire_threshold</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Numeraire magnitude below which the near-zero warning fires.</p>
+              </div>
+            </td>
+            <td>
+                  <code>1e-3</code>
+            </td>
+          </tr>
+          <tr class="doc-section-item">
+            <td>
+                <code>large_coefficient_threshold</code>
+            </td>
+            <td>
+                  <code><span title="float">float</span></code>
+            </td>
+            <td>
+              <div class="doc-md-description">
+                <p>Absolute coefficient magnitude above which the large-coefficient warning
+fires.</p>
+              </div>
+            </td>
+            <td>
+                  <code>25.0</code>
+            </td>
+          </tr>
+      </tbody>
+    </table>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+<div class="doc doc-object doc-class">
+
+
+
+<h2 id="lcl.options.Options" class="doc doc-heading">
+              <code class="highlight language-python"><span class="n">lcl</span><span class="o">.</span><span class="n">options</span><span class="o">.</span><span class="n">Options</span><span class="p">(</span><span class="n">fit</span><span class="o">=</span><span class="n">FitOptions</span><span class="p">(),</span> <span class="n">optimization</span><span class="o">=</span><span class="n">OptimizationOptions</span><span class="p">(),</span> <span class="n">inference</span><span class="o">=</span><span class="n">InferenceOptions</span><span class="p">(),</span> <span class="n">diagnostics</span><span class="o">=</span><span class="n">DiagnosticsOptions</span><span class="p">())</span></code>
+
+  <span class="doc doc-labels">
+      <small class="doc doc-label doc-label-dataclass"><code>dataclass</code></small>
+  </span>
+
+</h2>
+
+
+    <div class="doc doc-contents first">
+
+
+
+        <p>Complete configuration shared by all model-fitting entry points.</p>
+
+
+
+
+
+
+
+
+
+
+
+<div class="doc doc-children">
+
+
+
+
+
+
+
+
+
+
+
+
+  </div>
+
+    </div>
+
+</div>
+
+
+
+
+
+
+
+
+
+
+
+
+                
+              </article>
+            </div>
+          
+          
+<script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
+        </div>
+        
+          <button type="button" class="md-top md-icon" data-md-component="top" hidden>
+  
+  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
+  Back to top
+</button>
+        
+      </main>
+      
+        <footer class="md-footer">
+  
+  <div class="md-footer-meta md-typeset">
+    <div class="md-footer-meta__inner md-grid">
+      <div class="md-copyright">
+  
+  
+    Made with
+    <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
+      Material for MkDocs
+    </a>
+  
+</div>
+      
+    </div>
+  </div>
+</footer>
+      
+    </div>
+    <div class="md-dialog" data-md-component="dialog">
+      <div class="md-dialog__inner md-typeset"></div>
+    </div>
+    
+    
+    
+      
+      
+      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.tabs", "navigation.sections", "navigation.indexes", "navigation.top", "content.code.copy", "content.code.annotate", "toc.follow"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+    
+    
+      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      
+        <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.js"></script>
+      
+    
+  </body>
+</html>
