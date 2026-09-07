@@ -41,6 +41,9 @@ memory-constrained device or raised to force the batched schedule::
 
     import lcl._scheduling
     lcl._scheduling.INFERENCE_THRESHOLD_BYTES = 32 * 1024**2
+
+These are trace-time settings. Change them before the first fit of a given
+configuration; already compiled executables retain their original schedule.
 """
 
 from __future__ import annotations

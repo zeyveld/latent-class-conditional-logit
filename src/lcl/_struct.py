@@ -83,7 +83,7 @@ class EMStepDiagnostics(NamedTuple):
 
 
 class EMVars(NamedTuple):
-    """Parameters and probabilities updated by the EM algorithm."""
+    """Parameters, likelihood, and posterior evaluated at the same EM iterate."""
 
     latent_betas: Float64[Array, "alt_vars classes"] | None
     structural_betas: Float64[Array, "alt_vars classes"] | None

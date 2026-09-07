@@ -1,9 +1,9 @@
 """Observed-data convergence: Aitken stopping and a final Newton polish.
 
-EM ascends the observed-data log likelihood monotonically but only linearly, so
-the iteration-to-iteration change understates the remaining distance to the
-optimum by ``1 / (1 - r)`` where ``r`` is the observed rate.  Two tools here
-address that.
+EM typically approaches a local optimum linearly, so a small likelihood
+increment need not imply proximity to the limit. For a geometric sequence with
+rate ``r``, the remaining ascent after the latest iterate is its increment times
+``r / (1 - r)``. Two tools here address convergence.
 
 :func:`aitken_extrapolated_gap` estimates the remaining ascent from the last
 three log likelihoods by summing the geometric tail, following Bohning, Dietz,
@@ -16,13 +16,15 @@ rather than to one step's progress.
 observed-data log likelihood, using the exact analytic score and Hessian that
 :mod:`lcl._analytic_derivatives` already assembles for the covariance.  The
 observed information and the sandwich covariance both assume the score vanishes
-at the reported estimate; EM alone does not deliver that, and no tightening of
-the EM tolerance reliably does.  A handful of Newton steps does.
+at the reported estimate. Polishing can improve stationarity more efficiently
+than tightening the EM tolerance; the final score check still determines the
+public convergence flag.
 """
 
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any, NamedTuple
@@ -33,8 +35,8 @@ from jaxtyping import Array, Float64
 
 from lcl._analytic_derivatives import _panel_scores_and_hessian
 from lcl._em_alg_steps import (
-    _compute_conditional_class_probs,
-    _compute_unconditional_loglik,
+    _compute_em_log_kernels,
+    _posterior_and_loglik,
     _compute_panel_logliks,
 )
 from lcl._optimize import exact_newton_minimize
@@ -42,6 +44,7 @@ from lcl._params import ParamPacking
 from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
 logger = logging.getLogger(__name__)
+
 
 def _require_panels(data: Data) -> int:
     """Return the panel count, which every latent-class routine needs."""
@@ -66,6 +69,9 @@ def _compiled_polish(
     maxiter: int,
     max_step_norm: float,
     line_search_maxiter: int,
+    hessian_damping: float = 0.0,
+    initial_trust_radius: float = 1.0,
+    accept_any_decrease: bool = False,
 ) -> Callable[..., Any]:
     """Return a compiled observed-data Newton solve for one static configuration.
 
@@ -83,6 +89,12 @@ def _compiled_polish(
         Trust-radius ceiling.
     line_search_maxiter : int
         Armijo backtracking budget.
+    hessian_damping : float, default=0.0
+        Initial fallback diagonal shift.
+    initial_trust_radius : float, default=1.0
+        Initial radius in the curvature metric.
+    accept_any_decrease : bool, default=False
+        Use a strict objective decrease instead of Armijo sufficiency.
 
     Returns
     -------
@@ -139,6 +151,9 @@ def _compiled_polish(
             maxiter=maxiter,
             max_step_norm=max_step_norm,
             line_search_maxiter=line_search_maxiter,
+            damping=hessian_damping,
+            initial_trust_radius=initial_trust_radius,
+            accept_any_decrease=accept_any_decrease,
         )
         return state.params, state.step_num
 
@@ -177,10 +192,13 @@ def aitken_extrapolated_gap(logliks: list[float]) -> float:
         short or the rate is not a contraction, so a caller using this as a
         stopping rule keeps iterating rather than stopping on a bad estimate.
     """
-    if len(logliks) < 3:
+    if len(logliks) < 3 or not all(math.isfinite(value) for value in logliks[-3:]):
         return float("inf")
     previous_increment = logliks[-2] - logliks[-3]
     increment = logliks[-1] - logliks[-2]
+    roundoff = 64 * math.ulp(max(1.0, *(abs(value) for value in logliks[-3:])))
+    if increment < -roundoff or previous_increment < -roundoff:
+        return float("inf")
     if increment <= 0.0:
         # Round-off at the top of the likelihood: nothing measurable remains.
         return 0.0
@@ -199,7 +217,7 @@ def _score_max_kernel(
     data: Data,
     packing: ParamPacking,
 ) -> Float64[Array, ""]:
-    """Largest absolute observed-data score component, as a device scalar.
+    """Largest absolute observed-data score component per panel.
 
     Compiling this discards the Hessian the derivative kernel also returns, which
     is the expensive half of that pass and is not needed for a stationarity check.
@@ -207,7 +225,7 @@ def _score_max_kernel(
     panel_scores, _ = _panel_scores_and_hessian(
         flat_params, diff_unchosen_chosen, data, packing
     )
-    return jnp.max(jnp.abs(jnp.sum(panel_scores, axis=0)))
+    return jnp.max(jnp.abs(jnp.sum(panel_scores, axis=0))) / _require_panels(data)
 
 
 @filter_jit
@@ -232,10 +250,8 @@ def observed_score_max(
     data: Data,
     packing: ParamPacking,
 ) -> float:
-    """Return the largest absolute component of the observed-data score."""
-    return float(
-        _score_max_kernel(flat_params, diff_unchosen_chosen, data, packing)
-    )
+    """Return the largest absolute observed-data score component per panel."""
+    return float(_score_max_kernel(flat_params, diff_unchosen_chosen, data, packing))
 
 
 def em_vars_from_flat(
@@ -275,11 +291,9 @@ def em_vars_from_flat(
     # ``thetas=None``.  Preserving that convention keeps the round trip through
     # ParamPacking.pack exact.
     thetas = None if data.dems is None else packed_thetas
-    posterior, _ = _compute_conditional_class_probs(
-        structural_betas, thetas, shares, diff_unchosen_chosen, data
-    )
-    loglik = _compute_unconditional_loglik(
-        structural_betas, prior_by_panel, diff_unchosen_chosen, data
+    posterior, loglik = _posterior_and_loglik(
+        _compute_em_log_kernels(structural_betas, diff_unchosen_chosen, data),
+        prior_by_panel,
     )
     return EMVars(
         latent_betas=latent_betas,
@@ -300,6 +314,9 @@ def polish_observed_data(
     maxiter: int = 25,
     max_step_norm: float = 1000.0,
     line_search_maxiter: int = 40,
+    hessian_damping: float = 0.0,
+    initial_trust_radius: float = 1.0,
+    accept_any_decrease: bool = False,
 ) -> tuple[Float64[Array, "all_params"], PolishReport]:
     """Drive the observed-data score to zero with safeguarded Newton steps.
 
@@ -320,6 +337,12 @@ def polish_observed_data(
         Trust-radius ceiling passed through to the solver.
     line_search_maxiter : int, default=40
         Armijo backtracking budget per iteration.
+    hessian_damping : float, default=0.0
+        Initial fallback diagonal shift passed through to the solver.
+    initial_trust_radius : float, default=1.0
+        Initial radius passed through to the solver.
+    accept_any_decrease : bool, default=False
+        Accept a strict objective decrease instead of requiring Armijo sufficiency.
 
     Returns
     -------
@@ -334,9 +357,7 @@ def polish_observed_data(
 
     def total_loglik(params: Float64[Array, "all_params"]) -> float:
         """Total observed-data log likelihood at ``params``."""
-        return float(
-            _total_loglik_kernel(params, diff_unchosen_chosen, data, packing)
-        )
+        return float(_total_loglik_kernel(params, diff_unchosen_chosen, data, packing))
 
     loglik_before = total_loglik(flat_params)
     score_before = observed_score_max(flat_params, diff_unchosen_chosen, data, packing)
@@ -353,7 +374,13 @@ def polish_observed_data(
         )
 
     solve = _compiled_polish(
-        packing, int(maxiter), float(max_step_norm), int(line_search_maxiter)
+        packing,
+        int(maxiter),
+        float(max_step_norm),
+        int(line_search_maxiter),
+        float(hessian_damping),
+        float(initial_trust_radius),
+        bool(accept_any_decrease),
     )
     candidate, steps = solve(flat_params, diff_unchosen_chosen, data, scale)
     iterations = int(steps)

@@ -110,27 +110,27 @@ class FitOptions:
     em_tol : float, default=1e-8
         Stopping tolerance on the Aitken-extrapolated log-likelihood change per
         panel.  Because EM converges linearly, the raw iteration-to-iteration
-        change understates the distance to the optimum by ``1 / (1 - r)`` where
-        ``r`` is the observed rate; the criterion therefore compares the
-        extrapolated limit rather than the raw change.  Normalizing by the panel
+        change can understate the distance to the optimum. For an observed rate
+        ``r``, the estimated remaining ascent after the latest iterate is
+        ``change * r / (1 - r)``. Normalizing by the panel
         count keeps the tolerance's meaning fixed as the sample grows.
     score_tol : float, default=1e-4
         Stopping tolerance on the maximum absolute component of the observed-data
-        score, per panel.  EM terminates when either criterion is met, and the
-        public ``converged`` flag additionally requires this one.
+        score, per panel, used for the final public ``converged`` flag. It is
+        checked after EM and optional polishing; it does not stop EM early.
     polish : bool, default=True
         Run safeguarded Newton steps on the observed-data log likelihood after
-        EM, using the exact analytic score and Hessian.  EM alone converges
-        linearly and reliably stops short of a stationary point; the polish
-        makes the reported optimum stationary, which is what the observed
-        information and the sandwich covariance assume.  A polish step is kept
+        EM, using the exact analytic score and Hessian. EM may stop before
+        reaching a stationary point; polishing attempts to close this gap
+        before covariance estimation. A polish step is kept
         only if it does not decrease the log likelihood.
     polish_maxiter : int, default=25
         Maximum number of observed-data Newton iterations.
     num_devices : int
         Number of JAX devices across which class-specific M-steps are sharded.
     check_interval : int, default=1
-        Number of EM recursions between convergence checks.
+        Number of EM recursions between Aitken stopping checks. History and
+        progress callbacks are still updated on every recursion.
     starts : int, default=1
         Number of independent EM starts.  The start with the highest final log
         likelihood is kept.
@@ -141,6 +141,12 @@ class FitOptions:
     -----
     The class is frozen so a configuration can be hashed and used as a static
     argument to a cached JIT-compiled M-step.
+
+    Polishing uses ``polish_maxiter`` and a fixed Newton decrement tolerance of
+    ``1e-10``. The M-step iteration budget and decrement tolerance come from
+    :class:`OptimizationOptions`; its remaining solver settings also apply to
+    polishing. The final score criterion depends on the scale of the predictors
+    and certifies approximate stationarity, not a global maximum.
     """
 
     seed: int = 0

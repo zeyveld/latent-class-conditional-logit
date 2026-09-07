@@ -9,6 +9,7 @@ extreme parameter scales.
 """
 
 import jax
+import equinox as eqx
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
@@ -23,6 +24,11 @@ from lcl._params import ParamPacking
 from lcl.options import FitOptions, InferenceOptions
 from lcl._struct import Data
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
+
+
+def _fresh_schedule_call(kernel, *args):
+    """Trace the selected schedule anew instead of reusing a prior JIT result."""
+    return eqx.filter_jit(lambda *values: kernel.__wrapped__(*values))(*args)
 
 
 def _random_panel_data(rng, num_panels, num_alt_vars, num_dem_vars):
@@ -221,12 +227,15 @@ def test_batched_and_sequential_schedules_agree(
     flat = jnp.asarray(rng.normal(size=packing.num_params) * param_scale)
 
     monkeypatch.setattr(scheduling, "INFERENCE_THRESHOLD_BYTES", 2**62)
-    scores_batched, hessian_batched = _panel_scores_and_hessian(
+    scores_batched, hessian_batched = _fresh_schedule_call(
+        _panel_scores_and_hessian,
         flat, diff, data, packing
     )
 
     monkeypatch.setattr(scheduling, "INFERENCE_THRESHOLD_BYTES", 0)
-    scores_scan, hessian_scan = _panel_scores_and_hessian(flat, diff, data, packing)
+    scores_scan, hessian_scan = _fresh_schedule_call(
+        _panel_scores_and_hessian, flat, diff, data, packing
+    )
 
     score_scale = max(float(jnp.max(jnp.abs(scores_batched))), 1.0)
     hessian_scale = max(float(jnp.max(jnp.abs(hessian_batched))), 1.0)
@@ -260,7 +269,9 @@ def test_sequential_schedule_still_matches_autodiff(monkeypatch) -> None:
     hessian_ad = jax.hessian(lambda fp: jnp.sum(panel_loglik(fp)))(flat)
 
     monkeypatch.setattr(scheduling, "INFERENCE_THRESHOLD_BYTES", 0)
-    scores_an, hessian_an = _panel_scores_and_hessian(flat, diff, data, packing)
+    scores_an, hessian_an = _fresh_schedule_call(
+        _panel_scores_and_hessian, flat, diff, data, packing
+    )
 
     score_scale = max(float(jnp.max(jnp.abs(scores_ad))), 1.0)
     hessian_scale = max(float(jnp.max(jnp.abs(hessian_ad))), 1.0)
@@ -281,12 +292,14 @@ def test_membership_mstep_schedules_agree(
     thetas = jnp.asarray(rng.normal(size=(num_dem_vars + 1) * (num_classes - 1)) * 1.5)
 
     monkeypatch.setattr(scheduling, "ITERATION_THRESHOLD_BYTES", 2**62)
-    value_b, grad_b, hess_b = _compute_grouped_data_loglik_grad_hess(
+    value_b, grad_b, hess_b = _fresh_schedule_call(
+        _compute_grouped_data_loglik_grad_hess,
         thetas, targets, data, num_classes
     )
 
     monkeypatch.setattr(scheduling, "ITERATION_THRESHOLD_BYTES", 0)
-    value_s, grad_s, hess_s = _compute_grouped_data_loglik_grad_hess(
+    value_s, grad_s, hess_s = _fresh_schedule_call(
+        _compute_grouped_data_loglik_grad_hess,
         thetas, targets, data, num_classes
     )
 

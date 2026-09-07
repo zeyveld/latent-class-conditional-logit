@@ -10,6 +10,7 @@ import numpy as onp
 from equinox import combine, filter_jit, is_array, partition
 from jax import lax
 from jax.nn import softmax
+from jax.ops import segment_sum
 from jaxtyping import Array, Float64
 
 from lcl.constraints import (
@@ -19,7 +20,7 @@ from lcl.constraints import (
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._demographics import _predict_class_membership_probs, _update_thetas
 from lcl._jax_compat import Mesh, NamedSharding, P, shard_map
-from lcl._kernels import _diff_log_kernels
+from lcl._kernels import _diff_log_kernels, _diff_logit_components
 from lcl._optimize import exact_newton_minimize, newton_kwargs
 from lcl.options import FitOptions, OptimizationOptions
 from lcl._struct import Data, DiffUnchosenChosen, EMStepDiagnostics, EMVars
@@ -66,17 +67,14 @@ def _compiled_em_step(
     num_devices: int,
     numeraire_idx: int | None,
     numeraire_min_abs: float,
-) -> Callable[
-    [EMVars, DiffUnchosenChosen, Data], tuple[EMVars, EMStepDiagnostics]
-]:
+) -> Callable[[EMVars, DiffUnchosenChosen, Data], tuple[EMVars, EMStepDiagnostics]]:
     """Return a compiled EM recursion for one static configuration.
 
     Every EM iteration runs the identical computation graph, so tracing and
     compiling it once and reusing the executable removes the dominant cost of the
     loop.  The cache key is exactly the set of values baked into that graph;
-    array shapes and dtypes are handled by the JIT cache underneath.  Both option
-    objects are frozen dataclasses, so they hash by value and two structurally
-    identical configurations share one executable.
+    array shapes and dtypes are handled by the JIT cache underneath.  The options
+    object is a frozen dataclass, so equal configurations share one executable.
 
     Parameters
     ----------
@@ -142,6 +140,10 @@ def _em_step(
         raise ValueError("Latent betas are required before running an EM step.")
     if em_vars.shares is None:
         raise ValueError("Class shares are required before running an EM step.")
+    if em_vars.class_probs_by_panel is None:
+        raise ValueError(
+            "Posterior class probabilities are required before an EM step."
+        )
     if data.dems is not None and em_vars.thetas is None:
         raise ValueError(
             "Class-membership coefficients must be initialized before the first "
@@ -204,26 +206,23 @@ def _em_step_impl(
     if structural_betas is None or latent_betas is None or shares is None:
         raise ValueError("The EM state is incomplete; see _em_step for the checks.")
 
-    # Update posterior class-membership probabilities from choices and demographics.
-    updated_class_probs_by_panel, updated_class_probs_by_choice = (
-        _compute_conditional_class_probs(
-            structural_betas,
-            em_vars.thetas,
-            shares,
-            diff_unchosen_chosen,
-            data,
-        )
-    )
+    # The preceding likelihood evaluation also produces this E-step. Reuse the
+    # existing posterior buffer instead of repeating X_diff @ betas and the
+    # case/panel reductions at the same parameters on every recursion.
+    updated_class_probs_by_panel = em_vars.class_probs_by_panel
+    if updated_class_probs_by_panel is None or data.panels_of_cases is None:
+        raise ValueError("Panel posteriors and case-to-panel identifiers are required.")
 
     # Update class-specific taste coefficients using posterior case weights.
     updated_latent_betas, beta_newton_error = _update_betas(
         latent_betas,
-        updated_class_probs_by_choice,
+        updated_class_probs_by_panel,
         diff_unchosen_chosen,
         optimization_options,
         num_devices,
         numeraire_idx,
         numeraire_min_abs,
+        panels_of_cases=data.panels_of_cases,
     )
 
     # Without demographics, update the aggregate class-share vector directly.
@@ -261,11 +260,9 @@ def _em_step_impl(
     updated_structural_betas = _to_structural_betas(
         updated_latent_betas, numeraire_idx, numeraire_min_abs
     )
-    unconditional_loglik = _compute_unconditional_loglik(
-        updated_structural_betas,
+    next_class_probs_by_panel, unconditional_loglik = _posterior_and_loglik(
+        _compute_em_log_kernels(updated_structural_betas, diff_unchosen_chosen, data),
         unconditional_class_probs_by_panel,
-        diff_unchosen_chosen,
-        data,
     )
 
     return (
@@ -275,7 +272,7 @@ def _em_step_impl(
             thetas=updated_thetas,
             shares=updated_shares,
             unconditional_loglik=unconditional_loglik,
-            class_probs_by_panel=updated_class_probs_by_panel,
+            class_probs_by_panel=next_class_probs_by_panel,
         ),
         EMStepDiagnostics(
             beta_newton_error=beta_newton_error,
@@ -327,25 +324,34 @@ def _compute_conditional_class_probs(
     log_kernels = _compute_log_kernels(structural_betas, diff_unchosen_chosen, data)
     conditional_class_probs = softmax(log_class_probs + log_kernels, axis=1)
 
-    if data.num_cases_per_panel is None:
+    if data.panels_of_cases is None:
         raise ValueError("Panel identifiers are required for latent-class models.")
 
-    return conditional_class_probs, jnp.repeat(
-        conditional_class_probs,
-        data.num_cases_per_panel,
-        axis=0,
-        total_repeat_length=data.num_cases,
-    )
+    return conditional_class_probs, conditional_class_probs[data.panels_of_cases]
+
+
+@filter_jit
+def _posterior_and_loglik(
+    log_kernels: Float64[Array, "panels classes"],
+    prior: Float64[Array, "panels classes"],
+) -> tuple[Float64[Array, "panels classes"], Float64[Array, ""]]:
+    """Normalize one set of weighted kernels for both E-step and likelihood."""
+    weighted = jnp.log(jnp.maximum(prior, 1e-300)) + log_kernels
+    shift = lax.stop_gradient(jnp.max(weighted, axis=1, keepdims=True))
+    exp_weighted = jnp.exp(weighted - shift)
+    denominator = jnp.sum(exp_weighted, axis=1, keepdims=True)
+    return exp_weighted / denominator, jnp.sum(shift + jnp.log(denominator))
 
 
 def _update_betas(
     betas: Float64[Array, "alt_vars classes"],
-    class_probs_by_choice: Float64[Array, "cases classes"],
+    class_probs_by_choice: Float64[Array, "weight_rows classes"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     optimization_options: OptimizationOptions,
     num_devices: int,
     numeraire_idx: int | None,
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
+    panels_of_cases: Array | None = None,
 ) -> tuple[Float64[Array, "alt_vars classes"], Float64[Array, "classes"]]:
     """Optimize taste parameters using strict SPMD multi-GPU parallelism.
 
@@ -353,8 +359,8 @@ def _update_betas(
     ----------
     betas : Float64[Array, "alt_vars classes"]
         Current unconstrained taste parameters.
-    class_probs_by_choice : Float64[Array, "cases classes"]
-        Posterior class membership probabilities to act as case weights.
+    class_probs_by_choice : Float64[Array, "weight_rows classes"]
+        Posterior weights by case, or by panel when ``panels_of_cases`` is given.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix.
     optimization_options : :class:`~lcl.options.OptimizationOptions`
@@ -365,6 +371,9 @@ def _update_betas(
         Column index of the numeraire variable.
     numeraire_min_abs : float, default=1e-5
         Minimum absolute value imposed on the numeraire coefficient.
+    panels_of_cases : Array | None, optional
+        Expand panel weights one class at a time inside the solver. This avoids
+        a live ``(cases, classes)`` matrix and shards only the smaller panel matrix.
 
     Returns
     -------
@@ -405,25 +414,29 @@ def _update_betas(
 
     with mesh:
         mapped_update = shard_map(
-            lambda device_betas, device_weights, dynamic_diff: _distributed_update(
-                device_betas,
-                device_weights,
-                combine(dynamic_diff, static_diff),
-                numeraire_idx,
-                numeraire_min_abs,
-                optimization_options,
+            lambda device_betas, device_weights, dynamic_diff, case_panels: (
+                _distributed_update(
+                    device_betas,
+                    device_weights,
+                    combine(dynamic_diff, static_diff),
+                    numeraire_idx,
+                    numeraire_min_abs,
+                    optimization_options,
+                    case_panels,
+                )
             ),
             mesh=mesh,
             in_specs=(
                 P("class_device", None, None),
                 P("class_device", None, None),
                 diff_specs,
+                P(),
             ),
             out_specs=(P("class_device", None, None), P("class_device", None)),
             check_vma=False,
         )
         out_betas, out_errors = mapped_update(
-            betas_sharded, weights_sharded, dyn_diff
+            betas_sharded, weights_sharded, dyn_diff, panels_of_cases
         )
 
     # Flatten the result back to standard shape and slice off the dummy padding.
@@ -439,6 +452,7 @@ def _distributed_update(
     numeraire_idx: int | None,
     numeraire_min_abs: float,
     optimization_options: OptimizationOptions,
+    panels_of_cases: Array | None = None,
 ) -> tuple[
     Float64[Array, "... classes_per_device alt_vars"],
     Float64[Array, "... classes_per_device"],
@@ -460,6 +474,8 @@ def _distributed_update(
         Minimum absolute value imposed on the numeraire coefficient.
     optimization_options : :class:`~lcl.options.OptimizationOptions`
         Newton optimization settings.
+    panels_of_cases : Array | None, optional
+        Case-to-panel mapping when the input weights are panel posteriors.
 
     Returns
     -------
@@ -484,6 +500,8 @@ def _distributed_update(
     ) -> tuple[Float64[Array, "alt_vars"], Float64[Array, ""]]:
         """Optimize the beta vector for one latent class on the current shard."""
         b, w = mapped_inputs
+        if panels_of_cases is not None:
+            w = w[panels_of_cases]
 
         def _value_fn_closure(
             p: Float64[Array, "alt_vars"],
@@ -581,6 +599,31 @@ def _compute_unconditional_loglik(
         structural_betas, class_probs_by_panel, diff_unchosen_chosen, data
     )
     return jnp.sum(panel_logliks)
+
+
+@filter_jit
+def _compute_em_log_kernels(
+    betas: Float64[Array, "alt_vars classes"],
+    diff: DiffUnchosenChosen,
+    data: Data,
+) -> Float64[Array, "panels classes"]:
+    """Evaluate EM kernels in small class blocks to bound temporary storage.
+
+    Reusing posteriors makes them live inputs to the M-step. Scanning the final
+    likelihood avoids full rows-by-classes utility and probability temporaries.
+    Blocks of two improve matrix throughput for larger class counts while
+    retaining the memory bound; smaller models use one class at a time.
+    """
+    panels_of_cases, num_panels = data.panels_of_cases, data.num_panels
+    if panels_of_cases is None or num_panels is None:
+        raise ValueError("Panel identifiers are required for latent-class models.")
+
+    def one_class(beta: Array) -> Array:
+        """Reduce one class's chosen log probabilities directly to panels."""
+        log_probs, _ = _diff_logit_components(diff.X, beta, diff.cases, diff.num_cases)
+        return segment_sum(log_probs, panels_of_cases, num_segments=num_panels)
+
+    return lax.map(one_class, betas.T, batch_size=2 if betas.shape[1] > 3 else None).T
 
 
 @filter_jit

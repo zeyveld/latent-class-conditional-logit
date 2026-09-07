@@ -1,7 +1,11 @@
 """Expectation-Maximization (EM) algorithm initialization routines."""
 
+from collections.abc import Iterator
+
 import jax.numpy as jnp
 import numpy as onp
+from equinox import filter_jit
+from jax.nn import softmax
 from jaxtyping import Array, Float64
 
 from lcl.constraints import (
@@ -11,12 +15,50 @@ from lcl.constraints import (
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
 from lcl._demographics import _predict_class_membership_probs
 from lcl._em_alg_steps import (
-    _compute_conditional_class_probs,
-    _compute_unconditional_loglik,
+    _compute_em_log_kernels,
+    _posterior_and_loglik,
 )
 from lcl._optimize import exact_newton_minimize, newton_kwargs
 from lcl.options import FitOptions, OptimizationOptions
 from lcl._struct import Data, DiffUnchosenChosen, EMVars
+
+
+@filter_jit
+def _fit_starting_beta(
+    diff: DiffUnchosenChosen,
+    optimization_options: OptimizationOptions,
+    numeraire_idx: int | None,
+    numeraire_min_abs: float,
+) -> Float64[Array, "alt_vars"]:
+    """Fit one starting subset, reusing the executable across equal shapes.
+
+    Subset arrays are dynamic arguments, never dataset-sized closure constants.
+    Unequal subset shapes still specialize normally; changing a seed or array
+    values alone does not require another compilation.
+    """
+    weights = jnp.ones(diff.num_cases)
+    scale = max(diff.num_cases, 1)
+
+    def value(p: Array) -> Array:
+        """Evaluate the mean subset objective."""
+        structural = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
+        return _loglik_value(structural, diff, weights) / scale
+
+    def derivatives(p: Array) -> tuple[Array, Array, Array]:
+        """Evaluate the mean subset derivatives in latent coordinates."""
+        structural = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
+        (val, aux), grad, hess = _loglik_gradient(structural, diff, weights)
+        grad, _, hess = pullback_negative_derivatives(
+            p, numeraire_idx, grad, aux, hess, numeraire_min_abs
+        )
+        return val / scale, grad / scale, hess / scale
+
+    return exact_newton_minimize(
+        value,
+        derivatives,
+        jnp.zeros(diff.X.shape[1]),
+        **newton_kwargs(optimization_options),
+    ).params
 
 
 def _get_starting_vals(
@@ -68,49 +110,14 @@ def _get_starting_vals(
     latent_betas_list = []
 
     for class_diff_unchosen_chosen in diff_unchosen_chosen_by_class:
-        # We can bake the weights directly into the closures for the startup
-        w_ones = jnp.ones(class_diff_unchosen_chosen.num_cases)
-        objective_scale = jnp.maximum(jnp.sum(w_ones), 1.0)
-
-        def _startup_value_closure(
-            p: Float64[Array, "alt_vars"],
-        ) -> Float64[Array, ""]:
-            """Evaluate the subset objective after applying the numeraire transform."""
-            p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-            return (
-                _loglik_value(p_struct, class_diff_unchosen_chosen, w_ones)
-                / objective_scale
+        latent_betas_list.append(
+            _fit_starting_beta(
+                class_diff_unchosen_chosen,
+                optimization_options,
+                numeraire_idx,
+                numeraire_min_abs,
             )
-
-        def _startup_loglik_closure(
-            p: Float64[Array, "alt_vars"],
-        ) -> tuple[
-            Float64[Array, ""],
-            Float64[Array, "alt_vars"],
-            Float64[Array, "alt_vars alt_vars"],
-        ]:
-            """Evaluate the subset objective, gradient, and Hessian for Newton steps."""
-            p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-            (val, aux), grad, hessian = _loglik_gradient(
-                p_struct, class_diff_unchosen_chosen, w_ones
-            )
-
-            grad, aux, hessian = pullback_negative_derivatives(
-                p, numeraire_idx, grad, aux, hessian, numeraire_min_abs
-            )
-            return (
-                val / objective_scale,
-                grad / objective_scale,
-                hessian / objective_scale,
-            )
-
-        optim_res = exact_newton_minimize(
-            _startup_value_closure,
-            _startup_loglik_closure,
-            jnp.zeros(data.num_alt_vars),
-            **newton_kwargs(optimization_options),
         )
-        latent_betas_list.append(optim_res.params)
 
     # Stack the independently estimated parameter vectors into a (K, C) matrix
     latent_betas = jnp.column_stack(latent_betas_list)
@@ -118,11 +125,8 @@ def _get_starting_vals(
         latent_betas, numeraire_idx, numeraire_min_abs
     )
 
-    shares = jnp.repeat(1.0 / num_classes, num_classes)
-
-    starting_class_probs_by_panel, _ = _compute_conditional_class_probs(
-        structural_betas, None, shares, diff_unchosen_chosen, data
-    )
+    log_kernels = _compute_em_log_kernels(structural_betas, diff_unchosen_chosen, data)
+    starting_class_probs_by_panel = softmax(log_kernels, axis=1)
     starting_shares = jnp.mean(starting_class_probs_by_panel, axis=0)
 
     # Seed the membership model at the intercepts that reproduce the starting
@@ -137,18 +141,16 @@ def _get_starting_vals(
         clipped_shares = jnp.clip(starting_shares, 1e-10)
         normalized_shares = clipped_shares / clipped_shares.sum()
         intercepts = jnp.log(normalized_shares[1:] / normalized_shares[0])
-        thetas = jnp.zeros((data.num_dem_vars + 1, num_classes - 1)).at[0, :].set(
-            intercepts
+        thetas = (
+            jnp.zeros((data.num_dem_vars + 1, num_classes - 1)).at[0, :].set(intercepts)
         )
 
     if thetas is None:
-        prior_by_panel = jnp.repeat(
-            starting_shares[None, :], data.num_panels, axis=0
-        )
+        prior_by_panel = jnp.repeat(starting_shares[None, :], data.num_panels, axis=0)
     else:
         prior_by_panel = _predict_class_membership_probs(thetas, data)
-    starting_loglik = _compute_unconditional_loglik(
-        structural_betas, prior_by_panel, diff_unchosen_chosen, data
+    starting_class_probs_by_panel, starting_loglik = _posterior_and_loglik(
+        log_kernels, prior_by_panel
     )
 
     return EMVars(
@@ -166,7 +168,7 @@ def _random_class_partition(
     data: Data,
     num_classes: int,
     fit_options: FitOptions,
-) -> list[DiffUnchosenChosen]:
+) -> Iterator[DiffUnchosenChosen]:
     """Randomly partition decision-makers to initialize class-specific parameters.
 
     Ensures that all choice situations belonging to a specific decision-maker (panel)
@@ -184,11 +186,11 @@ def _random_class_partition(
     fit_options : :class:`~lcl.options.FitOptions`
         EM settings containing the reproducible partition seed.
 
-    Returns
-    -------
-    list[:class:`~lcl._struct.DiffUnchosenChosen`]
-        A list of length `num_classes`, where each element is a valid, independent
-        differenced design matrix subset ready for conditional logit estimation.
+    Yields
+    ------
+    :class:`~lcl._struct.DiffUnchosenChosen`
+        One independent differenced subset at a time, so startup does not retain
+        a second copy of the entire differenced design split across classes.
     """
     if diff_unchosen_chosen.panels is None or data.num_panels is None:
         raise ValueError(
@@ -211,8 +213,6 @@ def _random_class_partition(
     # Map panel assignments to long-format observations.
     row_classes = panel_to_class[onp.array(diff_unchosen_chosen.panels)]
 
-    diff_unchosen_chosen_by_class = []
-
     for class_idx in range(num_classes):
         # Select the observations assigned to the current class.
         mask = row_classes == class_idx
@@ -232,14 +232,10 @@ def _random_class_partition(
             int(onp.max(contiguous_cases) + 1) if len(contiguous_cases) > 0 else 0
         )
 
-        diff_unchosen_chosen_by_class.append(
-            DiffUnchosenChosen(
-                X=jnp.array(class_X),
-                alts=jnp.array(class_alts),
-                cases=jnp.array(contiguous_cases, dtype="uint32"),
-                panels=jnp.array(contiguous_panels, dtype="uint32"),
-                num_cases=num_cases,
-            )
+        yield DiffUnchosenChosen(
+            X=jnp.array(class_X),
+            alts=jnp.array(class_alts),
+            cases=jnp.array(contiguous_cases, dtype="uint32"),
+            panels=jnp.array(contiguous_panels, dtype="uint32"),
+            num_cases=num_cases,
         )
-
-    return diff_unchosen_chosen_by_class

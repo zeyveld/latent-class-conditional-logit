@@ -1,6 +1,7 @@
 """Estimation for latent-class conditional logit."""
 
 import logging
+import math
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from time import time
@@ -452,14 +453,11 @@ class LatentClassConditionalLogit(ChoiceModel):
         em_history_rows = best_run.history
         em_recursion = best_run.recursions
 
-        # Observed-data Newton polish.  EM is linearly convergent, so it stops
-        # short of a stationary point; the observed information and the sandwich
-        # covariance both assume the score vanishes at the reported estimate.
+        # EM's likelihood stopping rule need not imply stationarity. A final
+        # observed-data solve improves the score before covariance estimation.
         if em_vars.latent_betas is None or em_vars.shares is None:
             raise RuntimeError("The EM run returned an incomplete parameter state.")
-        flat_params = packing.pack(
-            em_vars.latent_betas, em_vars.thetas, em_vars.shares
-        )
+        flat_params = packing.pack(em_vars.latent_betas, em_vars.thetas, em_vars.shares)
         polish_report: PolishReport | None = None
         if fit_options.polish:
             if progress_callback is not None:
@@ -472,6 +470,9 @@ class LatentClassConditionalLogit(ChoiceModel):
                 maxiter=fit_options.polish_maxiter,
                 max_step_norm=optimization_options.max_step_norm,
                 line_search_maxiter=optimization_options.line_search_maxiter,
+                hessian_damping=optimization_options.hessian_damping,
+                initial_trust_radius=optimization_options.initial_trust_radius,
+                accept_any_decrease=optimization_options.accept_any_decrease,
             )
             if polish_report.accepted:
                 em_vars = em_vars_from_flat(
@@ -492,13 +493,28 @@ class LatentClassConditionalLogit(ChoiceModel):
                 flat_params, diff_unchosen_chosen, data_struct, packing
             )
 
+        em_vars, class_permutation = _canonicalize_classes(em_vars)
+        if class_permutation != tuple(range(self.num_classes)):
+            # Changing the baseline membership class changes the coordinates of
+            # its score. Check stationarity in the final reported coordinates.
+            if em_vars.latent_betas is None:
+                raise RuntimeError(
+                    "Canonicalization returned an incomplete parameter state."
+                )
+            score_max = observed_score_max(
+                packing.pack(em_vars.latent_betas, em_vars.thetas, em_vars.shares),
+                diff_unchosen_chosen,
+                data_struct,
+                packing,
+            )
+
         # A fit has converged when the observed-data score has actually vanished.
         # Reporting convergence from a log-likelihood change instead lets a
         # slowly crawling EM claim an optimum it has not reached.
         converged = bool(score_max <= fit_options.score_tol)
         if not converged:
             logger.warning(
-                "The maximum absolute observed-data score is %.3e, above the "
+                "The maximum absolute observed-data score per panel is %.3e, above the "
                 "tolerance %.3g, so the estimate is not a stationary point of the "
                 "mixture likelihood. Standard errors assume it is. Consider "
                 "raising max_em_iter or polish_maxiter.",
@@ -506,7 +522,6 @@ class LatentClassConditionalLogit(ChoiceModel):
                 fit_options.score_tol,
             )
 
-        em_vars, class_permutation = _canonicalize_classes(em_vars)
         em_history_rows = _permute_em_history(em_history_rows, class_permutation)
         final_em_iter = max(em_recursion - 1, 0)
         optimization_history_rows = self._optimizer_snapshot(
@@ -553,11 +568,9 @@ class LatentClassConditionalLogit(ChoiceModel):
         """Run the EM recursion from one start and report where it stopped.
 
         The stopping rule is the Aitken-extrapolated remaining ascent per panel
-        rather than the raw log-likelihood change.  EM converges linearly, so the
-        raw change understates the distance to the optimum by ``1 / (1 - r)``;
-        extrapolating the geometric tail makes ``em_tol`` mean what a user
-        expects it to mean, and normalizing by the panel count keeps that meaning
-        fixed as the sample grows.
+        rather than the raw log-likelihood change. For a geometric sequence with
+        rate ``r``, the remaining ascent is ``change * r / (1 - r)``. Normalizing
+        by the panel count keeps the tolerance's meaning fixed as the sample grows.
 
         Parameters
         ----------
@@ -612,16 +625,35 @@ class LatentClassConditionalLogit(ChoiceModel):
 
             # One host transfer per iteration carries every scalar the loop
             # needs, so the compiled step is never interrupted more than once.
-            probe = jnp.stack(
+            if em_vars.shares is None:
+                raise ValueError("Class shares are required after an EM step.")
+            probe = jnp.concatenate(
                 [
-                    em_vars.unconditional_loglik,
-                    jnp.max(step_diagnostics.beta_newton_error),
-                    step_diagnostics.membership_newton_error,
+                    jnp.stack(
+                        [
+                            em_vars.unconditional_loglik,
+                            jnp.max(step_diagnostics.beta_newton_error),
+                            step_diagnostics.membership_newton_error,
+                        ]
+                    ),
+                    em_vars.shares,
                 ]
             )
+            host_probe = onp.asarray(probe)
             loglik, beta_error, membership_error = (
-                float(value) for value in onp.asarray(probe)
+                float(value) for value in host_probe[:3]
             )
+            previous_loglik = loglik_history[-1]
+            roundoff = 64 * math.ulp(max(1.0, abs(previous_loglik), abs(loglik)))
+            if not math.isfinite(loglik):
+                raise RuntimeError(
+                    "EM produced a non-finite observed-data log likelihood."
+                )
+            if loglik < previous_loglik - roundoff:
+                raise RuntimeError(
+                    "EM decreased the observed-data log likelihood beyond round-off "
+                    f"({previous_loglik:.12g} -> {loglik:.12g})."
+                )
             loglik_history.append(loglik)
             em_recursion += 1
             if (
@@ -633,7 +665,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             history_rows.append(
                 self._em_history_row(
                     em_recursion - 1,
-                    em_vars,
+                    shares=host_probe[3:],
                     loglik=loglik,
                     beta_newton_error=beta_error,
                     membership_newton_error=membership_error,
@@ -683,8 +715,8 @@ class LatentClassConditionalLogit(ChoiceModel):
     def _em_history_row(
         self,
         em_iter: int,
-        em_vars: Any,
         *,
+        shares: onp.ndarray,
         loglik: float,
         beta_newton_error: float,
         membership_newton_error: float,
@@ -695,8 +727,8 @@ class LatentClassConditionalLogit(ChoiceModel):
         ----------
         em_iter : int
             EM recursion index.
-        em_vars : EMVars-like
-            Current EM state.
+        shares : numpy.ndarray
+            Current class shares, already transferred with the other diagnostics.
         loglik : float
             Observed-data log likelihood after this recursion.
         beta_newton_error : float
@@ -717,9 +749,8 @@ class LatentClassConditionalLogit(ChoiceModel):
             "beta_newton_error": beta_newton_error,
             "membership_newton_error": membership_newton_error,
         }
-        if em_vars.shares is not None:
-            for class_idx in range(self.num_classes):
-                row[f"class_{class_idx}_share"] = em_vars.shares[class_idx]
+        for class_idx in range(self.num_classes):
+            row[f"class_{class_idx}_share"] = float(shares[class_idx])
         return row
 
     def _optimizer_snapshot(

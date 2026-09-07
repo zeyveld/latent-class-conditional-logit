@@ -125,8 +125,8 @@ class LCLResults:
         optimization_history : list[dict[str, Any]] | None
             Final class-level M-step diagnostics.
         observed_score_max : float, optional
-            Largest absolute component of the observed-data score at the reported
-            estimate.  Recomputed here when covariance estimation runs.
+            Largest absolute component of the observed-data score per panel at
+            the reported estimate. Recomputed when covariance estimation runs.
         score_tol : float, default=1e-4
             Stationarity tolerance used for the ``converged`` flag, reused by
             :meth:`diagnostics` so the two can never disagree.
@@ -351,7 +351,8 @@ class LCLResults:
             J, H = _panel_scores_and_hessian(
                 flat_params, diff_unchosen_chosen, data, self._param_packing
             )
-            self.observed_score_max = float(jnp.max(jnp.abs(jnp.sum(J, axis=0))))
+            self.observed_score_max = float(jnp.max(jnp.abs(jnp.mean(J, axis=0))))
+            self.converged = bool(self.observed_score_max <= self.score_tol)
             H_inv, diagnostics = _invert_information(
                 -H, label="latent-class observed information matrix"
             )
@@ -1161,13 +1162,13 @@ class LCLResults:
                 "check": "observed_score_max",
                 "value": self.observed_score_max,
                 "status": (
-                    "warning"
+                    "ok"
                     if onp.isfinite(self.observed_score_max)
-                    and self.observed_score_max > self.score_tol
-                    else "ok"
+                    and self.observed_score_max <= self.score_tol
+                    else "warning"
                 ),
                 "message": (
-                    "Maximum absolute component of the final observed-data score, "
+                    "Maximum absolute component of the final observed-data score per panel, "
                     f"against the score_tol of {self.score_tol:.3g}. This is the "
                     "same test that sets the converged flag, so the two agree by "
                     "construction."

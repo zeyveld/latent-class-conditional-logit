@@ -7,7 +7,7 @@ from jax.nn import log_softmax, softmax
 from jaxtyping import Array, Float64
 
 from lcl._optimize import exact_newton_minimize, newton_kwargs
-from lcl._scheduling import ITERATION_THRESHOLD_BYTES, use_sequential
+from lcl import _scheduling
 from lcl.options import OptimizationOptions
 from lcl._struct import Data
 
@@ -79,9 +79,7 @@ def _perform_frac_response_reg(
     data: Data,
     num_classes: int,
     optimization_options: OptimizationOptions | None = None,
-) -> tuple[
-    Float64[Array, "dem_vars_plus_one classes_minus_one"], Float64[Array, ""]
-]:
+) -> tuple[Float64[Array, "dem_vars_plus_one classes_minus_one"], Float64[Array, ""]]:
     """Fit the fractional-response class-membership model.
 
     The objective is the cross-entropy between posterior class assignments from
@@ -196,12 +194,13 @@ def _class_covariance_gram(
 
     A three-operand ``einsum`` contracts pairwise and materializes a
     ``(panels, dem_vars_plus_one, dem_vars_plus_one)`` intermediate, which at
-    large panel counts dominates peak memory for the whole M-step.  Above the
-    :mod:`~lcl._scheduling` threshold the class pairs are scanned instead, each
-    recomputing its scalar coefficient from the ``(panels, classes_minus_one)``
-    probabilities and contributing one ``Z' diag(c_kl) Z`` Gram matrix.  Neither
-    the dense per-panel covariance nor the ``(panels, dem, dem)`` intermediate
-    is then built.  The two orders are mathematically identical.
+    large panel counts dominates peak memory for the whole M-step. When the
+    demographic axis is wider than the nonbaseline class axis, small batches of
+    class-pair Gram matrices avoid this intermediate once it exceeds one MiB.
+    Small problems retain the simpler dense contraction. Above the memory threshold
+    the pairs are scanned individually. Each uses the stable coefficient
+    ``W_n p_nk (d_kl - p_nl)`` directly, so no subtraction of large nearly equal
+    Gram matrices is introduced when class probabilities approach zero or one.
 
     Parameters
     ----------
@@ -220,11 +219,15 @@ def _class_covariance_gram(
     """
     num_panels, num_dem = Z.shape
     num_tail = probs.shape[1]
+    if num_tail == 0:
+        return jnp.zeros((num_dem, 0, num_dem, 0), dtype=Z.dtype)
     eye_tail = jnp.eye(num_tail, dtype=Z.dtype)
 
-    if not use_sequential(
-        num_panels, num_dem, num_dem, threshold=ITERATION_THRESHOLD_BYTES
-    ):
+    sequential = _scheduling.use_sequential(
+        num_panels, num_dem, num_dem, threshold=_scheduling.ITERATION_THRESHOLD_BYTES
+    )
+    outer_bytes = num_panels * num_dem * num_dem * Z.dtype.itemsize
+    if not sequential and (num_tail >= num_dem or outer_bytes < 1024**2):
         class_cov = (
             row_weights[:, None, None]
             * probs[:, :, None]
@@ -237,14 +240,24 @@ def _class_covariance_gram(
         axis=-1,
     ).reshape(-1, 2)
 
-    def one_block(carry: None, pair: Array) -> tuple[None, Array]:
+    def one_block(pair: Array) -> Array:
         """Contract one (k, l) class pair into a (dem, dem) Gram matrix."""
         row, col = pair[0], pair[1]
         delta = jnp.where(row == col, 1.0, 0.0)
         coefficient = row_weights * probs[:, row] * (delta - probs[:, col])
-        return carry, (Z * coefficient[:, None]).T @ Z
+        return (Z * coefficient[:, None]).T @ Z
 
-    _, blocks = lax.scan(one_block, None, pairs)  # (tail * tail, dem, dem)
+    # When demographics are wider than the class axis, small batches of weighted
+    # Gram matrices avoid the much larger (panels, dem, dem) design outer product.
+    # Keep the strict one-block schedule for memory-constrained large problems.
+    # A power of two just below the demographic width bounds the weighted-design
+    # batch below the dense outer product, while keeping matrix products large.
+    batch_size = (
+        None
+        if sequential
+        else min(num_tail**2, 1 << max(0, (num_dem - 1).bit_length() - 1))
+    )
+    blocks = lax.map(one_block, pairs, batch_size=batch_size)
     # (k, l, i, j) -> (i, k, j, l)
     return jnp.transpose(
         blocks.reshape(num_tail, num_tail, num_dem, num_dem), (2, 0, 3, 1)
