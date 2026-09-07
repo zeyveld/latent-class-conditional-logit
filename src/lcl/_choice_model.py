@@ -6,8 +6,8 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax.typing import ArrayLike
-from jaxtyping import Array
+from lcl._typing import CaseWeightsInput, InitialCoefficientsInput
+from jaxtyping import Array, Float64, Int
 
 from lcl._encoding import ChoiceDataEncoder, _coerce_frame
 from lcl._labels import label_for_variable, normalize_variable_labels
@@ -152,9 +152,9 @@ class ChoiceModel(ABC):
     def _setup_data(
         self,
         parsed: ParsedData,
-        weights: ArrayLike | None = None,
-        init_beta: ArrayLike | None = None,
-    ) -> tuple[Data, Array, Array]:
+        weights: CaseWeightsInput | None = None,
+        init_beta: InitialCoefficientsInput | None = None,
+    ) -> tuple[Data, Float64[Array, "cases"], Float64[Array, "alt_vars"]]:
         """Construct the immutable Data struct for the JAX estimation engine.
 
         Extracts panel counts and bounds, relying on the guarantee from `_ingest_data`
@@ -210,6 +210,8 @@ class ChoiceModel(ABC):
             raise ValueError(
                 "init_beta must have one entry per alternative-specific variable."
             )
+        if not bool(jnp.all(jnp.isfinite(init_beta))):
+            raise ValueError("init_beta must contain only finite values.")
 
         data_struct = Data(
             X=parsed.X,
@@ -235,13 +237,13 @@ class ChoiceModel(ABC):
             str
             | Mapping[object, float | int]
             | Sequence[float | int]
-            | ArrayLike
+            | CaseWeightsInput
             | None
         ),
         *,
         cases_col: str,
         panels_col: str,
-    ) -> ArrayLike | None:
+    ) -> Float64[onp.ndarray, "cases"] | None:
         """Align case weights from user order to encoder-sorted case order.
 
         Parameters
@@ -354,7 +356,7 @@ class ChoiceModel(ABC):
         cluster_col: str,
         *,
         panels_col: str,
-    ) -> tuple[onp.ndarray, int]:
+    ) -> tuple[Int[onp.ndarray, "panels"], int]:
         """Map a coarser cluster column onto encoded panel order.
 
         Standard errors cluster at the decision-maker by default.  A study whose

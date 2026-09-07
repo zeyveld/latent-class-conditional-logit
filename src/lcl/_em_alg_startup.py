@@ -39,12 +39,12 @@ def _fit_starting_beta(
     weights = jnp.ones(diff.num_cases)
     scale = max(diff.num_cases, 1)
 
-    def value(p: Array) -> Array:
+    def value(p: Float64[Array, "alt_vars"]) -> Float64[Array, ""]:
         """Evaluate the mean subset objective."""
         structural = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
         return _loglik_value(structural, diff, weights) / scale
 
-    def derivatives(p: Array) -> tuple[Array, Array, Array]:
+    def derivatives(p: Float64[Array, "alt_vars"]) -> tuple[Float64[Array, ""], Float64[Array, "alt_vars"], Float64[Array, "alt_vars alt_vars"]]:
         """Evaluate the mean subset derivatives in latent coordinates."""
         structural = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
         (val, aux), grad, hess = _loglik_gradient(structural, diff, weights)

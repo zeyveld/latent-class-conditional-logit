@@ -23,6 +23,10 @@ Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped de
 
 Full documentation—worked tutorials, an API reference, and a model-selection guide—is hosted at [zeyveld.github.io/latent-class-conditional-logit](https://zeyveld.github.io/latent-class-conditional-logit/).
 
+The [API contracts guide](https://zeyveld.github.io/latent-class-conditional-logit/api/contracts/)
+explains option precedence, array ordering, scoring and prediction weights, and
+compatibility aliases.
+
 ## Installation
 
 The wheel is published on PyPI as `lcl-choice` (it imports as `lcl`):
@@ -109,7 +113,7 @@ results = lcl.fit(
             max_em_iter=50,
             num_devices=1,
         ),
-        optimization=OptimizationOptions(maxiter=40, gradient_tol=1e-5),
+        optimization=OptimizationOptions(maxiter=40, newton_decrement_tol=1e-5),
         inference=InferenceOptions(covariance="clustered"),
     ),
 )
@@ -166,7 +170,7 @@ cl_results = lcl.ConditionalLogit().fit(
     case_varnames=["price", "quality"],
     weights="survey_weight",
     options=Options(
-        optimization=OptimizationOptions(gradient_tol=1e-5),
+        optimization=OptimizationOptions(newton_decrement_tol=1e-5),
         inference=InferenceOptions(covariance="clustered"),
     ),
 )

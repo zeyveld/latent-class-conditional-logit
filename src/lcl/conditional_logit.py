@@ -3,6 +3,7 @@
 import logging
 import warnings
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from time import time
 from typing import Any
 
@@ -10,13 +11,13 @@ import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jax import jacrev
-from jax.typing import ArrayLike
-from jaxtyping import Array, Float64, install_import_hook
+from lcl._typing import CaseWeightsInput, InitialCoefficientsInput, PanelWeightsInput
+from jaxtyping import Array, ArrayLike, Float64, Integer, install_import_hook
 from scipy.stats import norm
 
 # Decorate `@jaxtyped(typechecker=beartype.beartype)`
 with install_import_hook("lcl", "beartype.beartype"):
-    from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS
+    from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS, NegativeCoefficient
     from lcl._case_utils import (
         _diff_unchosen_chosen,
         _loglik_gradient,
@@ -32,6 +33,7 @@ with install_import_hook("lcl", "beartype.beartype"):
     from lcl._logging import log_or_print
     from lcl._optimize import _minimize
     from lcl.options import (
+        DiagnosticsOptions,
         InferenceOptions,
         Options,
         OptimizationOptions,
@@ -57,6 +59,8 @@ class ConditionalLogit(ChoiceModel):
         The name of the variable (e.g., 'price') to use as the numeraire. If provided,
         its coefficient is bounded to be strictly negative to ensure logically
         consistent utility scaling and willingness-to-pay calculations.
+    numeraire_min_abs : float, default=1e-5
+        Positive minimum absolute magnitude of the constrained coefficient.
 
     Attributes
     ----------
@@ -71,6 +75,7 @@ class ConditionalLogit(ChoiceModel):
     ) -> None:
         """Create an unfitted conditional-logit model specification."""
         super().__init__()
+        NegativeCoefficient(min_abs=numeraire_min_abs)
         self.numeraire = numeraire
         self.numeraire_min_abs = numeraire_min_abs
         self.numeraire_idx: int | None = None
@@ -89,14 +94,15 @@ class ConditionalLogit(ChoiceModel):
             str
             | Mapping[object, float | int]
             | Sequence[float | int]
-            | ArrayLike
+            | CaseWeightsInput
             | None
         ) = None,
         weight_type: str = "probability",
-        init_beta: ArrayLike | None = None,
+        init_beta: InitialCoefficientsInput | None = None,
         options: Options | None = None,
         optimization_options: OptimizationOptions | None = None,
         inference: InferenceOptions | None = None,
+        diagnostics: DiagnosticsOptions | None = None,
     ) -> "CLResults":
         """Fit the conditional logit model via Maximum Likelihood Estimation.
 
@@ -104,7 +110,7 @@ class ConditionalLogit(ChoiceModel):
 
         Parameters
         ----------
-        data : pd.DataFrame | pl.DataFrame | ArrayLike
+        data : pandas.DataFrame, polars.DataFrame, or mapping
             The main dataset containing choice situations and alternatives in long format.
         alts_col : str
             Name of the column containing alternative identifiers.
@@ -142,11 +148,20 @@ class ConditionalLogit(ChoiceModel):
             every weight is one.  Survey weights are the common case in household
             panel data, so they are the default.
         init_beta : ArrayLike | None, optional
-            ``(K,)`` vector of initial taste parameters.
+            ``(alt_vars,)`` vector in optimizer (latent) coordinates, in expanded
+            design-column order. A constrained numeraire is transformed by
+            ``-(softplus(raw) + numeraire_min_abs)``.
+        options : Options | None, optional
+            Complete configuration. Conditional logit uses ``optimization``,
+            ``inference``, and ``diagnostics.check_collinearity``; it has no EM
+            stage. Do not combine with individual option arguments.
         optimization_options : OptimizationOptions | None, optional
             Preferred safeguarded exact-Newton settings.
         inference : InferenceOptions | None, optional
             Preferred covariance and standard-error settings.
+        diagnostics : DiagnosticsOptions | None, optional
+            Controls information-rank reporting through ``check_collinearity``.
+            Membership and class-specific warning settings apply only to LCL.
 
         Returns
         -------
@@ -157,6 +172,7 @@ class ConditionalLogit(ChoiceModel):
             options,
             optimization_options=optimization_options,
             inference=inference,
+            diagnostics=diagnostics,
         )
         optimization_options = resolved_options.optimization
         inference = resolved_options.inference
@@ -219,7 +235,7 @@ class ConditionalLogit(ChoiceModel):
         cluster_of_cases = None
         num_clusters = None
         cluster_column = inference.cluster_column
-        if cluster_column is not None:
+        if cluster_column is not None and not inference.skip:
             cluster_by_panel, num_clusters = self._resolve_panel_cluster_ids(
                 data,
                 parsed_data,
@@ -253,7 +269,7 @@ class ConditionalLogit(ChoiceModel):
         estim_time_sec = time() - self._fit_start_time
         logger.info("Estimation time: %.3f seconds", estim_time_sec)
 
-        return CLResults(
+        result = CLResults(
             model_spec=self,
             optim_res=optim_res,
             data_struct=data_struct,
@@ -264,7 +280,10 @@ class ConditionalLogit(ChoiceModel):
             weight_type=resolved_weight_type,
             cluster_of_cases=cluster_of_cases,
             num_clusters=num_clusters,
+            diagnostics_config=resolved_options.diagnostics,
         )
+        self.convergence = result.converged
+        return result
 
 
 class CLResults:
@@ -282,10 +301,11 @@ class CLResults:
         inference: InferenceOptions,
         estim_time_sec: float,
         has_panels: bool,
-        case_weights: ArrayLike,
+        case_weights: CaseWeightsInput,
         weight_type: str = "probability",
-        cluster_of_cases: ArrayLike | None = None,
+        cluster_of_cases: Integer[ArrayLike, "cases"] | None = None,
         num_clusters: int | None = None,
+        diagnostics_config: DiagnosticsOptions | None = None,
     ) -> None:
         """Compute inference summaries from a fitted conditional-logit model.
 
@@ -312,10 +332,15 @@ class CLResults:
             the panel.
         num_clusters : int | None, optional
             Number of distinct clusters implied by ``cluster_of_cases``.
+        diagnostics_config : DiagnosticsOptions | None, optional
+            Diagnostic reporting switches; copied when results are constructed.
         """
         self.model = model_spec
         self.data = data_struct
-        self.inference = inference
+        self.inference = replace(inference)
+        self.diagnostics_config = (
+            DiagnosticsOptions() if diagnostics_config is None else replace(diagnostics_config)
+        )
         self.has_panels = has_panels
         self.case_weights = jnp.asarray(case_weights)
         self.weight_type = _resolve_weight_type(weight_type)
@@ -365,7 +390,7 @@ class CLResults:
                     self.hess_inv,
                     optim_res.grad_n,
                     inference.finite_sample_correction,
-                    weights=case_weights,
+                    weights=self.case_weights,
                     weight_type=self.weight_type,
                 )
         else:
@@ -454,9 +479,9 @@ class CLResults:
         inference: InferenceOptions,
         data_struct: Data,
         has_panels: bool,
-        cluster_of_cases: ArrayLike | None,
+        cluster_of_cases: Integer[ArrayLike, "cases"] | None,
         num_clusters: int | None,
-    ) -> tuple[ArrayLike | None, int | None]:
+    ) -> tuple[Integer[ArrayLike, "cases"] | None, int | None]:
         """Return the case-level grouping used to sum scores, if any.
 
         Returns ``(None, None)`` for the unclustered sandwich so the caller falls
@@ -475,7 +500,7 @@ class CLResults:
         return None, None
 
     @property
-    def flat_params(self) -> Array:
+    def flat_params(self) -> Float64[Array, "alt_vars"]:
         """Latent parameter vector, aligned with :attr:`latent_cov_matrix`."""
         return self.latent_coeff_
 
@@ -487,21 +512,21 @@ class CLResults:
     def _apply_delta_method(
         self,
         func: Any,
-        flat_params: Array,
+        flat_params: Float64[Array, "alt_vars"],
         **kwargs: Any,
-    ) -> tuple[Array, Array]:
+    ) -> tuple[Float64[Array, "*output"], Float64[Array, "*output"]]:
         """Apply the delta method to a function of the latent coefficients."""
         return apply_delta_method(func, flat_params, self.latent_cov_matrix, **kwargs)
 
     def _parametric_bootstrap_se(
         self,
         func: Any,
-        flat_params: Array,
+        flat_params: Float64[Array, "alt_vars"],
         *,
         draws: int = 500,
         seed: int = 0,
         **kwargs: Any,
-    ) -> Array:
+    ) -> Float64[Array, "*output"]:
         """Estimate nonlinear standard errors from asymptotic parameter draws."""
         return parametric_bootstrap_se(
             func,
@@ -514,10 +539,10 @@ class CLResults:
 
     def _structural_betas_and_class_probs(
         self,
-        flat_params: Array,
-        dems: Array | None,
+        flat_params: Float64[Array, "alt_vars"],
+        dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
-    ) -> tuple[Array, Array]:
+    ) -> tuple[Float64[Array, "alt_vars 1"], Float64[Array, "num_panels 1"]]:
         """Return structural betas and class probabilities for one homogeneous class.
 
         A conditional logit is the one-class case of the mixture, so presenting it
@@ -567,7 +592,7 @@ class CLResults:
         return self.converged
 
     @property
-    def covariance(self) -> Array:
+    def covariance(self) -> Float64[Array, "alt_vars alt_vars"]:
         """Deprecated alias for :attr:`cov_matrix`."""
         warnings.warn(
             "CLResults.covariance is deprecated; use cov_matrix.",
@@ -577,7 +602,7 @@ class CLResults:
         return self.cov_matrix
 
     @property
-    def abic(self) -> Array:
+    def abic(self) -> Float64[Array, ""]:
         """Deprecated alias for :attr:`adjusted_bic`."""
         warnings.warn(
             "CLResults.abic is deprecated; use adjusted_bic.",
@@ -624,10 +649,37 @@ class CLResults:
         """Alias for :meth:`summarize_betas`."""
         return self.summarize_betas(num_decimals=num_decimals, show=show)
 
-    def loglik(self, data: Any, *, per_case: bool = False) -> float | pl.DataFrame:
-        """Score observed choices with the fitted conditional-logit encoder."""
+    def loglik(
+        self, data: Any, *, per_case: bool = False,
+        weights: str | Mapping[object, float | int] | CaseWeightsInput | None = None,
+    ) -> float | pl.DataFrame:
+        """Score observed choices with the fitted encoder.
+
+        Parameters
+        ----------
+        data : object
+            Long-format observed choices using the fitted column names.
+        per_case : bool, default=False
+            Return weighted contributions with original panel and case IDs.
+        weights : str, mapping, array-like, or None, optional
+            Scoring weights with the same alignment rules as :meth:`ConditionalLogit.fit`.
+            Omission scores all cases equally; training weights are not reused.
+
+        Returns
+        -------
+        float or pl.DataFrame
+            Total log likelihood, or a table with ``panel``, ``case``, and
+            ``log_likelihood`` columns. Joint IDs distinguish repeated case IDs.
+        """
         parsed = self.model._transform_data(data, require_choice=True)
-        data_struct, weights, _ = self.model._setup_data(parsed)
+        encoder = self.model._encoder
+        if encoder is None:
+            raise ValueError("The fitted data encoder is unavailable.")
+        aligned_weights = self.model._resolve_case_weights(
+            data, parsed, weights, cases_col=encoder.cases_col,
+            panels_col=encoder.panels_col,
+        )
+        data_struct, weights_arr, _ = self.model._setup_data(parsed, weights=aligned_weights)
         differenced = _diff_unchosen_chosen(data_struct)
         log_probabilities, _ = _diff_logit_components(
             differenced.X,
@@ -636,8 +688,8 @@ class CLResults:
             differenced.num_cases,
         )
         if not per_case:
-            return float(jnp.sum(log_probabilities * weights))
-        if parsed.original_cases is None:
+            return float(jnp.sum(log_probabilities * weights_arr))
+        if parsed.original_cases is None or parsed.original_panels is None:
             raise ValueError("Original case identifiers are unavailable.")
         first_case_rows = onp.asarray(data_struct.cases) != onp.roll(
             onp.asarray(data_struct.cases), 1
@@ -645,8 +697,9 @@ class CLResults:
         first_case_rows[0] = True
         return pl.DataFrame(
             {
+                "panel": onp.asarray(parsed.original_panels[first_case_rows]),
                 "case": onp.asarray(parsed.original_cases[first_case_rows]),
-                "log_likelihood": onp.asarray(log_probabilities),
+                "log_likelihood": onp.asarray(log_probabilities * weights_arr),
             }
         )
 
@@ -675,7 +728,10 @@ class CLResults:
                 "message": "McFadden pseudo-R-squared against equal choice shares.",
             },
         ]
-        if self.information_diagnostics is not None:
+        if (
+            self.information_diagnostics is not None
+            and self.diagnostics_config.check_collinearity
+        ):
             info = self.information_diagnostics
             rows.extend(
                 [
@@ -709,30 +765,40 @@ class CLResults:
         alts_col: str | None = None,
         cases_col: str | None = None,
         panels_col: str | None = None,
-        panel_weights: str | Mapping[object, float] | Sequence[float] | onp.ndarray | None = None,
+        panel_weights: str | Mapping[object, float] | PanelWeightsInput | None = None,
     ) -> CLPrediction:
         """Predict conditional choice probabilities for a given set of alternatives.
 
         Parameters
         ----------
-        data : pd.DataFrame | pl.DataFrame
-            The counterfactual dataset. Must contain all variables specified in
-            the original model (including expanded dummy columns if a formula was used).
-        alts_col : str
-            Name of the column containing alternative identifiers.
-        cases_col : str
-            Name of the column grouping observations into distinct choice situations.
-        panels_col : str | None, optional
-            Name of the column mapping observations to specific decision-makers.
+        data : pandas.DataFrame, polars.DataFrame, or mapping
+            Counterfactual raw data. The fitted encoder reuses formula transforms
+            and categorical levels; expanded dummy columns need not be supplied.
+        alts_col, cases_col, panels_col : str | None, optional
+            Deprecated redundant identifiers. If supplied, they must match the
+            fitted encoder; rename input columns to predict with the fitted names.
+        panel_weights : str, mapping, sequence, or array, optional
+            Panel aggregation weights: a constant-per-panel data column, mapping
+            by panel ID, or vector in sorted unique prediction-panel order. These
+            weights affect aggregate summaries, not individual probabilities.
 
         Returns
         -------
-        pl.DataFrame
-            DataFrame containing the computed out-of-sample choice probabilities.
+        CLPrediction
+            Probabilities in ``predicted_probs``, plus surplus, WTP, elasticities,
+            and aggregate inference methods.
         """
-        if alts_col is not None or cases_col is not None:
+        encoder = self.model._encoder
+        if encoder is None:
+            raise ValueError("The fitted data encoder is unavailable.")
+        for name, value in (
+            ("alts_col", alts_col), ("cases_col", cases_col), ("panels_col", panels_col)
+        ):
+            if value is not None and value != getattr(encoder, name):
+                raise ValueError(f"{name} must match the fitted encoder ({getattr(encoder, name)!r}).")
+        if any(value is not None for value in (alts_col, cases_col, panels_col)):
             warnings.warn(
-                "alts_col and cases_col are no longer needed by predict(); the "
+                "alts_col, cases_col, and panels_col are no longer needed by predict(); the "
                 "fitted encoder supplies identifier columns.",
                 DeprecationWarning,
                 stacklevel=2,

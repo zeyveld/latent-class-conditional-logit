@@ -71,6 +71,8 @@ def fit(
         Long-format choice data.
     spec : LCLSpec
         Declarative model specification.
+    options : Options | None, optional
+        Complete configuration bundle. Do not combine with individual option arguments.
     fit_options : FitOptions | None, optional
         EM algorithm options.
     optimization_options : OptimizationOptions | None, optional
@@ -83,6 +85,12 @@ def fit(
         Optional display labels for raw model/DataFrame variable names.  Labels
         supplement any labels stored on ``spec`` and are used only in
         presentation tables.
+    dems_data : object | None, optional
+        Separate panel-level data joined by ``spec.ids.panel``. Columns may be
+        used in utility and membership designs and must not overlap choice-data columns.
+    progress_callback : callable | None, optional
+        Receives dictionaries describing hardware, starts, EM steps, polishing,
+        and completion.
 
     Returns
     -------

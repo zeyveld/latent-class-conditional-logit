@@ -8,6 +8,7 @@ parallel copies of derivative logic.
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
@@ -34,8 +35,9 @@ class NegativeCoefficient:
     units : str | None, default=None
         Optional human-readable units for summaries and audit reports.
     warn_below : float | None, default=None
-        Optional threshold used by diagnostics to flag weakly identified
-        numeraires.
+        Optional LCL diagnostic threshold overriding the general
+        ``near_zero_numeraire_threshold``. The ``warn_near_zero_numeraire``
+        switch still controls whether the diagnostic has warning status.
     """
 
     variable: str | None = None
@@ -45,10 +47,12 @@ class NegativeCoefficient:
 
     def __post_init__(self) -> None:
         """Validate constraint settings."""
-        if self.min_abs <= 0:
-            raise ValueError("NegativeCoefficient.min_abs must be positive.")
-        if self.warn_below is not None and self.warn_below <= 0:
-            raise ValueError("NegativeCoefficient.warn_below must be positive.")
+        if not math.isfinite(self.min_abs) or self.min_abs <= 0:
+            raise ValueError("NegativeCoefficient.min_abs must be finite and positive.")
+        if self.warn_below is not None and (
+            not math.isfinite(self.warn_below) or self.warn_below <= 0
+        ):
+            raise ValueError("NegativeCoefficient.warn_below must be finite and positive.")
 
     def bind(self, variable: str) -> "NegativeCoefficient":
         """Return a copy tied to ``variable``.

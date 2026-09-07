@@ -1,12 +1,19 @@
 """Public configuration and request types."""
 
+import math
 import warnings
-from dataclasses import dataclass, field
-from enum import StrEnum
-from typing import Optional, Union
+from dataclasses import dataclass, field, replace
+from enum import Enum
+from numbers import Integral
 
 from jax import device_count
-from jax.typing import ArrayLike
+from lcl._typing import (
+    ChoicesInput,
+    DemographicsInput,
+    DesignInput,
+    PanelIdsInput,
+    RowIdsInput,
+)
 
 
 DEFAULT_NEWTON_DECREMENT_TOL = 1e-5
@@ -16,7 +23,7 @@ WEIGHT_TYPES = ("probability", "frequency")
 """Supported interpretations of user-supplied case weights."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class OptimizationOptions:
     r"""Safeguarded exact-Newton settings.
 
@@ -47,6 +54,7 @@ class OptimizationOptions:
     gradient_tol : float, optional
         Deprecated alias for ``newton_decrement_tol``.  Reading it returns the
         resolved tolerance; passing it emits a :class:`DeprecationWarning`.
+        If both spellings are supplied, ``newton_decrement_tol`` takes precedence.
 
     Notes
     -----
@@ -62,27 +70,61 @@ class OptimizationOptions:
     initial_trust_radius: float = 1.0
     line_search_maxiter: int = 40
     accept_any_decrease: bool = False
-    gradient_tol: float = DEFAULT_NEWTON_DECREMENT_TOL
 
-    def __post_init__(self) -> None:
-        """Resolve the deprecated alias and validate supported settings."""
-        # The two fields share a default, so "explicitly set" means "not the
-        # default".  An explicit newton_decrement_tol always wins, which keeps
-        # dataclasses.replace well behaved on either spelling.
-        new_set = self.newton_decrement_tol != DEFAULT_NEWTON_DECREMENT_TOL
-        old_set = self.gradient_tol != DEFAULT_NEWTON_DECREMENT_TOL
-        if old_set:
+    def __init__(
+        self,
+        maxiter: int = 75,
+        newton_decrement_tol: float | None = None,
+        hessian_damping: float = 0.0,
+        max_step_norm: float = 1000.0,
+        initial_trust_radius: float = 1.0,
+        line_search_maxiter: int = 40,
+        accept_any_decrease: bool = False,
+        gradient_tol: float | None = None,
+    ) -> None:
+        """Resolve the compatibility alias without storing duplicate tolerances."""
+        if gradient_tol is not None:
             warnings.warn(
                 "OptimizationOptions.gradient_tol is deprecated; use "
                 "newton_decrement_tol. The value is a Newton-decrement "
                 "tolerance, not a gradient norm.",
                 DeprecationWarning,
-                stacklevel=3,
+                stacklevel=2,
             )
-        tolerance = self.newton_decrement_tol if new_set else self.gradient_tol
-        object.__setattr__(self, "newton_decrement_tol", tolerance)
-        object.__setattr__(self, "gradient_tol", tolerance)
+        tolerance = newton_decrement_tol
+        if tolerance is None:
+            tolerance = (
+                DEFAULT_NEWTON_DECREMENT_TOL if gradient_tol is None else gradient_tol
+            )
+        for name, value in (
+            ("maxiter", maxiter),
+            ("newton_decrement_tol", tolerance),
+            ("hessian_damping", hessian_damping),
+            ("max_step_norm", max_step_norm),
+            ("initial_trust_radius", initial_trust_radius),
+            ("line_search_maxiter", line_search_maxiter),
+            ("accept_any_decrease", accept_any_decrease),
+        ):
+            object.__setattr__(self, name, value)
+        self.__post_init__()
 
+    @property
+    def gradient_tol(self) -> float:
+        """Read the resolved Newton tolerance under its deprecated spelling."""
+        return self.newton_decrement_tol
+
+    def __post_init__(self) -> None:
+        """Validate supported settings."""
+        for name in ("maxiter", "line_search_maxiter"):
+            _require_integer(getattr(self, name), name)
+        for name in (
+            "newton_decrement_tol",
+            "hessian_damping",
+            "max_step_norm",
+            "initial_trust_radius",
+        ):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite.")
         if self.maxiter < 0:
             raise ValueError("maxiter must be nonnegative.")
         if self.newton_decrement_tol <= 0:
@@ -135,7 +177,7 @@ class FitOptions:
         Number of independent EM starts.  The start with the highest final log
         likelihood is kept.
     start_method : str, default="panel_partition"
-        Strategy used to build starting values.
+        Compatibility setting; only ``"panel_partition"`` is supported.
 
     Notes
     -----
@@ -162,6 +204,20 @@ class FitOptions:
 
     def __post_init__(self) -> None:
         """Validate EM and multi-start settings."""
+        for name in (
+            "seed",
+            "max_em_iter",
+            "polish_maxiter",
+            "num_devices",
+            "check_interval",
+            "starts",
+        ):
+            _require_integer(getattr(self, name), name)
+        for name in ("em_tol", "score_tol"):
+            if not math.isfinite(getattr(self, name)):
+                raise ValueError(f"{name} must be finite.")
+        if self.seed < 0:
+            raise ValueError("seed must be nonnegative.")
         if self.em_tol <= 0:
             raise ValueError("em_tol must be positive.")
         if self.score_tol <= 0:
@@ -272,7 +328,8 @@ class DiagnosticsOptions:
     separation_threshold : float, default=1e-8
         Membership probability at or below which a cell counts as separated.
     near_zero_numeraire_threshold : float, default=1e-3
-        Numeraire magnitude below which the near-zero warning fires.
+        Numeraire magnitude below which the near-zero warning fires, unless the
+        specification supplies a constraint-specific ``warn_below`` threshold.
     large_coefficient_threshold : float, default=25.0
         Absolute coefficient magnitude above which the large-coefficient warning
         fires.
@@ -286,10 +343,42 @@ class DiagnosticsOptions:
     near_zero_numeraire_threshold: float = 1e-3
     large_coefficient_threshold: float = 25.0
 
+    def __post_init__(self) -> None:
+        """Reject non-finite or out-of-range warning thresholds."""
+        for name in (
+            "separation_threshold",
+            "near_zero_numeraire_threshold",
+            "large_coefficient_threshold",
+        ):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0:
+                raise ValueError(f"{name} must be finite and nonnegative.")
+        if self.separation_threshold > 1:
+            raise ValueError("separation_threshold must be at most one.")
+
 
 @dataclass(frozen=True)
 class Options:
-    """Complete configuration shared by all model-fitting entry points."""
+    """Configuration bundle accepted by all model-fitting entry points.
+
+    Parameters
+    ----------
+    fit : FitOptions
+        EM and multi-start settings, used by LCL and cross-validation.
+    optimization : OptimizationOptions
+        Solver settings used by both estimators.
+    inference : InferenceOptions
+        Covariance settings used by both estimators.
+    diagnostics : DiagnosticsOptions
+        LCL diagnostic switches and warning thresholds. Conditional logit uses
+        ``check_collinearity``; membership and class-warning settings apply to LCL.
+
+    Notes
+    -----
+    Conditional logit has no EM stage and does not use ``fit``. Do not combine
+    ``options=`` with individual option arguments. Mutable inference and diagnostic
+    settings are copied on fit, so later edits cannot change a fitted result.
+    """
 
     fit: FitOptions = field(default_factory=FitOptions)
     optimization: OptimizationOptions = field(default_factory=OptimizationOptions)
@@ -313,7 +402,11 @@ def _resolve_options(
             "arguments, not both."
         )
     if options is not None:
-        return options
+        return replace(
+            options,
+            inference=replace(options.inference),
+            diagnostics=replace(options.diagnostics),
+        )
     return Options(
         fit=fit_options if fit_options is not None else FitOptions(),
         optimization=(
@@ -321,9 +414,17 @@ def _resolve_options(
             if optimization_options is not None
             else OptimizationOptions()
         ),
-        inference=inference if inference is not None else InferenceOptions(),
-        diagnostics=(diagnostics if diagnostics is not None else DiagnosticsOptions()),
+        inference=replace(inference) if inference is not None else InferenceOptions(),
+        diagnostics=(
+            replace(diagnostics) if diagnostics is not None else DiagnosticsOptions()
+        ),
     )
+
+
+def _require_integer(value: object, name: str) -> None:
+    """Reject fractional counts and booleans before iteration or seed coercion."""
+    if isinstance(value, bool) or not isinstance(value, Integral):
+        raise ValueError(f"{name} must be an integer.")
 
 
 def _resolve_weight_type(weight_type: str) -> str:
@@ -348,33 +449,75 @@ def _resolve_weight_type(weight_type: str) -> str:
 
 @dataclass
 class PastChoicesData:
-    """Array-style historical choices used to update class membership."""
+    """Array-style historical choices used to update class membership.
 
-    X: ArrayLike
-    y: ArrayLike
-    alts: ArrayLike
-    cases: ArrayLike
-    panels: ArrayLike
-    dems: ArrayLike | None = None
-    dem_panel_ids: ArrayLike | None = None
+    Parameters
+    ----------
+    X : array-like, shape (rows, alt_vars)
+        Historical utility design in fitted expanded-column order.
+    y : array-like, shape (rows,)
+        Binary historical choices, exactly one per (panel, case).
+    alts, cases, panels : array-like, shape (rows,)
+        Original identifiers aligned with ``X``. History may cover a subset of
+        prediction panels; case IDs need only be unique within a panel.
+    dems : array-like, shape (panels, dem_vars), optional
+        Historical demographics retained for input compatibility. Membership
+        priors use prediction demographics. Utility interactions must already be
+        included in ``X``.
+    dem_panel_ids : array-like, shape (panels,), optional
+        IDs identifying rows of ``dems``. Without these, demographic rows follow
+        sorted unique historical panel-ID order.
+    """
+
+    X: DesignInput
+    y: ChoicesInput
+    alts: RowIdsInput
+    cases: RowIdsInput
+    panels: RowIdsInput
+    dems: DemographicsInput | None = None
+    dem_panel_ids: PanelIdsInput | None = None
 
 
-class PartitionType(StrEnum):
+class PartitionType(str, Enum):
     """Supported binning strategies for WTP analysis."""
 
     CATEGORICAL = "categorical"
     QUINTILES = "quintiles"
     CUSTOM_BREAKS = "custom_breaks"
 
+    def __str__(self) -> str:
+        """Return the public value, including on Python 3.10."""
+        return self.value
+
 
 @dataclass
 class WTPRequest:
-    """Configuration for a marginal willingness-to-pay summary."""
+    """Configuration for a partitioned marginal willingness-to-pay summary.
+
+    Parameters
+    ----------
+    alt_var : str
+        Raw utility attribute or expanded design-column target.
+    demographic_var : str
+        Panel-level grouping column, or a descriptive name for a dummy-coded factor.
+    partition_type : PartitionType or str
+        ``"categorical"``, ``"quintiles"``, or ``"custom_breaks"``.
+    bins : list[float] | None, optional
+        Finite, strictly increasing cutpoints for ``"custom_breaks"`` only.
+        An empty list creates one group; integer bin counts are not supported.
+    dummy_vars : list[str] | None, optional
+        Mutually exclusive binary columns for a categorical partition.
+    dummy_labels : list[str] | None, optional
+        Distinct labels for ``dummy_vars``, defaulting to their column names.
+    base_category : str, default="base"
+        Label for panels with all dummy columns zero. It must differ from the
+        other dummy labels. Used only for dummy-coded partitions.
+    """
 
     alt_var: str
     demographic_var: str
     partition_type: PartitionType | str
-    bins: Optional[Union[int, list[float]]] = None
+    bins: list[float] | None = None
     dummy_vars: list[str] | None = None
     dummy_labels: list[str] | None = None
     base_category: str = "base"
@@ -396,6 +539,12 @@ class WTPRequest:
             raise ValueError(
                 "When partition_type is 'custom_breaks', bins must be breakpoints."
             )
+        if self.partition_type != PartitionType.CUSTOM_BREAKS and self.bins is not None:
+            raise ValueError("bins is only used with partition_type='custom_breaks'.")
+        if self.bins is not None and not all(math.isfinite(x) for x in self.bins):
+            raise ValueError("Custom WTP breakpoints must be finite.")
+        if self.dummy_labels is not None and self.dummy_vars is None:
+            raise ValueError("dummy_labels requires dummy_vars.")
         if isinstance(self.bins, list) and any(
             right <= left for left, right in zip(self.bins, self.bins[1:])
         ):
@@ -408,6 +557,13 @@ class WTPRequest:
             if self.partition_type != PartitionType.CATEGORICAL:
                 raise ValueError(
                     "Dummy-coded WTP partitions require partition_type='categorical'."
+                )
+            labels = (
+                self.dummy_labels if self.dummy_labels is not None else self.dummy_vars
+            )
+            if len(set([self.base_category, *labels])) != len(labels) + 1:
+                raise ValueError(
+                    "Dummy partition labels and base_category must be distinct."
                 )
             if self.dummy_labels is not None and len(self.dummy_labels) != len(
                 self.dummy_vars

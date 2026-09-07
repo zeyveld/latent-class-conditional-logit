@@ -46,7 +46,7 @@ from equinox import filter_jit
 from jax import lax
 from jax.nn import log_softmax, sigmoid, softmax
 from jax.ops import segment_max, segment_sum
-from jaxtyping import Array, Float64
+from jaxtyping import Array, Float64, Int, Integer
 
 from lcl._params import ParamPacking
 from lcl._scheduling import use_sequential
@@ -56,9 +56,9 @@ from lcl._struct import Data, DiffUnchosenChosen
 def _class_blocks_batched(
     Xd: Float64[Array, "unchosen_rows alt_vars"],
     q_rows: Float64[Array, "unchosen_rows classes"],
-    cases_d: Array,
+    cases_d: Integer[Array, "unchosen_rows"],
     num_cases: int,
-    panels_of_cases: Array,
+    panels_of_cases: Integer[Array, "cases"],
     num_panels: int,
     posterior: Float64[Array, "panels classes"],
     num_classes: int,
@@ -126,9 +126,9 @@ def _class_blocks_batched(
 def _class_blocks_sequential(
     Xd: Float64[Array, "unchosen_rows alt_vars"],
     betas: Float64[Array, "alt_vars classes"],
-    cases_d: Array,
+    cases_d: Integer[Array, "unchosen_rows"],
     num_cases: int,
-    panels_of_cases: Array,
+    panels_of_cases: Integer[Array, "cases"],
     num_panels: int,
     posterior: Float64[Array, "panels classes"],
 ) -> tuple[
@@ -168,7 +168,7 @@ def _class_blocks_sequential(
         Posterior-weighted conditional-logit Hessian blocks.
     """
 
-    def per_class(carry: None, class_idx: Array) -> tuple[None, tuple[Array, Array]]:
+    def per_class(carry: None, class_idx: Int[Array, ""]) -> tuple[None, tuple[Float64[Array, "panels alt_vars"], Float64[Array, "alt_vars alt_vars"]]]:
         """Compute one class's panel scores and Hessian block."""
         V = Xd @ betas[:, class_idx]
         shift = jnp.maximum(0.0, segment_max(V, cases_d, num_segments=num_cases))
@@ -249,7 +249,7 @@ def _membership_curvature_gram(
         axis=-1,
     ).reshape(-1, 2)
 
-    def one_block(carry: None, pair: Array) -> tuple[None, Array]:
+    def one_block(carry: None, pair: Int[Array, "2"]) -> tuple[None, Float64[Array, "dem_vars_plus_one dem_vars_plus_one"]]:
         """Contract one (m, l) class pair into a (dem, dem) Gram matrix."""
         row, col = pair[0], pair[1]
         h_m, h_l = posterior_tail[:, row], posterior_tail[:, col]

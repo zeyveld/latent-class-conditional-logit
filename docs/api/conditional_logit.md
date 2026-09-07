@@ -17,18 +17,21 @@ results = ConditionalLogit(numeraire="price").fit(
     utility_formula="chosen ~ price + time + C(mode)",
     weights="survey_weight",
     options=Options(
-        optimization=OptimizationOptions(gradient_tol=1e-6),
+        optimization=OptimizationOptions(newton_decrement_tol=1e-6),
         inference=InferenceOptions(covariance="clustered"),
     ),
 )
 
 coefficient_table = results.summarize_betas(show=False)
+held_out_ll = results.loglik(test_data, weights="survey_weight")
 ```
 
 Weights are case-level. Prefer a column name or case-keyed mapping because those
 forms preserve identity when rows are reordered. If case IDs repeat across panels,
 key a mapping by `(panel_id, case_id)`. A sequence is interpreted in
-first-case-appearance order and realigned after encoding.
+first-case-appearance order and realigned after encoding. `loglik` accepts the
+same `weights` forms; omitting scoring weights gives equal weight to every case.
+`loglik(data, per_case=True)` includes both `panel` and `case` IDs.
 
 With `panels_col`, BIC, CAIC, and adjusted BIC use the number of panels as their
 sample size; otherwise they use the number of choice situations. A
@@ -43,7 +46,10 @@ McFadden rho-squared, final score, and information diagnostics.
 Prediction returns a [`CLPrediction`][lcl.results.CLPrediction] rather than a bare
 frame. Probabilities remain in `prediction.predicted_probs`, with WTP,
 elasticities, market shares, aggregate elasticities, denominator diagnostics,
-and surplus available through the same methods as latent-class prediction.
+and surplus methods shared with latent-class prediction. CL `wtp(target)`,
+`compute_wtp(target)`, and `tradeoff(target)` return the same mean-WTP table;
+LCL `compute_wtp` accepts partition requests. See the
+[API contracts guide](contracts.md) for the complete comparison.
 
 ```python
 prediction = results.predict(counterfactual_data, panel_weights="survey_weight")

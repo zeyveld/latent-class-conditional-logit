@@ -9,8 +9,10 @@ from typing import Any
 
 import numpy as onp
 import polars as pl
+from jaxtyping import Shaped
 
 from lcl.options import (
+    DiagnosticsOptions,
     FitOptions,
     InferenceOptions,
     Options,
@@ -45,12 +47,13 @@ def cv_optimal_classes(
     optimization_options: OptimizationOptions | None = None,
     inference: InferenceOptions | None = None,
     numeraire_min_abs: float | None = None,
+    diagnostics: DiagnosticsOptions | None = None,
 ) -> pl.DataFrame:
     """Select a latent-class count with blocked panel-level cross-validation.
 
     Every test fold is transformed by the encoder fitted on its training fold.
     Formula-derived columns therefore retain their training-time categorical
-    meaning, and unseen categories produce Formulaic's explicit warning or error.
+    meaning, and unseen categories produce an explicit error for that fold.
 
     ``Avg_OOS_LL`` is the mean held-out log likelihood per panel, pooled across
     all folds. It is set to ``NaN`` when any fold fails so an incomplete class
@@ -75,12 +78,17 @@ def cv_optimal_classes(
         Separate panel-level demographic data.
     numeraire : str | None, optional
         Utility coefficient constrained to be strictly negative.
-    folds : int, default=5
-        Number of blocked panel folds.
+    folds : int, sequence of sequences, or mapping, default=5
+        Number of blocked panel folds, explicit test-panel groups, or a mapping
+        from panel IDs to fold labels. Explicit folds must cover each panel once.
     seed : int, default=42
         Random seed for panel shuffling.
     spec : LCLSpec | None, optional
         Preferred declarative model specification.
+    options : Options | None, optional
+        Complete configuration forwarded to every training fit. Do not combine
+        with individual option arguments. Its inference settings are honored;
+        only when both ``options`` and ``inference`` are omitted is inference skipped.
     fit_options : FitOptions | None, optional
         EM settings, including independent starts per training fold.
     optimization_options : OptimizationOptions | None, optional
@@ -89,6 +97,8 @@ def cv_optimal_classes(
         Inference settings. By default CV skips covariance work.
     numeraire_min_abs : float | None, optional
         Minimum absolute magnitude for a keyword-specified numeraire.
+    diagnostics : DiagnosticsOptions | None, optional
+        Diagnostic switches and thresholds forwarded to every training fit.
 
     Returns
     -------
@@ -122,6 +132,7 @@ def cv_optimal_classes(
         fit_options=fit_options,
         optimization_options=optimization_options,
         inference=inference_for_resolution,
+        diagnostics=diagnostics,
     )
     fit_options = resolved_options.fit
     optimization_options = resolved_options.optimization
@@ -178,6 +189,7 @@ def cv_optimal_classes(
                     fit_options=fit_options,
                     optimization_options=optimization_options,
                     inference=inference,
+                    diagnostics=resolved_options.diagnostics,
                 )
                 panel_scores = result.loglik(
                     test_df,
@@ -195,6 +207,8 @@ def cv_optimal_classes(
                 total_ll = float(panel_scores["log_likelihood"].sum())
                 mean_ll = total_ll / test_panel_count
                 panel_values = panel_scores["log_likelihood"].to_numpy()
+                if not onp.all(onp.isfinite(panel_values)):
+                    raise ValueError("Held-out panel log likelihoods must be finite.")
                 fold_se = (
                     float(onp.std(panel_values, ddof=1) / onp.sqrt(test_panel_count))
                     if test_panel_count > 1
@@ -295,9 +309,9 @@ def _annotate_cv_selection(result: pl.DataFrame) -> pl.DataFrame:
 
 def _resolve_panel_folds(
     folds: int | Sequence[Sequence[object]] | Mapping[object, object],
-    unique_panels: onp.ndarray,
+    unique_panels: Shaped[onp.ndarray, "panels"],
     seed: int,
-) -> list[onp.ndarray]:
+) -> list[Shaped[onp.ndarray, "fold_panels"]]:
     """Return validated, user-controlled test-panel folds."""
     if isinstance(folds, int):
         if folds > len(unique_panels):

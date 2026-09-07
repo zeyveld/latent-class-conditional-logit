@@ -13,7 +13,7 @@ results = lcl.fit(
     spec,
     options=Options(
         fit=FitOptions(seed=42, starts=3, max_em_iter=500),
-        optimization=OptimizationOptions(maxiter=75, gradient_tol=1e-5),
+        optimization=OptimizationOptions(maxiter=75, newton_decrement_tol=1e-5),
         inference=InferenceOptions(covariance="clustered"),
     ),
 )
@@ -21,11 +21,13 @@ results = lcl.fit(
 
 The legacy `fit_options=`, `optimization_options=`, `inference=`, and
 `diagnostics=` keywords remain available, but do not mix them with `options=`;
-ambiguous partial merges raise an error.
+ambiguous partial merges raise an error. See [API contracts and compatibility](contracts.md)
+for configuration precedence, which sections each estimator uses, and array ordering.
 
 Use separate `utility_formula` and `membership_formula` fields for formula-based
-designs. `LCLSpec` is immutable, so it can be reused safely across fitting and
-cross-validation.
+designs. `LCLSpec` has frozen top-level fields and can be reused across fitting
+and cross-validation. Treat its nested variable lists and mappings as read-only;
+use `dataclasses.replace` to derive another specification.
 
 ## Fitting
 

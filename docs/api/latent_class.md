@@ -19,7 +19,10 @@ model = lcl.LatentClassConditionalLogit(spec=spec)
 results = model.fit(data, options=options)
 ```
 
-Pass `spec` by keyword to the lower-level constructor.
+Pass `spec` by keyword to the lower-level constructor. Explicit `num_classes`
+and `numeraire_min_abs` override their base-specification values; omitted values
+inherit them. The historical direct-constructor default without a spec is five
+classes, while `LCLSpec` defaults to two. Create a new model for each fit.
 
 ## Model
 
@@ -88,7 +91,8 @@ consumer and demographic group. See the
 [economic definitions and worked examples](../tutorials/prediction_welfare.md).
 
 For array-style prediction, supply `dem_panel_ids` with `dems` so demographic
-rows can be validated and reordered. Without those IDs, demographic rows must
+rows can be validated and reordered. Tabular and array prediction inputs cannot
+be combined in one call. Without those IDs, demographic rows must
 follow sorted unique panel-ID order.
 
 ::: lcl.results.LCLPrediction

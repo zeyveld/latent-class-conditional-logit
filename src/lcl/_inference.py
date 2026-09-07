@@ -1,13 +1,12 @@
 """Shared observed-information and covariance helpers."""
 
 import logging
-from typing import Any, NamedTuple, cast
+from typing import NamedTuple, cast
 
 import jax.numpy as jnp
 import numpy as onp
 from jax.ops import segment_sum
-from jax.typing import ArrayLike
-from jaxtyping import Array, Float64
+from jaxtyping import Array, ArrayLike, Float64, Integer, Real
 
 from lcl.options import _resolve_weight_type
 
@@ -22,10 +21,10 @@ def _symmetrize(
 
 
 def _aggregate_scores(
-    scores: ArrayLike,
-    group_ids: ArrayLike,
+    scores: Real[ArrayLike, "rows params"],
+    group_ids: Integer[ArrayLike, "rows"],
     num_groups: int,
-) -> Array:
+) -> Float64[Array, "num_groups params"]:
     """Sum score rows within clusters.
 
     Parameters
@@ -49,13 +48,13 @@ def _aggregate_scores(
 
 
 def _robust_covariance(
-    hess_inv: ArrayLike,
-    grad_n: ArrayLike,
+    hess_inv: Real[ArrayLike, "params params"],
+    grad_n: Real[ArrayLike, "units params"],
     finite_sample_correction: bool = True,
     *,
-    weights: ArrayLike | None = None,
+    weights: Real[ArrayLike, "units"] | None = None,
     weight_type: str = "probability",
-) -> Array:
+) -> Float64[Array, "params params"]:
     """Return an uncentered Huber-White sandwich covariance.
 
     The meat depends on how the weights are interpreted, which is the same
@@ -127,8 +126,8 @@ class InformationDiagnostics(NamedTuple):
 
 
 def _invert_information(
-    information: ArrayLike, label: str = "information matrix"
-) -> tuple[Array, InformationDiagnostics]:
+    information: Real[ArrayLike, "params params"], label: str = "information matrix"
+) -> tuple[Float64[Array, "params params"], InformationDiagnostics]:
     """Invert a positive-definite symmetric information matrix with diagnostics."""
     matrix = onp.asarray(information, dtype=onp.float64)
     num_params = matrix.shape[0]
@@ -174,7 +173,7 @@ def _invert_information(
             label,
             diagnostics.condition_number,
         )
-    inverse: onp.ndarray[Any, Any]
+    inverse: Float64[onp.ndarray, "params params"]
     if not diagnostics.positive_definite:
         inverse = onp.full_like(symmetric, onp.nan)
     else:

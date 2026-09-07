@@ -2,7 +2,8 @@
 
 import logging
 import warnings
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Mapping
+from dataclasses import replace
 from typing import Any, Literal, cast
 
 import jax
@@ -10,8 +11,8 @@ import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jax import jacfwd
-from jax.typing import ArrayLike
-from jaxtyping import Array, Float64
+from lcl._typing import DemographicsInput, DesignInput, PanelIdsInput, PanelWeightsInput, RowIdsInput
+from jaxtyping import Array, ArrayLike, Float64, Integer
 
 from lcl._analytic_derivatives import _panel_scores_and_hessian
 from lcl._case_utils import _diff_unchosen_chosen
@@ -95,7 +96,7 @@ class LCLResults:
         score_tol: float = 1e-4,
         em_criterion_met: bool = False,
         polish_report: PolishReport | None = None,
-        cluster_ids: ArrayLike | None = None,
+        cluster_ids: Integer[ArrayLike, "panels"] | None = None,
         num_clusters: int | None = None,
         param_packing: ParamPacking | None = None,
     ) -> None:
@@ -113,7 +114,8 @@ class LCLResults:
         em_recursion : int
             Number of EM recursions completed before termination.
         converged : bool
-            Whether the explicit EM stopping criterion was satisfied.
+            Whether the final observed-data score met ``score_tol`` after EM
+            and optional polishing.
         inference : :class:`~lcl.options.InferenceOptions` | None
             Covariance and standard-error configuration.
         estim_time_sec : float
@@ -149,9 +151,9 @@ class LCLResults:
         self.total_recursions = em_recursion
         self.converged = converged
         self.estim_time_sec = estim_time_sec
-        self.inference = inference if inference is not None else InferenceOptions()
+        self.inference = replace(inference) if inference is not None else InferenceOptions()
         self.diagnostics_config = (
-            diagnostics_config
+            replace(diagnostics_config)
             if diagnostics_config is not None
             else DiagnosticsOptions()
         )
@@ -260,7 +262,7 @@ class LCLResults:
         return self.converged
 
     @property
-    def covariance(self) -> Array:
+    def covariance(self) -> Float64[Array, "all_params all_params"]:
         """Deprecated alias for :attr:`cov_matrix`."""
         warnings.warn(
             "LCLResults.covariance is deprecated; use cov_matrix.",
@@ -270,7 +272,7 @@ class LCLResults:
         return self.cov_matrix
 
     @property
-    def abic(self) -> Array:
+    def abic(self) -> Float64[Array, ""]:
         """Deprecated alias for :attr:`adjusted_bic`."""
         warnings.warn(
             "LCLResults.abic is deprecated; use adjusted_bic.",
@@ -280,7 +282,7 @@ class LCLResults:
         return self.adjusted_bic
 
     def _pack_params(self) -> Float64[Array, "all_params"]:
-        """Flatten structural parameters and class memberships for Hessian calculation."""
+        """Flatten latent parameters and class memberships for inference."""
         latent_betas = self.em_res.latent_betas
         if latent_betas is None:
             raise ValueError("Latent betas are required to pack parameters.")
@@ -1380,6 +1382,10 @@ class LCLResults:
         if numeraire_idx is not None:
             min_abs_numeraire = float(onp.min(onp.abs(structural[numeraire_idx, :])))
             threshold = self.diagnostics_config.near_zero_numeraire_threshold
+            spec = getattr(self.model, "spec", None)
+            constraint = None if spec is None else spec.negative_constraint
+            if constraint is not None and constraint.warn_below is not None:
+                threshold = constraint.warn_below
             rows.append(
                 {
                     "section": "coefficients",
@@ -1473,16 +1479,16 @@ class LCLResults:
         self,
         data: object | None = None,
         *,
-        X: ArrayLike | None = None,
-        alts: ArrayLike | None = None,
-        cases: ArrayLike | None = None,
-        panels: ArrayLike | None = None,
-        dems: ArrayLike | None = None,
-        dem_panel_ids: ArrayLike | None = None,
+        X: DesignInput | None = None,
+        alts: RowIdsInput | None = None,
+        cases: RowIdsInput | None = None,
+        panels: RowIdsInput | None = None,
+        dems: DemographicsInput | None = None,
+        dem_panel_ids: PanelIdsInput | None = None,
         past_choices: object | None = None,
         dems_data: object | None = None,
         past_choices_dems_data: object | None = None,
-        panel_weights: str | Mapping[object, float] | Sequence[float] | onp.ndarray | None = None,
+        panel_weights: str | Mapping[object, float] | PanelWeightsInput | None = None,
     ) -> LCLPrediction:
         """Generate out-of-sample latent-class predictions.
 
@@ -1495,8 +1501,8 @@ class LCLResults:
         Parameters
         ----------
         X : ArrayLike | None, optional
-            Alternative-specific design matrix for array-style prediction. Ignored
-            when ``data`` is provided.
+            ``(rows, alt_vars)`` design matrix in fitted expanded-column order.
+            Cannot be combined with ``data``.
         alts : ArrayLike | None, optional
             Alternative identifiers aligned to rows of ``X``.
         cases : ArrayLike | None, optional
@@ -1525,7 +1531,11 @@ class LCLResults:
             Optional panel-level demographics to merge into ``data`` during prediction.
         past_choices_dems_data : object | None, optional
             Optional panel-level demographics to merge into tabular ``past_choices``.
-            This argument is not used with :class:`~lcl._struct.PastChoicesData`.
+            Cannot be used with :class:`~lcl.options.PastChoicesData`.
+        panel_weights : str, mapping, sequence, or array, optional
+            Panel aggregation weights: a constant-per-panel data column, mapping
+            by panel ID, or vector in sorted unique prediction-panel order.
+            Individual probabilities do not depend on these weights.
 
         Returns
         -------
@@ -1540,6 +1550,12 @@ class LCLResults:
             parameters are unavailable, or if ``past_choices_dems_data`` is provided
             without tabular ``past_choices``.
         """
+        if data is not None and any(
+            value is not None for value in (X, alts, cases, panels, dems, dem_panel_ids)
+        ):
+            raise ValueError("Pass either tabular data or prediction arrays, not both.")
+        if data is None and dems_data is not None:
+            raise ValueError("dems_data requires tabular data; use dems for array prediction.")
         if past_choices is None and past_choices_dems_data is not None:
             raise ValueError(
                 "past_choices_dems_data can only be used when past_choices is provided."

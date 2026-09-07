@@ -6,24 +6,25 @@ User-facing configuration and request types live in :mod:`lcl.options`.
 from dataclasses import dataclass
 from typing import Any, NamedTuple
 
-from jaxtyping import Array, Bool, Float64, UInt
+import numpy as onp
+from jaxtyping import Array, Bool, Float64, Shaped, UInt
 
 
 @dataclass
 class ParsedData:
     """Aligned arrays and original identifiers produced by the encoder."""
 
-    X: Array
-    dems: Array | None
-    y: Array | None
-    cases: Array
-    alts: Array
-    panels: Array
+    X: Float64[Array, "rows alt_vars"]
+    dems: Float64[Array, "panels dem_vars"] | None
+    y: Bool[Array, "rows"] | None
+    cases: UInt[Array, "rows"]
+    alts: UInt[Array, "rows"]
+    panels: UInt[Array, "rows"]
     case_varnames: list[str]
     dem_varnames: list[str] | None
-    original_alts: Any | None = None
-    original_cases: Any | None = None
-    original_panels: Any | None = None
+    original_alts: Shaped[onp.ndarray, "rows"] | None = None
+    original_cases: Shaped[onp.ndarray, "rows"] | None = None
+    original_panels: Shaped[onp.ndarray, "rows"] | None = None
 
 
 class Data(NamedTuple):
@@ -58,12 +59,12 @@ class OptimizeResult:
     """Internal optimizer output and information diagnostics."""
 
     success: bool
-    params: Array
-    neg_loglik: float | Array
+    params: Float64[Array, "params"]
+    neg_loglik: float | Float64[Array, ""]
     message: str
-    hess_inv: Array
-    grad_n: Array
-    grad: Array
+    hess_inv: Float64[Array, "params params"]
+    grad_n: Float64[Array, "cases params"]
+    grad: Float64[Array, "params"]
     nit: int
     nfev: int
     njev: int

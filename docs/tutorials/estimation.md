@@ -127,7 +127,7 @@ results = lcl.fit(
             max_em_iter=60,
             num_devices=1,
         ),
-        optimization=OptimizationOptions(maxiter=40, gradient_tol=1e-5),
+        optimization=OptimizationOptions(maxiter=40, newton_decrement_tol=1e-5),
         inference=InferenceOptions(covariance="clustered"),
     ),
 )

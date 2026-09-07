@@ -62,7 +62,7 @@ cv_results = lcl.cv_optimal_classes(
     ),
     optimization_options=OptimizationOptions(
         maxiter=30,
-        gradient_tol=1e-5,
+        newton_decrement_tol=1e-5,
     ),
 )
 

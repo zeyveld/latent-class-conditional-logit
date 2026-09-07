@@ -4,7 +4,7 @@ from typing import Any, NamedTuple
 import jax.numpy as jnp
 from jax import lax
 from jax.scipy.linalg import cho_factor, cho_solve
-from jaxtyping import Array, Float64
+from jaxtyping import Array, Bool, Float64, Int
 
 from lcl.constraints import (
     DEFAULT_NEGATIVE_MIN_ABS,
@@ -17,16 +17,16 @@ from lcl._struct import OptimizeResult
 
 
 class NewtonState(NamedTuple):
-    params: jnp.ndarray
-    loss: jnp.ndarray
-    grad: jnp.ndarray
-    hess: jnp.ndarray
+    params: Float64[Array, "params"]
+    loss: Float64[Array, ""]
+    grad: Float64[Array, "params"]
+    hess: Float64[Array, "params params"]
     step_num: int
-    error: jnp.ndarray
-    failed: jnp.ndarray
-    num_fun_eval: jnp.ndarray
-    num_grad_hess_eval: jnp.ndarray
-    trust_radius: jnp.ndarray
+    error: Float64[Array, ""]
+    failed: Bool[Array, ""]
+    num_fun_eval: Int[Array, ""]
+    num_grad_hess_eval: Int[Array, ""]
+    trust_radius: Float64[Array, ""]
 
 
 def newton_kwargs(
@@ -122,8 +122,8 @@ def exact_newton_minimize(
     init_loss, init_grad, init_hess = value_grad_hess_fn(init_params, *args)
 
     def regularized_newton_direction(
-        grad: jnp.ndarray, hess: jnp.ndarray
-    ) -> tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+        grad: Float64[Array, "params"], hess: Float64[Array, "params params"]
+    ) -> tuple[Float64[Array, "params"], Float64[Array, ""], Float64[Array, "params"]]:
         """Return a scale-equivariant Newton direction and decrement.
 
         Cholesky is first attempted on the undamped, symmetrized Hessian.  If it
@@ -142,11 +142,11 @@ def exact_newton_minimize(
         identity = jnp.eye(grad.shape[0], dtype=grad.dtype)
 
         class RegularizationState(NamedTuple):
-            shift: jnp.ndarray
-            direction_scaled: jnp.ndarray
+            shift: Float64[Array, ""]
+            direction_scaled: Float64[Array, "params"]
             attempts: int
 
-        def solve_scaled(shift: jnp.ndarray) -> jnp.ndarray:
+        def solve_scaled(shift: Float64[Array, ""]) -> Float64[Array, "params"]:
             factor, lower = cho_factor(H_scaled + identity * shift)
             return -cho_solve((factor, lower), grad_scaled)
 
@@ -159,7 +159,7 @@ def exact_newton_minimize(
         # descent direction there, so the shift loop must not chase one.
         stationary = jnp.max(jnp.abs(grad)) <= tol
 
-        def regularization_cond(reg_state: RegularizationState) -> jnp.ndarray:
+        def regularization_cond(reg_state: RegularizationState) -> Bool[Array, ""]:
             direction = reg_state.direction_scaled / diagonal_scale
             valid = jnp.all(jnp.isfinite(direction)) & (jnp.dot(grad, direction) < 0.0)
             return (~valid) & (~stationary) & (reg_state.attempts < 12)
@@ -215,7 +215,7 @@ def exact_newton_minimize(
         ),
     )
 
-    def outer_cond(state: NewtonState) -> jnp.ndarray:
+    def outer_cond(state: NewtonState) -> Bool[Array, ""]:
         """Continue while the Newton decrement is too large."""
         return jnp.logical_and(
             jnp.logical_and(state.error > tol, state.step_num < maxiter),
@@ -246,12 +246,12 @@ def exact_newton_minimize(
         directional_derivative = jnp.dot(state.grad, search_direction)
 
         class LSState(NamedTuple):
-            step_size: jnp.ndarray
-            params: jnp.ndarray
-            loss: jnp.ndarray
+            step_size: Float64[Array, ""]
+            params: Float64[Array, "params"]
+            loss: Float64[Array, ""]
             ls_iter: int
 
-        def ls_cond(ls_state: LSState) -> jnp.ndarray:
+        def ls_cond(ls_state: LSState) -> Bool[Array, ""]:
             """Continue backtracking until the candidate is finite and acceptable."""
             expected_improvement = 1e-4 * ls_state.step_size * directional_derivative
             finite_candidate = jnp.isfinite(ls_state.loss) & jnp.all(
@@ -322,9 +322,8 @@ def exact_newton_minimize(
         # broken down; that must contract the radius, not expand it.
         agreement = jnp.where(
             predicted_decrease > 0.0,
-            actual_decrease / jnp.maximum(
-                predicted_decrease, jnp.finfo(state.params.dtype).eps
-            ),
+            actual_decrease
+            / jnp.maximum(predicted_decrease, jnp.finfo(state.params.dtype).eps),
             jnp.zeros_like(actual_decrease),
         )
         # The step actually taken is the trust-truncated one, so the
@@ -362,14 +361,21 @@ def exact_newton_minimize(
 
 def _minimize(
     value_fn: Callable[..., Float64[Array, ""]],
-    value_grad_hess_fn: Callable[..., tuple[tuple[Array, Array], Array, Array]],
+    value_grad_hess_fn: Callable[
+        ...,
+        tuple[
+            tuple[Float64[Array, ""], Float64[Array, "cases params"]],
+            Float64[Array, "params"],
+            Float64[Array, "params params"],
+        ],
+    ],
     params: Float64[Array, "params"],
     args: tuple[object, ...],
     optimization_options: OptimizationOptions | None = None,
     numeraire_idx: int | None = None,
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
     assert_converge: bool = False,
-    objective_scale: float | Array | None = None,
+    objective_scale: float | Float64[Array, ""] | None = None,
 ) -> OptimizeResult:
     """Execute safeguarded exact-Newton maximum-likelihood estimation.
 
@@ -427,7 +433,9 @@ def _minimize(
 
     def _value_grad_hess_closure(
         p: Float64[Array, "params"], *inner_args: object
-    ) -> tuple[Array, Array, Array]:
+    ) -> tuple[
+        Float64[Array, ""], Float64[Array, "params"], Float64[Array, "params params"]
+    ]:
         """Evaluate normalized derivatives in unconstrained parameter space."""
         p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
         (val, score_rows), grad_struct, hessian = value_grad_hess_fn(

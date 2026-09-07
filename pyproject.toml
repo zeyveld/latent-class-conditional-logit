@@ -12,15 +12,16 @@ authors = [
 
 dependencies = [
     "jax>=0.5.3",
-    "polars>=0.20.0",
-    "jaxtyping>=0.2.25",
+    "polars>=1.24.0",
+    "numpy>=1.25",
+    "jaxtyping>=0.3.7",
     "beartype>=0.17.0",
     "equinox>=0.13.6",
     "formulaic>=1.2.1",
     "pylatexenc>=2.10",
     "tabulate>=0.10",
     "pandas>=2.0",
-    "scipy>=1.10",
+    "scipy>=1.11.1",
 ]
 
 [build-system]

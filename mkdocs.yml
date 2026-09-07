@@ -3,6 +3,11 @@ site_description: A JAX-accelerated Python package for latent-class conditional 
 site_url: https://zeyveld.github.io/latent-class-conditional-logit/
 repo_url: https://github.com/zeyveld/latent-class-conditional-logit
 
+exclude_docs: |
+  **/.DS_Store
+  **/__pycache__/**
+  **/*.pyc
+
 theme:
   name: material
   logo: assets/logo.svg
@@ -70,6 +75,7 @@ nav:
       - Cross-validation & model selection: tutorials/cross_validation.md
   - API Reference:
       - Specification & options: api/specification.md
+      - API contracts & compatibility: api/contracts.md
       - Latent-class conditional logit: api/latent_class.md
       - Conditional logit: api/conditional_logit.md
       - Cross-validation: api/cross_validation.md

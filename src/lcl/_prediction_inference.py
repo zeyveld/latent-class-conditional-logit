@@ -19,10 +19,11 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as onp
 from jax.ops import segment_sum
-from jaxtyping import Array, Float64, Int, UInt
+from jaxtyping import Array, ArrayLike, Float64, Int, Integer, UInt
 
 from lcl._em_alg_steps import _compute_conditional_class_probs
 from lcl._kernels import _choice_probabilities_and_logsum
+from lcl._struct import Data, DiffUnchosenChosen
 
 
 def _betas_and_class_probs(
@@ -30,8 +31,8 @@ def _betas_and_class_probs(
     flat_params: Float64[Array, "all_params"],
     dems: Float64[Array, "panels dem_vars"] | None,
     num_panels: int,
-    past_data: Any | None = None,
-    past_diff_unchosen_chosen: Any | None = None,
+    past_data: Data | None = None,
+    past_diff_unchosen_chosen: DiffUnchosenChosen | None = None,
 ) -> tuple[Float64[Array, "alt_vars classes"], Float64[Array, "panels classes"]]:
     """Return structural class betas and the class probabilities to predict with.
 
@@ -83,8 +84,8 @@ def choice_probabilities(
     dems: Float64[Array, "panels dem_vars"] | None,
     num_cases: int,
     num_panels: int,
-    past_data: Any | None = None,
-    past_diff_unchosen_chosen: Any | None = None,
+    past_data: Data | None = None,
+    past_diff_unchosen_chosen: DiffUnchosenChosen | None = None,
 ) -> Float64[Array, "rows"]:
     """Return mixture choice probabilities for every design row."""
     betas, class_probs = _betas_and_class_probs(
@@ -108,8 +109,8 @@ def market_shares(
     num_alts: int,
     row_weights: Float64[Array, "rows"],
     weight_total: float,
-    past_data: Any | None = None,
-    past_diff_unchosen_chosen: Any | None = None,
+    past_data: Data | None = None,
+    past_diff_unchosen_chosen: DiffUnchosenChosen | None = None,
 ) -> Float64[Array, "num_alts"]:
     """Return panel-weighted predicted market shares by alternative."""
     probabilities = choice_probabilities(
@@ -138,8 +139,8 @@ def surplus_by_case(
     dems: Float64[Array, "panels dem_vars"] | None,
     num_cases: int,
     num_panels: int,
-    past_data: Any | None = None,
-    past_diff_unchosen_chosen: Any | None = None,
+    past_data: Data | None = None,
+    past_diff_unchosen_chosen: DiffUnchosenChosen | None = None,
 ) -> Float64[Array, "cases"]:
     """Return expected consumer surplus for each choice situation.
 
@@ -173,7 +174,7 @@ def mean_surplus_change(
     baseline: dict[str, Any],
     counterfactual: dict[str, Any],
     case_weights: Float64[Array, "cases"],
-    counterfactual_order: Any | None = None,
+    counterfactual_order: Integer[ArrayLike, "cases"] | None = None,
 ) -> Float64[Array, ""]:
     """Return the panel-weighted mean counterfactual-minus-baseline surplus.
 
@@ -195,7 +196,7 @@ def normalisation_sensitivity(
     baseline: dict[str, Any],
     counterfactual: dict[str, Any],
     case_weights: Float64[Array, "cases"],
-    counterfactual_order: Any | None = None,
+    counterfactual_order: Integer[ArrayLike, "cases"] | None = None,
 ) -> Float64[Array, ""]:
     """Return how far a surplus *change* moves with the utility normalisation.
 
@@ -243,7 +244,7 @@ def normalisation_sensitivity(
     return jnp.sum(per_case * case_weights) / jnp.sum(case_weights)
 
 
-def build_within_case_pairs(cases: onp.ndarray) -> tuple[onp.ndarray, onp.ndarray]:
+def build_within_case_pairs(cases: Integer[onp.ndarray, "rows"]) -> tuple[Int[onp.ndarray, "pairs"], Int[onp.ndarray, "pairs"]]:
     """Enumerate ordered row pairs within each choice situation.
 
     Elasticities relate the probability of alternative ``j`` to an attribute of
@@ -297,8 +298,8 @@ def aggregate_elasticities(
     group_codes: Int[Array, "pairs"],
     num_groups: int,
     row_weights: Float64[Array, "rows"],
-    past_data: Any | None = None,
-    past_diff_unchosen_chosen: Any | None = None,
+    past_data: Data | None = None,
+    past_diff_unchosen_chosen: DiffUnchosenChosen | None = None,
 ) -> Float64[Array, "num_groups"]:
     """Return demand-weighted own- and cross-elasticities by alternative pair.
 

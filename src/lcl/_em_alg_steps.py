@@ -11,7 +11,7 @@ from equinox import combine, filter_jit, is_array, partition
 from jax import lax
 from jax.nn import softmax
 from jax.ops import segment_sum
-from jaxtyping import Array, Float64
+from jaxtyping import Array, Float64, Integer
 
 from lcl.constraints import (
     DEFAULT_NEGATIVE_MIN_ABS,
@@ -352,7 +352,7 @@ def _update_betas(
     num_devices: int,
     numeraire_idx: int | None,
     numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
-    panels_of_cases: Array | None = None,
+    panels_of_cases: Integer[Array, "cases"] | None = None,
 ) -> tuple[Float64[Array, "alt_vars classes"], Float64[Array, "classes"]]:
     """Optimize taste parameters using strict SPMD multi-GPU parallelism.
 
@@ -448,12 +448,12 @@ def _update_betas(
 
 def _distributed_update(
     device_betas: Float64[Array, "... classes_per_device alt_vars"],
-    device_weights: Float64[Array, "... classes_per_device cases"],
+    device_weights: Float64[Array, "... classes_per_device weight_rows"],
     diff: DiffUnchosenChosen,
     numeraire_idx: int | None,
     numeraire_min_abs: float,
     optimization_options: OptimizationOptions,
-    panels_of_cases: Array | None = None,
+    panels_of_cases: Integer[Array, "cases"] | None = None,
 ) -> tuple[
     Float64[Array, "... classes_per_device alt_vars"],
     Float64[Array, "... classes_per_device"],
@@ -465,7 +465,7 @@ def _distributed_update(
     device_betas : Float64[Array, "... classes_per_device alt_vars"]
         Current latent beta vectors assigned to this shard. Some JAX execution
         paths include a leading singleton shard axis, which is preserved on return.
-    device_weights : Float64[Array, "... classes_per_device cases"]
+    device_weights : Float64[Array, "... classes_per_device weight_rows"]
         Case weights assigned to each class on this shard.
     diff : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix shared by all class updates.
@@ -619,7 +619,7 @@ def _compute_em_log_kernels(
     if panels_of_cases is None or num_panels is None:
         raise ValueError("Panel identifiers are required for latent-class models.")
 
-    def one_class(beta: Array) -> Array:
+    def one_class(beta: Float64[Array, "alt_vars"]) -> Float64[Array, "panels"]:
         """Reduce one class's chosen log probabilities directly to panels."""
         log_probs, _ = _diff_logit_components(diff.X, beta, diff.cases, diff.num_cases)
         return segment_sum(log_probs, panels_of_cases, num_segments=num_panels)

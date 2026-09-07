@@ -56,7 +56,9 @@ The [prediction and welfare guide](tutorials/prediction_welfare.md) covers mixed
 new/returning populations, WTP with attribute interactions, different choice sets,
 and readable coefficient tables through 64 classes.
 
-The distribution is named `lcl-choice`; the import is `lcl`.
+The distribution is named `lcl-choice`; the import is `lcl`. See
+[API contracts and compatibility](api/contracts.md) for option precedence,
+input alignment, return types, and supported compatibility aliases.
 
 ```bash
 pip install lcl-choice
@@ -105,7 +107,7 @@ results = lcl.fit(
     fit_options=FitOptions(seed=7, starts=3, max_em_iter=50, num_devices=1),
     optimization_options=OptimizationOptions(
         maxiter=40,
-        gradient_tol=1e-5,
+        newton_decrement_tol=1e-5,
     ),
 )
 

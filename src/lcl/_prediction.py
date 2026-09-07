@@ -1,14 +1,14 @@
 """Out-of-sample prediction, elasticities, and willingness-to-pay (WTP) analysis."""
 
 import logging
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from typing import Any, Literal
 
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
 from jax.ops import segment_sum
-from jaxtyping import Array, Float64, Int
+from jaxtyping import Array, Bool, Float64, Int, Integer, Shaped
 
 from lcl._case_utils import _to_structural_betas
 from lcl._elasticities import compute_elasticities, elasticity_design_derivative
@@ -27,7 +27,8 @@ from lcl._prediction_inference import (
 )
 from lcl._presentation import format_wtp_table
 from lcl.options import PartitionType, WTPRequest
-from lcl._struct import Data
+from lcl._struct import Data, DiffUnchosenChosen
+from lcl._typing import PanelWeightsInput, RowIdsInput
 from lcl._wtp_partitions import (
     _apply_wtp_partition,
     _coerce_partition_data,
@@ -97,12 +98,12 @@ class _PredictionBase:
         class_probs_by_panel: Float64[Array, "panels classes"] | None = None,
         class_probabilities_source: str = "prior",
         partition_data_df: pl.DataFrame | None = None,
-        original_alts: Any | None = None,
-        original_cases: Any | None = None,
-        original_panels: Any | None = None,
+        original_alts: RowIdsInput | None = None,
+        original_cases: RowIdsInput | None = None,
+        original_panels: RowIdsInput | None = None,
         raw_prediction_data: pl.DataFrame | None = None,
-        panel_weights: Sequence[float] | onp.ndarray | None = None,
-        past_diff_unchosen_chosen: Any | None = None,
+        panel_weights: PanelWeightsInput | None = None,
+        past_diff_unchosen_chosen: DiffUnchosenChosen | None = None,
         past_data: Data | None = None,
     ) -> None:
         """Store prediction outputs and references needed for post-processing.
@@ -205,7 +206,7 @@ class _PredictionBase:
 
     def _surplus_comparison_order(
         self, counterfactual: "_PredictionBase"
-    ) -> onp.ndarray:
+    ) -> Integer[onp.ndarray, "cases"]:
         """Validate a common model and population, then match choice occasions."""
         self._require_valid_numeraire()
         counterfactual._require_valid_numeraire()
@@ -230,8 +231,8 @@ class _PredictionBase:
         return order
 
     def _surplus_change_identified(
-        self, counterfactual: "_PredictionBase", order: onp.ndarray
-    ) -> onp.ndarray:
+        self, counterfactual: "_PredictionBase", order: Integer[onp.ndarray, "cases"]
+    ) -> Bool[onp.ndarray, "cases"]:
         """Check cancellation of arbitrary class-specific utility locations."""
         if self.class_probs_by_panel is None:
             return onp.ones(self.predict_data.num_cases, dtype=bool)
@@ -274,14 +275,14 @@ class _PredictionBase:
             "past_diff_unchosen_chosen": self.past_diff_unchosen_chosen,
         }
 
-    def _row_panel_weights(self) -> jnp.ndarray:
+    def _row_panel_weights(self) -> Float64[Array, "rows"]:
         """Return each design row's panel weight."""
         data = self.predict_data
         if data.panels is None:
             raise ValueError("Panel identifiers are required for prediction inference.")
         return jnp.asarray(self.panel_weights)[data.panels]
 
-    def _case_panel_weights(self) -> jnp.ndarray:
+    def _case_panel_weights(self) -> Float64[Array, "cases"]:
         """Return each choice situation's panel weight."""
         data = self.predict_data
         if data.panels_of_cases is None:
@@ -296,7 +297,7 @@ class _PredictionBase:
         bootstrap_draws: int = 500,
         bootstrap_seed: int = 0,
         **kwargs: Any,
-    ) -> tuple[onp.ndarray, onp.ndarray]:
+    ) -> tuple[Float64[onp.ndarray, "*output"], Float64[onp.ndarray, "*output"]]:
         """Evaluate a counterfactual quantity with the requested uncertainty.
 
         The delta method linearizes, which is exact for a mildly nonlinear
@@ -328,11 +329,11 @@ class _PredictionBase:
 
     def _elasticity_design_derivative(
         self, variable: str
-    ) -> tuple[jnp.ndarray, jnp.ndarray]:
+    ) -> tuple[Float64[Array, "rows"], Float64[Array, "rows alt_vars"]]:
         """Return raw values and row-wise derivatives of every design column."""
         return elasticity_design_derivative(self, variable)
 
-    def _wtp_panel_derivative(self, target: str) -> jnp.ndarray:
+    def _wtp_panel_derivative(self, target: str) -> Float64[Array, "panels alt_vars"]:
         """Average attribute derivatives equally over cases and available profiles."""
         self._require_valid_numeraire()
         if target == getattr(self.results.model, "numeraire", None):
@@ -358,6 +359,17 @@ class _PredictionBase:
         For a binary target this derivative is a discrete 0-to-1 change only
         when utility is linear in that target. Use surplus changes for a policy
         that changes several attributes or the available products.
+
+        Parameters
+        ----------
+        target : str
+            Raw utility attribute or expanded design-column name, excluding the numeraire.
+
+        Returns
+        -------
+        pl.DataFrame
+            Original panel, case, and alternative IDs, ``variable``,
+            ``marginal_wtp``, and between-class ``class_sd`` for each profile.
         """
         self._require_valid_numeraire()
         cost_idx = getattr(self.results.model, "numeraire_idx", None)
@@ -645,6 +657,18 @@ class _PredictionBase:
         Per-case changes are point estimates.  Use :meth:`mean_surplus_change`
         for the aggregate, which is the quantity a welfare analysis reports and
         the one that carries a standard error.
+
+        Parameters
+        ----------
+        counterfactual : CLPrediction or LCLPrediction
+            Changed scenario from the same fitted result, with matching choice
+            situations and panel weights.
+
+        Returns
+        -------
+        pl.DataFrame
+            Panel and case IDs, ``surplus_change``, ``surplus_units``, and
+            ``change_identified`` for each choice situation.
         """
         order = self._surplus_comparison_order(counterfactual)
         identified = self._surplus_change_identified(counterfactual, order)
@@ -728,7 +752,7 @@ class _PredictionBase:
 
         design_kwargs = self._design_kwargs()
         row_weights = self._row_panel_weights()
-        columns: dict[str, onp.ndarray] = {}
+        columns: dict[str, Float64[onp.ndarray, "groups"]] = {}
         for variable in variables:
             raw_values, design_derivative = self._elasticity_design_derivative(variable)
             call_kwargs = dict(
@@ -1011,7 +1035,7 @@ class LCLPrediction(_PredictionBase):
             # Differentiating through the Bayes update keeps the reported
             # uncertainty consistent with the point estimate: the posterior is a
             # smooth function of the same coefficients, not a fixed constant.
-            posterior_kwargs = (
+            posterior_kwargs: dict[str, Any] = (
                 {
                     "past_diff_unchosen_chosen": self.past_diff_unchosen_chosen,
                     "past_data": self.past_data,
@@ -1253,7 +1277,7 @@ class LCLPrediction(_PredictionBase):
         subset_panel_indices: Int[Array, "subset_panels"],
         subset_panel_weights: Float64[Array, "subset_panels"],
         class_probs: Float64[Array, "panels classes"],
-        panel_derivatives: Array | None = None,
+        panel_derivatives: Float64[Array, "panels alt_vars"] | None = None,
     ) -> Float64[Array, ""]:
         """Compute a subset mean WTP using fixed class probabilities."""
         structural_betas = self.results.em_res.structural_betas
@@ -1285,9 +1309,9 @@ class LCLPrediction(_PredictionBase):
         subset_panel_weights: Float64[Array, "subset_panels"],
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
-        past_diff_unchosen_chosen: Any | None = None,
+        past_diff_unchosen_chosen: DiffUnchosenChosen | None = None,
         past_data: Data | None = None,
-        panel_derivatives: Array | None = None,
+        panel_derivatives: Float64[Array, "panels alt_vars"] | None = None,
     ) -> Float64[Array, ""]:
         """Evaluate panel-weighted subset WTP for delta/bootstrap inference.
 
@@ -1397,7 +1421,7 @@ class CLPrediction(_PredictionBase):
             ]
         )
 
-        def ratio_function(latent: Array) -> Array:
+        def ratio_function(latent: Float64[Array, "alt_vars"]) -> Float64[Array, "targets"]:
             """Map latent coefficients to structural WTP ratios."""
             structural = _to_structural_betas(
                 latent,
@@ -1437,6 +1461,10 @@ class CLPrediction(_PredictionBase):
         """Alias for :meth:`wtp`."""
         return self.wtp(target, **kwargs)
 
+    def tradeoff(self, target: str | None = None, **kwargs: Any) -> pl.DataFrame:
+        """Alias for :meth:`wtp`, with the same conditional-logit arguments."""
+        return self.wtp(target, **kwargs)
+
     def wtp_by_class(self, target: str | None = None) -> pl.DataFrame:
         """Return WTP with a single homogeneous class label."""
         return self.wtp(target, se="none").with_columns(pl.lit(0).alias("class"))
@@ -1459,11 +1487,11 @@ class CLPrediction(_PredictionBase):
 
 
 def resolve_panel_weights(
-    panel_weights: str | Mapping[object, float] | Sequence[float] | onp.ndarray | None,
-    panel_ids: onp.ndarray,
+    panel_weights: str | Mapping[object, float] | PanelWeightsInput | None,
+    panel_ids: Shaped[onp.ndarray, "panels"],
     raw_data: pl.DataFrame | None,
     panel_col: str,
-) -> onp.ndarray:
+) -> Float64[onp.ndarray, "panels"]:
     """Resolve user panel weights into unique-panel order."""
     if panel_weights is None:
         return onp.ones(len(panel_ids), dtype=onp.float64)

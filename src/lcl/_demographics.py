@@ -4,7 +4,7 @@ import jax.numpy as jnp
 from equinox import filter_jit
 from jax import lax
 from jax.nn import log_softmax, softmax
-from jaxtyping import Array, Float64
+from jaxtyping import Array, Float64, Int
 
 from lcl._optimize import exact_newton_minimize, newton_kwargs
 from lcl import _scheduling
@@ -240,7 +240,7 @@ def _class_covariance_gram(
         axis=-1,
     ).reshape(-1, 2)
 
-    def one_block(pair: Array) -> Array:
+    def one_block(pair: Int[Array, "2"]) -> Float64[Array, "dem_vars_plus_one dem_vars_plus_one"]:
         """Contract one (k, l) class pair into a (dem, dem) Gram matrix."""
         row, col = pair[0], pair[1]
         delta = jnp.where(row == col, 1.0, 0.0)

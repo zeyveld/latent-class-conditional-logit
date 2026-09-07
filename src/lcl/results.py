@@ -1,6 +1,7 @@
 """Public fitted-result and prediction types."""
 
 from typing import Any, Protocol, runtime_checkable
+from jaxtyping import Array, Float64
 
 from lcl._diagnostics import LCLDiagnostics
 from lcl._prediction import CLPrediction, LCLPrediction
@@ -14,8 +15,8 @@ class ResultsProtocol(Protocol):
 
     model: Any
     converged: bool
-    cov_matrix: Any
-    adjusted_bic: Any
+    cov_matrix: Float64[Array, "params params"]
+    adjusted_bic: Float64[Array, ""]
 
     def parameter_names(self) -> list[str]:
         """Return labels aligned one-to-one with covariance rows and columns."""

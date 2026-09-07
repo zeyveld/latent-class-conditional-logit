@@ -12,6 +12,7 @@ from lcl.constraints import (
     normalize_negative_constraints,
 )
 from lcl._labels import label_for_variable
+from lcl.options import _require_integer
 
 
 @dataclass(frozen=True)
@@ -70,6 +71,8 @@ class LCLSpec:
         ``"C(segment)[T.high]"``.
     """
 
+    # Frozen fields prevent reassignment; nested user collections remain ordinary
+    # sequences/mappings for compatibility and should be treated as read-only.
     ids: ChoiceIds
     utility: Sequence[str] | None = None
     membership: Sequence[str] | None = None
@@ -83,8 +86,12 @@ class LCLSpec:
 
     def __post_init__(self) -> None:
         """Validate internal consistency."""
+        _require_integer(self.classes, "LCLSpec.classes")
         if self.classes < 2:
             raise ValueError("LCLSpec.classes must be at least 2.")
+        _validate_design_arguments(
+            self.utility, self.utility_formula, self.membership, self.membership_formula
+        )
         if self.utility_formula is None and not self.utility:
             raise ValueError("LCLSpec requires either utility variables or a formula.")
         if len(self.negative_constraints) > 1:
@@ -205,13 +212,16 @@ def resolve_lcl_spec(
     Returns
     -------
     LCLSpec
-        Fully resolved immutable model specification.
+        Fully resolved model specification with frozen top-level fields.
 
     Raises
     ------
     ValueError
         If required identifier columns are missing.
     """
+    _validate_design_arguments(
+        case_varnames, utility_formula, dem_varnames, membership_formula
+    )
     resolved_alts = (
         alts_col
         if alts_col is not None
@@ -314,7 +324,7 @@ def resolve_lcl_spec(
                 else DEFAULT_NEGATIVE_MIN_ABS
             )
         )
-        if constraints is None:
+        if spec_numeraire is None:
             constraints = {resolved_numeraire: NegativeCoefficient(min_abs=floor)}
         elif (
             spec is not None
@@ -341,9 +351,24 @@ def resolve_lcl_spec(
         ),
         utility=resolved_utility,
         membership=resolved_membership,
-        classes=int(resolved_classes),
+        classes=resolved_classes,
         constraints=constraints,
         utility_formula=resolved_utility_formula,
         membership_formula=resolved_membership_formula,
         variable_labels=labels or None,
     )
+
+
+def _validate_design_arguments(
+    utility: Sequence[str] | None,
+    utility_formula: str | None,
+    membership: Sequence[str] | None,
+    membership_formula: str | None,
+) -> None:
+    """Reject competing designs supplied at the same configuration level."""
+    if utility is not None and utility_formula is not None:
+        raise ValueError("Pass either utility/case_varnames or utility_formula, not both.")
+    if membership is not None and membership_formula is not None:
+        raise ValueError(
+            "Pass either membership/dem_varnames or membership_formula, not both."
+        )

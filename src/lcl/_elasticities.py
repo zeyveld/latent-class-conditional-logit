@@ -7,6 +7,7 @@ import re
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
+from jaxtyping import Array, Float64
 
 from lcl._encoding import _drop_formula_intercepts, _get_model_matrix, _to_pandas_frame
 from lcl._kernels import _choice_probabilities_and_logsum
@@ -14,7 +15,7 @@ from lcl._kernels import _choice_probabilities_and_logsum
 
 def elasticity_design_derivative(
     prediction: Any, variable: str
-) -> tuple[jnp.ndarray, jnp.ndarray]:
+) -> tuple[Float64[Array, "rows"], Float64[Array, "rows alt_vars"]]:
     """Return raw values and row-wise derivatives of all design columns."""
     model = prediction.results.model
     data = prediction.predict_data
@@ -51,7 +52,7 @@ def elasticity_design_derivative(
             pl.Series(variable, raw_values - step, dtype=pl.Float64)
         )
 
-        def utility_matrix(frame: pl.DataFrame) -> onp.ndarray:
+        def utility_matrix(frame: pl.DataFrame) -> Float64[onp.ndarray, "rows alt_vars"]:
             if encoder is not None and encoder.x_model_spec is not None:
                 matrix = _drop_formula_intercepts(
                     _get_model_matrix(

@@ -6,7 +6,8 @@ from typing import Protocol, runtime_checkable
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax.typing import ArrayLike
+from jaxtyping import Int
+from lcl._typing import ChoicesInput, DemographicsInput, DesignInput, PanelIdsInput, RowIdsInput
 
 from lcl._encoding import ChoiceDataEncoder, _coerce_frame
 from lcl.options import PastChoicesData
@@ -150,7 +151,7 @@ def _parse_past_choices(
 
 def _validate_past_choice_panels(
     parsed_past: ParsedData, parsed_predict: ParsedData
-) -> onp.ndarray:
+) -> Int[onp.ndarray, "past_panels"]:
     past_panels = onp.unique(onp.asarray(parsed_past.original_panels))
     predict_panels = onp.unique(onp.asarray(parsed_predict.original_panels))
     extra = onp.setdiff1d(past_panels, predict_panels)
@@ -163,15 +164,15 @@ def _validate_past_choice_panels(
 
 
 def _parsed_prediction_arrays(
-    X: ArrayLike,
-    dems: ArrayLike | None,
-    alts: ArrayLike,
-    cases: ArrayLike,
-    panels: ArrayLike,
-    dem_panel_ids: ArrayLike | None,
+    X: DesignInput,
+    dems: DemographicsInput | None,
+    alts: RowIdsInput,
+    cases: RowIdsInput,
+    panels: RowIdsInput,
+    dem_panel_ids: PanelIdsInput | None,
     case_varnames: list[str],
     dem_varnames: list[str] | None,
-    y: ArrayLike | None = None,
+    y: ChoicesInput | None = None,
 ) -> ParsedData:
     X_np = onp.asarray(X)
     alts_np, cases_np, panels_np = map(onp.asarray, (alts, cases, panels))

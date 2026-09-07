@@ -7,11 +7,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import jax.numpy as jnp
+import numpy as onp
 import polars as pl
 from formulaic import Formula  # type: ignore
 from formulaic.errors import DataMismatchWarning, FormulaicError  # type: ignore
+from jaxtyping import Array, Bool, Float64, Shaped
 
 from lcl._struct import ParsedData
+from lcl.spec import _validate_design_arguments
 from lcl._validation import (
     validate_external_demographics,
     validate_parsed_data,
@@ -48,6 +51,10 @@ class ChoiceDataEncoder:
 
     def __post_init__(self) -> None:
         """Validate formula interfaces."""
+        _validate_design_arguments(
+            self.explicit_case_varnames, self.utility_formula,
+            self.explicit_dem_varnames, self.membership_formula,
+        )
         if self.membership_formula is not None and _formula_has_lhs(
             self.membership_formula
         ):
@@ -157,15 +164,14 @@ class ChoiceDataEncoder:
         )
         df = df.sort(sort_cols)
         df = self._attach_sequential_ids(df)
-        if dems_data is not None and self._has_demographic_formula():
+        if dems_data is not None:
             df = self._attach_external_demographics(df, dems_data)
 
         y_array, case_vars, dem_vars, df = self._encode_features(
             df, fit=fit, require_choice=require_choice
         )
         X_array = jnp.array(df.select(case_vars).to_numpy(), dtype="float64")
-        demographic_data_source = None if self.dem_model_spec is not None else dems_data
-        dems_array = self._encode_demographics(df, dem_vars, demographic_data_source)
+        dems_array = self._encode_demographics(df, dem_vars)
 
         parsed = ParsedData(
             X=X_array,
@@ -220,7 +226,7 @@ class ChoiceDataEncoder:
     def _attach_external_demographics(
         self, df: pl.DataFrame, dems_data: Any
     ) -> pl.DataFrame:
-        """Join external panel-level columns needed by demographic formulas.
+        """Join validated external panel-level columns before evaluating features.
 
         Parameters
         ----------
@@ -253,7 +259,7 @@ class ChoiceDataEncoder:
 
     def _encode_features(
         self, df: pl.DataFrame, fit: bool, require_choice: bool
-    ) -> tuple[jnp.ndarray | None, list[str], list[str] | None, pl.DataFrame]:
+    ) -> tuple[Bool[Array, "rows"] | None, list[str], list[str] | None, pl.DataFrame]:
         """Encode choice indicators and alternative-specific features.
 
         Parameters
@@ -267,7 +273,7 @@ class ChoiceDataEncoder:
 
         Returns
         -------
-        y_array : jnp.ndarray | None
+        y_array : Bool[Array, "rows"] | None
             Boolean choice indicators, or None when choices are not required.
         case_vars : list[str]
             Encoded alternative-specific feature names.
@@ -292,7 +298,7 @@ class ChoiceDataEncoder:
                 case_vars = list(self.case_varnames or X_df.columns)
             else:
                 case_vars = self._encode_explicit_case_variables(
-                    df, require_choice=require_choice, fit=fit
+                    df, fit=fit
                 )
                 y_array = self._choice_array_from_column(df, fit, require_choice)
 
@@ -313,7 +319,7 @@ class ChoiceDataEncoder:
 
         else:
             case_vars = self._encode_explicit_case_variables(
-                df, require_choice=require_choice, fit=fit
+                df, fit=fit
             )
             dem_vars = (
                 list(self.explicit_dem_varnames)
@@ -332,10 +338,6 @@ class ChoiceDataEncoder:
         return any(
             item is not None for item in (self.utility_formula, self.membership_formula)
         )
-
-    def _has_demographic_formula(self) -> bool:
-        """Return whether raw external demographics may be needed for formulas."""
-        return self.membership_formula is not None
 
     def _encode_utility_formula(
         self,
@@ -452,10 +454,9 @@ class ChoiceDataEncoder:
         return df
 
     def _encode_explicit_case_variables(
-        self, df: pl.DataFrame, *, require_choice: bool, fit: bool
+        self, df: pl.DataFrame, *, fit: bool
     ) -> list[str]:
         """Validate and store explicit alternative-specific variables."""
-        del require_choice
         if self.explicit_case_varnames is None:
             raise ValueError(
                 "Must provide either utility_formula or explicit case_varnames."
@@ -468,7 +469,7 @@ class ChoiceDataEncoder:
 
     def _choice_array_from_column(
         self, df: pl.DataFrame, fit: bool, require_choice: bool
-    ) -> jnp.ndarray | None:
+    ) -> Bool[Array, "rows"] | None:
         """Return choice indicators from ``choice_col`` when required."""
         if not (fit or require_choice):
             return None
@@ -477,7 +478,7 @@ class ChoiceDataEncoder:
                 "choice_col is required when fitting without a formula LHS."
             )
         _require_columns(df, [self.choice_col])
-        return jnp.array(df[self.choice_col].to_numpy(), dtype="bool")
+        return _validated_choice_array(df[self.choice_col].to_numpy())
 
     def _choice_array_from_formula_or_column(
         self,
@@ -486,13 +487,20 @@ class ChoiceDataEncoder:
         *,
         fit: bool,
         require_choice: bool,
-    ) -> jnp.ndarray | None:
+    ) -> Bool[Array, "rows"] | None:
         """Return choice indicators from a formula LHS or ``choice_col``."""
         if not (fit or require_choice):
             return None
         if y_df is not None:
             _validate_matrix_height(y_df, df.height, "choice formula")
-            return jnp.array(y_df.to_numpy().ravel(), dtype="bool")
+            if y_df.shape[1] != 1:
+                raise ValueError("The choice formula must produce one binary column.")
+            choices = _validated_choice_array(y_df.to_numpy().ravel())
+            if self.choice_col is not None:
+                explicit = self._choice_array_from_column(df, fit, require_choice)
+                if explicit is None or not onp.array_equal(choices, explicit):
+                    raise ValueError("choice_col conflicts with the utility formula outcome.")
+            return choices
         return self._choice_array_from_column(df, fit, require_choice)
 
     def _validate_case_formula_columns(self) -> None:
@@ -504,8 +512,8 @@ class ChoiceDataEncoder:
             )
 
     def _encode_demographics(
-        self, df: pl.DataFrame, dem_vars: list[str] | None, dems_data: Any | None
-    ) -> jnp.ndarray | None:
+        self, df: pl.DataFrame, dem_vars: list[str] | None
+    ) -> Float64[Array, "panels dem_vars"] | None:
         """Return panel-level demographic arrays aligned to sequential panel IDs.
 
         Parameters
@@ -514,35 +522,23 @@ class ChoiceDataEncoder:
             Choice data with sequential panel IDs.
         dem_vars : list[str] | None
             Demographic variables to encode.
-        dems_data : Any | None
-            Optional separate panel-level demographics source.
 
         Returns
         -------
-        jnp.ndarray | None
+        Float64[Array, "panels dem_vars"] | None
             ``(panels, dem_vars)`` matrix sorted by ``_seq_panels``, or None when
             no demographic variables are specified.
         """
         if not dem_vars:
             return None
 
-        if dems_data is not None:
-            dems_df_ext = _coerce_frame(dems_data)
-            _require_columns(dems_df_ext, [self.panels_col] + dem_vars)
-            unique_panels = df.select([self.panels_col, "_seq_panels"]).unique(
-                subset=[self.panels_col], maintain_order=True
-            )
-            aligned = unique_panels.join(dems_df_ext, on=self.panels_col, how="left")
-        else:
-            _require_columns(df, dem_vars)
-            aligned = df.select(["_seq_panels"] + dem_vars).unique(
-                subset=["_seq_panels"] + dem_vars, maintain_order=True
-            )
-            num_panels = df["_seq_panels"].n_unique()
-            if aligned.height != num_panels:
-                raise ValueError(
-                    "Demographic variables must be constant within each panel."
-                )
+        _require_columns(df, dem_vars)
+        aligned = df.select(["_seq_panels"] + dem_vars).unique(
+            subset=["_seq_panels"] + dem_vars, maintain_order=True
+        )
+        num_panels = df["_seq_panels"].n_unique()
+        if aligned.height != num_panels:
+            raise ValueError("Demographic variables must be constant within each panel.")
 
         has_missing = aligned.select(
             pl.any_horizontal(pl.col(dem_vars).is_null()).any()
@@ -576,6 +572,13 @@ def _coerce_frame(data: Any) -> pl.DataFrame:
     if hasattr(data, "columns"):
         return pl.from_pandas(data)
     return pl.DataFrame(data)
+
+
+def _validated_choice_array(values: Shaped[onp.ndarray, "rows"]) -> Bool[Array, "rows"]:
+    """Validate the original values before conversion can erase invalid choices."""
+    if not onp.all((values == 0) | (values == 1)):
+        raise ValueError("Choice indicators must contain only 0/1 values.")
+    return jnp.asarray(values, dtype="bool")
 
 
 def _to_pandas_frame(df: pl.DataFrame) -> Any:

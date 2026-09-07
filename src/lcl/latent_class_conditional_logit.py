@@ -9,9 +9,11 @@ from typing import Any, NamedTuple
 
 import jax.numpy as jnp
 import numpy as onp
+from jaxtyping import Float64, Int
 
 from lcl.constraints import (
     DEFAULT_NEGATIVE_MIN_ABS,
+    NegativeCoefficient,
     pullback_negative_derivatives,
 )
 from lcl._case_utils import (
@@ -38,8 +40,9 @@ from lcl.options import (
     Options,
     OptimizationOptions,
     _resolve_options,
+    _require_integer,
 )
-from lcl._struct import EMVars
+from lcl._struct import Data, DiffUnchosenChosen, EMVars
 from lcl.spec import LCLSpec, resolve_lcl_spec
 
 logger = logging.getLogger(__name__)
@@ -133,13 +136,20 @@ class LatentClassConditionalLogit(ChoiceModel):
 
     Parameters
     ----------
-    num_classes : int, default=5
-        The number of discrete latent classes to estimate.
+    num_classes : int | None, default=None
+        Number of latent classes. Omission uses ``spec.classes`` when supplied,
+        otherwise the historical constructor default of five classes.
     numeraire : str | None, default=None
         The name of the variable to be used as the numeraire (e.g., price or cost).
         If specified, its taste parameter is mathematically constrained to be
         strictly negative across all latent classes via a softplus transformation
         to ensure theoretically consistent willingness-to-pay calculations.
+    spec : LCLSpec | None, optional
+        Base specification. Explicit constructor values override its class count
+        and numeraire floor. A conflicting numeraire name raises an error.
+    numeraire_min_abs : float | None, optional
+        Positive coefficient floor. Omission uses the specification's floor,
+        otherwise ``1e-5``.
 
     Attributes
     ----------
@@ -159,16 +169,17 @@ class LatentClassConditionalLogit(ChoiceModel):
 
     def __init__(
         self,
-        num_classes: int = 5,
+        num_classes: int | None = None,
         numeraire: str | None = None,
         *,
         spec: LCLSpec | None = None,
-        numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
+        numeraire_min_abs: float | None = None,
     ) -> None:
         """Create an unfitted latent-class conditional-logit model specification."""
         super().__init__()
         if spec is not None:
-            num_classes = spec.classes
+            if num_classes is None:
+                num_classes = spec.classes
             if (
                 numeraire is not None
                 and spec.numeraire is not None
@@ -178,7 +189,17 @@ class LatentClassConditionalLogit(ChoiceModel):
                     "numeraire conflicts with the negative constraint in spec."
                 )
             numeraire = numeraire or spec.numeraire
-            numeraire_min_abs = spec.numeraire_min_abs
+            if numeraire_min_abs is None:
+                numeraire_min_abs = spec.numeraire_min_abs
+
+        if num_classes is None:
+            num_classes = 5
+        _require_integer(num_classes, "num_classes")
+        if num_classes < 2:
+            raise ValueError("num_classes must be at least 2.")
+        if numeraire_min_abs is None:
+            numeraire_min_abs = DEFAULT_NEGATIVE_MIN_ABS
+        NegativeCoefficient(min_abs=numeraire_min_abs)
 
         self.spec = spec
         self.num_classes = num_classes
@@ -217,13 +238,13 @@ class LatentClassConditionalLogit(ChoiceModel):
         data : Any
             The main dataset containing choice situations. Accepts a Polars DataFrame,
             Pandas DataFrame, or dictionary of arrays.
-        alts_col : str
+        alts_col : str | None, optional
             The name of the column identifying specific alternatives within a choice
             situation.
-        cases_col : str
+        cases_col : str | None, optional
             The name of the column grouping observations into distinct choice
             situations.
-        panels_col : str
+        panels_col : str | None, optional
             The name of the column mapping choice situations to specific
             decision-makers (panels).
         utility_formula : str | None, default=None
@@ -250,6 +271,8 @@ class LatentClassConditionalLogit(ChoiceModel):
         dems_data : Any | None, default=None
             An optional, separate panel-level dataset containing demographics. If
             provided, it will be merged with the main `data` on `panels_col`.
+        options : Options | None, optional
+            Complete fit configuration. Do not combine with individual option arguments.
         fit_options : FitOptions | None, optional
             Preferred EM settings, including multi-start orchestration.
         optimization_options : OptimizationOptions | None, optional
@@ -281,6 +304,11 @@ class LatentClassConditionalLogit(ChoiceModel):
             If a `numeraire` was specified during class instantiation but cannot be
             found in the expanded design matrix columns.
         """
+        if self._encoder is not None:
+            raise RuntimeError(
+                "This model already has a fitted encoder. Create a new model "
+                "instance for another fit."
+            )
         self.spec = resolve_lcl_spec(
             spec=self.spec,
             alts_col=alts_col,
@@ -322,6 +350,11 @@ class LatentClassConditionalLogit(ChoiceModel):
         optimization_options = resolved_options.optimization
         inference = resolved_options.inference
         diagnostics = resolved_options.diagnostics
+        if not inference.skip and inference.covariance == "robust":
+            raise ValueError(
+                "Case-level robust covariance is not valid for an LCL likelihood. "
+                "Use covariance='clustered' or 'unadjusted'."
+            )
 
         parsed_data = self._ingest_data(
             data=data,
@@ -371,10 +404,10 @@ class LatentClassConditionalLogit(ChoiceModel):
 
         # Resolve a coarser clustering once, in encoded panel order, so every
         # start shares it and the results object never re-reads the raw frame.
-        cluster_ids: onp.ndarray | None = None
+        cluster_ids: Int[onp.ndarray, "panels"] | None = None
         num_clusters: int | None = None
         cluster_column = inference.cluster_column
-        if cluster_column is not None:
+        if cluster_column is not None and not inference.skip:
             cluster_ids, num_clusters = self._resolve_panel_cluster_ids(
                 data, parsed_data, cluster_column, panels_col=panels_col
             )
@@ -531,12 +564,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         estim_time_sec = time() - self._fit_start_time
 
         logger.info("Estimation time: %.3f seconds", estim_time_sec)
-        if progress_callback is not None:
-            progress_callback(
-                {"event": "complete", "estimation_time_seconds": estim_time_sec}
-            )
-
-        return LCLResults(
+        result = LCLResults(
             model_spec=self,
             em_vars=em_vars,
             estimation_data=data_struct,
@@ -555,12 +583,18 @@ class LatentClassConditionalLogit(ChoiceModel):
             num_clusters=num_clusters,
             param_packing=packing,
         )
+        self.convergence = result.converged
+        if progress_callback is not None:
+            progress_callback(
+                {"event": "complete", "estimation_time_seconds": estim_time_sec}
+            )
+        return result
 
     def _run_em(
         self,
         *,
-        diff_unchosen_chosen: Any,
-        data_struct: Any,
+        diff_unchosen_chosen: DiffUnchosenChosen,
+        data_struct: Data,
         fit_options: FitOptions,
         optimization_options: OptimizationOptions,
         progress_callback: Callable[[dict[str, Any]], None] | None,
@@ -716,7 +750,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         self,
         em_iter: int,
         *,
-        shares: onp.ndarray,
+        shares: Float64[onp.ndarray, "classes"],
         loglik: float,
         beta_newton_error: float,
         membership_newton_error: float,
@@ -755,9 +789,9 @@ class LatentClassConditionalLogit(ChoiceModel):
 
     def _optimizer_snapshot(
         self,
-        em_vars: Any,
-        diff_unchosen_chosen: Any,
-        data_struct: Any,
+        em_vars: EMVars,
+        diff_unchosen_chosen: DiffUnchosenChosen,
+        data_struct: Data,
         em_iter: int,
     ) -> list[dict[str, Any]]:
         """Compute final class-level M-step diagnostics.

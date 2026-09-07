@@ -1,7 +1,7 @@
 # Cross-validation
 
 Blocked K-fold cross-validation for choosing a class count. Each decision-maker's
-complete choice history remains within one fold. Use the same immutable `LCLSpec`
+complete choice history remains within one fold. Reuse the same `LCLSpec`
 as estimation and pass it with `spec=`.
 
 !!! warning "Experimental"
@@ -25,9 +25,11 @@ mapping from panel ID to a user fold label. Explicit folds must cover every pane
 exactly once. This makes externally defined geographic, temporal, or grouped
 splits reproducible without row leakage.
 
-Inference is skipped by default because covariance estimation does not affect
-held-out likelihood. Every validation fold is transformed with its training
-fold's fitted encoder.
+Inference is skipped when both `options` and `inference` are omitted. Explicit
+settings, including `Options.diagnostics`, are forwarded to every training fit.
+With a bundle, request `Options(inference=InferenceOptions(skip=True))` to skip
+covariance work. Every validation fold is transformed with its training fold's
+fitted encoder. Nonfinite scores and encoding failures appear in `Fold_Errors`.
 
 `Avg_OOS_LL` is the pooled mean held-out log likelihood per panel. If any fold
 fails, `Avg_OOS_LL` and `Total_OOS_LL` are `NaN`; use
