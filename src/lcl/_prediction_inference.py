@@ -50,13 +50,9 @@ def _betas_and_class_probs(
     if past_data is None:
         return betas, prior
     if past_diff_unchosen_chosen is None:
-        raise ValueError(
-            "A past-choice design matrix is required alongside past_data."
-        )
+        raise ValueError("A past-choice design matrix is required alongside past_data.")
     _, thetas = results._unpack_params(flat_params)
-    past_prior = results._get_class_probs(
-        thetas, past_data.dems, past_data.num_panels
-    )
+    past_prior = results._get_class_probs(thetas, past_data.dems, past_data.num_panels)
     posterior, _ = _compute_conditional_class_probs(
         structural_betas=betas,
         thetas=thetas if past_data.dems is not None else None,
@@ -177,6 +173,7 @@ def mean_surplus_change(
     baseline: dict[str, Any],
     counterfactual: dict[str, Any],
     case_weights: Float64[Array, "cases"],
+    counterfactual_order: Any | None = None,
 ) -> Float64[Array, ""]:
     """Return the panel-weighted mean counterfactual-minus-baseline surplus.
 
@@ -186,6 +183,8 @@ def mean_surplus_change(
     separately estimated quantities.
     """
     changed = surplus_by_case(flat_params, **counterfactual)
+    if counterfactual_order is not None:
+        changed = changed[counterfactual_order]
     base = surplus_by_case(flat_params, **baseline)
     return jnp.sum((changed - base) * case_weights) / jnp.sum(case_weights)
 
@@ -196,6 +195,7 @@ def normalisation_sensitivity(
     baseline: dict[str, Any],
     counterfactual: dict[str, Any],
     case_weights: Float64[Array, "cases"],
+    counterfactual_order: Any | None = None,
 ) -> Float64[Array, ""]:
     """Return how far a surplus *change* moves with the utility normalisation.
 
@@ -235,10 +235,10 @@ def normalisation_sensitivity(
         baseline.get("past_diff_unchosen_chosen"),
     )
     alpha = _marginal_utility_of_income(counterfactual["results"], betas)
-    difference = (
-        weights_counterfactual[counterfactual["panels_of_cases"]]
-        - weights_baseline[baseline["panels_of_cases"]]
-    )
+    changed = weights_counterfactual[counterfactual["panels_of_cases"]]
+    if counterfactual_order is not None:
+        changed = changed[counterfactual_order]
+    difference = changed - weights_baseline[baseline["panels_of_cases"]]
     per_case = jnp.sum(difference / alpha[None, :], axis=1)
     return jnp.sum(per_case * case_weights) / jnp.sum(case_weights)
 
@@ -344,12 +344,24 @@ def aggregate_elasticities(
     )
     is_own = affected == target
     derivative = jnp.where(is_own, own_term[affected] - cross_term, -cross_term)
-    elasticity = derivative * raw_values[target] / probabilities[affected]
-
-    demand = probabilities[affected] * row_weights[affected]
-    numerator = segment_sum(demand * elasticity, group_codes, num_segments=num_groups)
-    denominator = segment_sum(demand, group_codes, num_segments=num_groups)
-    return numerator / jnp.where(denominator > 0.0, denominator, 1.0)
+    # Differentiate total demand directly. Dividing by a tiny individual
+    # probability first creates 0 * NaN under underflow. The denominator must
+    # also include demand where the target alternative is unavailable.
+    numerator = segment_sum(
+        derivative * raw_values[target] * row_weights[affected],
+        group_codes,
+        num_segments=num_groups,
+    )
+    num_alts = int(round(num_groups**0.5))
+    # Own pairs identify every row's globally consistent alternative code.
+    row_codes = (
+        jnp.zeros(X.shape[0], dtype=group_codes.dtype)
+        .at[affected]
+        .max(group_codes // num_alts)
+    )
+    demand = segment_sum(probabilities * row_weights, row_codes, num_segments=num_alts)
+    denominator = jnp.repeat(demand, num_alts)
+    return numerator / jnp.where(denominator > 0.0, denominator, jnp.nan)
 
 
 __all__ = [

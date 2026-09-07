@@ -52,6 +52,14 @@ elasticities = prediction.elasticities(["price", "time"])
 market_shares = prediction.market_shares()
 ```
 
+`prediction.marginal_wtp("time")` evaluates each offered profile;
+`prediction.wtp("time")` averages equally over profiles within occasions, then
+occasions within consumers, and uses `panel_weights` across consumers. Both
+include raw-attribute interactions and transformations. Monetary WTP and welfare
+require a numeraire that enters once, linearly, without additional price terms.
+See the [prediction and welfare guide](../tutorials/prediction_welfare.md) for
+the estimands, interpretation, and inference assumptions.
+
 ## Model
 
 ::: lcl.ConditionalLogit

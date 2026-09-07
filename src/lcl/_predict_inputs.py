@@ -1,5 +1,6 @@
 """Prediction-input alignment and historical-choice parsing."""
 
+from dataclasses import replace
 from typing import Protocol, runtime_checkable
 
 import jax.numpy as jnp
@@ -7,10 +8,42 @@ import numpy as onp
 import polars as pl
 from jax.typing import ArrayLike
 
-from lcl._encoding import _coerce_frame
+from lcl._encoding import ChoiceDataEncoder, _coerce_frame
 from lcl.options import PastChoicesData
 from lcl._struct import ParsedData
-from lcl._validation import validate_parsed_data
+from lcl._validation import validate_external_demographics, validate_parsed_data
+
+
+def _aligned_raw_prediction_data(
+    data: object,
+    parsed: ParsedData,
+    encoder: ChoiceDataEncoder,
+    dems_data: object | None = None,
+) -> pl.DataFrame:
+    """Align raw formula inputs to encoded rows, including varying choice sets."""
+    raw = _coerce_frame(data)
+    keys = pl.DataFrame(
+        {
+            encoder.panels_col: parsed.original_panels,
+            encoder.cases_col: parsed.original_cases,
+            encoder.alts_col: parsed.original_alts,
+        }
+    )
+    raw = keys.join(
+        raw, on=keys.columns, how="left", validate="1:1", maintain_order="left"
+    )
+    if dems_data is not None:
+        external = _coerce_frame(dems_data)
+        columns = [c for c in external.columns if c not in raw.columns]
+        if columns:
+            raw = raw.join(
+                external.select(encoder.panels_col, *columns),
+                on=encoder.panels_col,
+                how="left",
+                validate="m:1",
+                maintain_order="left",
+            )
+    return raw
 
 
 def _panel_constant_columns(data: object, panel_col: str) -> pl.DataFrame:
@@ -61,6 +94,7 @@ def _prediction_partition_data(
 class _PastChoicesParser(Protocol):
     case_varnames: list[str]
     dem_varnames: list[str] | None
+    _encoder: ChoiceDataEncoder | None
 
     def _transform_data(
         self,
@@ -92,36 +126,40 @@ def _parse_past_choices(
             case_varnames=model.case_varnames,
             dem_varnames=model.dem_varnames,
         )
-    return model._transform_data(
-        past_choices,
-        dems_data=past_choices_dems_data,
-        require_choice=True,
+    encoder = model._encoder
+    if encoder is None:
+        raise ValueError("A fitted encoder is required for tabular past choices.")
+    # History contributes the choice likelihood. The prediction demographics
+    # supply the membership prior, so history need not repeat those columns.
+    history = _coerce_frame(past_choices)
+    if past_choices_dems_data is not None:
+        external = _coerce_frame(past_choices_dems_data)
+        validate_external_demographics(history, external, panels_col=encoder.panels_col)
+        history = history.join(external, on=encoder.panels_col, how="left")
+    utility_encoder = replace(
+        encoder,
+        membership_formula=None,
+        dem_model_spec=None,
+        explicit_dem_varnames=None,
+        dem_varnames=None,
+    )
+    return utility_encoder._transform(
+        history, dems_data=None, fit=False, require_choice=True
     )
 
 
 def _validate_past_choice_panels(
     parsed_past: ParsedData, parsed_predict: ParsedData
-) -> None:
+) -> onp.ndarray:
     past_panels = onp.unique(onp.asarray(parsed_past.original_panels))
     predict_panels = onp.unique(onp.asarray(parsed_predict.original_panels))
-    if past_panels.shape == predict_panels.shape and onp.array_equal(
-        past_panels, predict_panels
-    ):
-        return
-
-    def sample(values: onp.ndarray) -> str:
-        suffix = ", ..." if values.shape[0] > 5 else ""
-        return f"{values[:5].tolist()}{suffix}"
-
-    missing = onp.setdiff1d(predict_panels, past_panels)
     extra = onp.setdiff1d(past_panels, predict_panels)
-    raise ValueError(
-        "past_choices must contain exactly the panels present in the "
-        "prediction data, because posterior class probabilities are matched "
-        "to prediction panels by sorted panel ID. "
-        f"Panels missing from past_choices: {sample(missing)}; "
-        f"panels absent from the prediction data: {sample(extra)}."
-    )
+    if extra.size:
+        raise ValueError(
+            "past_choices contains panels absent from the prediction data: "
+            f"{extra[:5].tolist()}. Filter history to the prediction population."
+        )
+    return onp.searchsorted(predict_panels, past_panels)
 
 
 def _parsed_prediction_arrays(
@@ -158,6 +196,13 @@ def _parsed_prediction_arrays(
         panels_np[order],
     )
     y_sorted = None if y is None else onp.asarray(y)[order]
+    if y_sorted is not None and not onp.all((y_sorted == 0) | (y_sorted == 1)):
+        raise ValueError("Choice indicators must contain only 0/1 values.")
+    keys = list(
+        zip(panels_sorted.tolist(), cases_sorted.tolist(), alts_sorted.tolist())
+    )
+    if len(set(keys)) != num_rows:
+        raise ValueError("Each (panel, case, alternative) row must be unique.")
     panel_ids, panel_seq = onp.unique(panels_sorted, return_inverse=True)
     _, alt_seq = onp.unique(alts_sorted, return_inverse=True)
     case_seq = onp.empty_like(cases_sorted, dtype=onp.uint32)
@@ -216,5 +261,5 @@ def _parsed_prediction_arrays(
         original_cases=cases_sorted,
         original_panels=panels_sorted,
     )
-    validate_parsed_data(parsed)
+    validate_parsed_data(parsed, check_rank=False)
     return parsed

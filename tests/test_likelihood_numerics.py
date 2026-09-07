@@ -627,14 +627,20 @@ def test_prediction_rejects_past_choices_with_mismatched_panels() -> None:
 
     subset_past = _lcl_df_for_panels([1, 2])
     superset_past = _lcl_df_for_panels([1, 2, 3, 4, 5, 6])
-    for past_df in [subset_past, superset_past]:
-        with pytest.raises(ValueError, match="past_choices must contain exactly"):
-            results.predict(data=predict_df, past_choices=past_df)
+    partial = results.predict(data=predict_df, past_choices=subset_past)
+    prior = results.predict(data=predict_df)
+    onp.testing.assert_allclose(
+        partial.class_probs_by_panel[:2], matching.class_probs_by_panel[:2]
+    )
+    onp.testing.assert_allclose(
+        partial.class_probs_by_panel[2:], prior.class_probs_by_panel[2:]
+    )
+    with pytest.raises(ValueError, match="absent from the prediction data"):
+        results.predict(data=predict_df, past_choices=superset_past)
 
     shifted_past = _lcl_df_for_panels([3, 4, 5, 6])
     with pytest.raises(ValueError) as excinfo:
         results.predict(data=predict_df, past_choices=shifted_past)
-    assert "missing from past_choices: [1, 2]" in str(excinfo.value)
     assert "absent from the prediction data: [5, 6]" in str(excinfo.value)
 
 

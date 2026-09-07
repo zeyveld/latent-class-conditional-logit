@@ -21,7 +21,6 @@ from lcl._em_alg_steps import (
     _compute_conditional_class_probs,
     _compute_panel_logliks,
 )
-from lcl._encoding import _coerce_frame
 from lcl._jax_compat import cpu_device, device_put_array_leaves
 from lcl._inference import _aggregate_scores, _invert_information, _symmetrize
 from lcl._kernels import _choice_probabilities_and_logsum
@@ -30,6 +29,7 @@ from lcl._params import ParamPacking
 from lcl._polish import PolishReport
 from lcl._prediction import LCLPrediction, resolve_panel_weights
 from lcl._predict_inputs import (
+    _aligned_raw_prediction_data,
     _parse_past_choices,
     _parsed_prediction_arrays,
     _prediction_partition_data,
@@ -1482,7 +1482,7 @@ class LCLResults:
         past_choices: object | None = None,
         dems_data: object | None = None,
         past_choices_dems_data: object | None = None,
-        panel_weights: str | Mapping[object, float] | Sequence[float] | None = None,
+        panel_weights: str | Mapping[object, float] | Sequence[float] | onp.ndarray | None = None,
     ) -> LCLPrediction:
         """Generate out-of-sample latent-class predictions.
 
@@ -1512,10 +1512,12 @@ class LCLResults:
             validate and reorder demographic rows.
         past_choices : PastChoicesData or tabular data, optional
             Historical choices used to condition latent-class membership probabilities.
-            Pass a :class:`~lcl._struct.PastChoicesData` instance for array-style
+            Pass a :class:`~lcl.options.PastChoicesData` instance for array-style
             inputs, or a Polars/Pandas/DataFrame-like object containing the fitted
-            model's alternative, case, panel, choice, alternative-specific, and
-            demographic columns.
+            model's identifiers, choices, and historical utility inputs. A subset
+            of prediction panels is allowed; missing histories retain their prior.
+            Membership priors always use prediction demographics. History only
+            needs demographic columns when they enter historical utility.
         data : object | None, optional
             Long-format prediction data. If provided, the fitted encoder parses this
             data using the original empirical specification.
@@ -1548,12 +1550,8 @@ class LCLResults:
             parsed_predict = self.model._transform_data(data, dems_data=dems_data)
             encoder = getattr(self.model, "_encoder", None)
             if encoder is not None:
-                raw_prediction_data = _coerce_frame(data).sort(
-                    list(
-                        dict.fromkeys(
-                            [encoder.panels_col, encoder.cases_col, encoder.alts_col]
-                        )
-                    )
+                raw_prediction_data = _aligned_raw_prediction_data(
+                    data, parsed_predict, encoder, dems_data
                 )
                 partition_data_df = _prediction_partition_data(
                     data, dems_data, encoder.panels_col
@@ -1601,8 +1599,24 @@ class LCLResults:
                 past_choices=past_choices,
                 past_choices_dems_data=past_choices_dems_data,
             )
-            _validate_past_choice_panels(parsed_past, parsed_predict)
+            panel_map = jnp.asarray(
+                _validate_past_choice_panels(parsed_past, parsed_predict),
+                dtype=jnp.uint32,
+            )
             data_past = cast(Data, self.model._setup_data(parsed_past)[0])
+            assert data_past.panels is not None
+            assert data_past.panels_of_cases is not None
+            mapped_cases = panel_map[data_past.panels_of_cases]
+            data_past = data_past._replace(
+                panels=panel_map[data_past.panels],
+                panels_of_cases=mapped_cases,
+                num_panels=predict_data.num_panels,
+                num_cases_per_panel=jnp.bincount(
+                    mapped_cases, length=predict_data.num_panels
+                ),
+                dems=predict_data.dems,
+                num_dem_vars=predict_data.num_dem_vars,
+            )
             diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
             class_probs_by_panel, _ = _compute_conditional_class_probs(
                 structural_betas=structural_betas,

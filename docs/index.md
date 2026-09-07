@@ -43,14 +43,18 @@ available accelerators.
 
 ### Analyze behavior
 
-Compute choice probabilities, consumer surplus, elasticities, class shares, and
-marginal willingness-to-pay from the fitted result.
+Update forecasts with consumer demographics and choice histories. Compute welfare
+changes, market elasticities, and demographic WTP with parameter uncertainty.
 
 </div>
 
 </div>
 
 ## Install
+
+The [prediction and welfare guide](tutorials/prediction_welfare.md) covers mixed
+new/returning populations, WTP with attribute interactions, different choice sets,
+and readable coefficient tables through 64 classes.
 
 The distribution is named `lcl-choice`; the import is `lcl`.
 

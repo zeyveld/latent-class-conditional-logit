@@ -84,11 +84,11 @@ class ParamPacking:
                 raise ValueError(
                     f"shares has shape {shares.shape}; expected {(self.num_classes,)}."
                 )
-            clipped_shares = jnp.clip(shares, 1e-10)
+            clipped_shares = jnp.clip(shares, 1e-300)
             normalized_shares = clipped_shares / clipped_shares.sum()
-            membership_params = jnp.log(normalized_shares[1:] / normalized_shares[0])[
-                None, :
-            ]
+            membership_params = (
+                jnp.log(normalized_shares[1:]) - jnp.log(normalized_shares[0])
+            )[None, :]
         else:
             if thetas.shape != self.theta_shape:
                 raise ValueError(

@@ -66,6 +66,7 @@ nav:
   - Home: index.md
   - Tutorials:
       - Estimation & counterfactuals: tutorials/estimation.md
+      - Prediction & consumer welfare: tutorials/prediction_welfare.md
       - Cross-validation & model selection: tutorials/cross_validation.md
   - API Reference:
       - Specification & options: api/specification.md

@@ -380,16 +380,22 @@ probabilities used for choice probabilities, elasticities, and welfare measures.
 Callers who already manage encoded arrays may pass `PastChoicesData` instead of a
 DataFrame.
 
-`past_choices` must contain exactly the same panel IDs as the counterfactual data.
-LCL validates that set before matching posterior class probabilities to prediction
-panels, preventing silent reassignment when one input contains missing or extra
-decision-makers.
+`past_choices` may contain a subset of the counterfactual panel IDs. Consumers
+without history retain their demographic priors; unrelated history IDs are
+rejected. `prediction.class_membership()` shows prior and updated probabilities
+and history counts. Membership uses prediction demographics, so historical data
+need not repeat variables used only by the membership regression.
 
 `LCLPrediction` also reports expected consumer surplus by choice situation and a
 panel-level willingness-to-pay frame for downstream welfare analysis. The surplus
 frame labels its units as `money` when a numeraire exists and `utils` otherwise.
-Utility levels depend on normalization; compute an identified change with
-`baseline_prediction.surplus_change(counterfactual_prediction)`.
+Utility levels depend on normalization; compare the same consumers, class weights,
+and choice occasions with `baseline_prediction.surplus_change(prediction)` or
+`baseline_prediction.mean_surplus_change(prediction)` for an aggregate SE. Build
+the baseline with the same demographics and history. Changes include an
+identification flag. Nonlinear or interacted numeraires cannot support the
+standard money-metric formula. The [prediction and welfare guide](prediction_welfare.md)
+explains these assumptions and includes the new profile-level `marginal_wtp()` API.
 
 !!! tip "Prefer tabular prediction when possible"
     `results.predict(data=...)` is the safest interface because the fitted encoder
@@ -450,9 +456,11 @@ gender. The raw `income_band` column remains available for grouping even though
 Formulaic expands it internally for estimation.
 
 Because `prediction` stores choice-updated probabilities, we request
-`class_probabilities="prior"` for this population summary. Delta-method standard
-errors currently propagate through the demographic prior, not through the posterior
-update. Use `se="none"` to weight point estimates by stored posteriors.
+`class_probabilities="prior"` for this population summary. Delta and asymptotic
+parameter-simulation standard errors also support stored posterior probabilities
+and propagate uncertainty through the Bayesian update. Omit this override to
+summarize the personalized WTP values. For a disamenity such as time, marginal WTP
+for an increase is negative; negate it to value a unit of time saved.
 
 ```python
 from lcl import PartitionType, WTPRequest

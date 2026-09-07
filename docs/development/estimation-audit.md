@@ -75,7 +75,7 @@ The [official Apollo mode-choice data](https://www.apollochoicemodelling.com/exa
 - Independent NumPy/SciPy evaluation of the **undifferenced** design reproduces the final likelihoods; posterior differences are below `2.5e-15`, including the real-data multi-start fit.
 - Tests compare the reused recursion with an E-step recomputed at every iteration, including ragged panels, demographic/no-demographic models, negative-coefficient transforms, uneven sharding, and incomplete final class blocks. Existing parameter-recovery, analytic/autodiff Hessian, covariance, prediction, and inference tests remain in the full suite.
 
-Final validation: **214 passed, 8 skipped** on one physical CPU device; the eight skips require two devices. All **32 targeted tests passed with two logical CPU devices**, including the wide-demographic Hessian checks. Ruff and mypy pass. Raw measurements are in [estimation-audit-results.json](estimation-audit-results.json); the repeatable entry point is [tools/audit_estimation.py](../../tools/audit_estimation.py).
+Final validation: **214 passed, 8 skipped** on one physical CPU device; the eight skips require two devices. All **32 targeted tests passed with two logical CPU devices**, including the wide-demographic Hessian checks. Ruff and mypy pass. Raw measurements are in [estimation-audit-results.json](estimation-audit-results.json); the repeatable entry point is [tools/audit_estimation.py](https://github.com/zeyveld/latent-class-conditional-logit/blob/main/tools/audit_estimation.py).
 
 ```sh
 # Use the same environment and run the two checkouts in separate processes.

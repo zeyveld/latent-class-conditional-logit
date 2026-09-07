@@ -66,7 +66,7 @@ def validate_external_demographics(
         )
 
 
-def validate_parsed_data(parsed: ParsedData) -> None:
+def validate_parsed_data(parsed: ParsedData, *, check_rank: bool = True) -> None:
     """Validate aligned arrays at the ParsedData assembly seam."""
     X = onp.asarray(parsed.X, dtype=onp.float64)
     if X.ndim != 2 or X.shape[1] != len(parsed.case_varnames):
@@ -74,6 +74,8 @@ def validate_parsed_data(parsed: ParsedData) -> None:
     if not onp.all(onp.isfinite(X)):
         raise ValueError("Encoded utility design contains non-finite values.")
     num_rows = X.shape[0]
+    if num_rows == 0:
+        raise ValueError("Choice data must contain at least one row.")
     ids = {
         "cases": onp.asarray(parsed.cases),
         "alternatives": onp.asarray(parsed.alts),
@@ -92,6 +94,8 @@ def validate_parsed_data(parsed: ParsedData) -> None:
     y = onp.asarray(parsed.y)
     if y.shape != (num_rows,):
         raise ValueError("Choice indicators must align one-to-one with utility rows.")
+    if not onp.all((y == 0) | (y == 1)):
+        raise ValueError("Choice indicators must contain only 0/1 values.")
     y_bool = y.astype(bool)
     cases = ids["cases"].astype(onp.int64, copy=False)
     num_cases = int(cases.max()) + 1 if cases.size else 0
@@ -100,6 +104,8 @@ def validate_parsed_data(parsed: ParsedData) -> None:
         raise ValueError(
             "Every choice situation must have exactly one chosen alternative."
         )
+    if not check_rank:
+        return
     chosen_X = X[y_bool]
     unchosen = ~y_bool
     differenced = X[unchosen] - chosen_X[cases[unchosen]]

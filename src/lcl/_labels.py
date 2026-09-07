@@ -119,4 +119,11 @@ def numeraire_enters_linearly(model: object) -> bool:
     numeraire = getattr(model, "numeraire", None)
     if numeraire is None:
         return True
-    return not any(marker in str(numeraire) for marker in _TRANSFORM_MARKERS)
+    if any(marker in str(numeraire) for marker in _TRANSFORM_MARKERS):
+        return False
+    # A bare price column is insufficient if price also enters another term.
+    token = re.compile(r"(?<!\w)" + re.escape(str(numeraire)) + r"(?!\w)")
+    return not any(
+        term != numeraire and token.search(term)
+        for term in getattr(model, "case_varnames", [])
+    )

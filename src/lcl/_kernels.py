@@ -3,7 +3,7 @@
 import jax.numpy as jnp
 from equinox import filter_jit
 from jax import lax
-from jax.nn import softmax
+from jax.nn import log_softmax, softmax
 from jax.ops import segment_max, segment_sum
 from jaxtyping import Array, Float64, UInt
 
@@ -160,3 +160,18 @@ def _class_membership_probs(
 
     V_ref = jnp.zeros((num_panels, 1))
     return softmax(jnp.concatenate([V_ref, V], axis=1), axis=1)
+
+
+def _class_membership_log_probs(
+    thetas: Float64[Array, "dem_vars_plus_one classes_minus_one"],
+    dems: Float64[Array, "panels dem_vars"] | None,
+    num_panels: int,
+) -> Float64[Array, "panels classes"]:
+    """Retain extreme log prior odds when updating with a choice history."""
+    if dems is None:
+        if thetas.shape[0] != 1:
+            raise ValueError("dems is required for demographic membership coefficients.")
+        tail = jnp.repeat(thetas, num_panels, axis=0)
+    else:
+        tail = thetas[0] + dems @ thetas[1:]
+    return log_softmax(jnp.concatenate([jnp.zeros((num_panels, 1)), tail], axis=1), axis=1)

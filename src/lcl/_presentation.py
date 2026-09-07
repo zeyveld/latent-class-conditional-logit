@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+import re
 
 import polars as pl
 from pylatexenc.latex2text import LatexNodes2Text
@@ -136,6 +137,7 @@ def _combine_renderings(
     num_decimals: int,
     *,
     escape_header: bool = False,
+    label_header: bool = False,
     note: str | None = None,
     disable_numparse: bool = False,
 ) -> str:
@@ -150,6 +152,8 @@ def _combine_renderings(
     latex_header = (
         [_escape_latex(value) for value in header] if escape_header else list(header)
     )
+    if label_header:
+        latex_header = [_latex_label(value) for value in header]
     latex = "\n".join(
         [r"\toprule", " & ".join(latex_header) + r" \\", r"\midrule", "%"]
         + body_rows
@@ -157,7 +161,7 @@ def _combine_renderings(
     )
     preview = tabulate(
         preview_rows,
-        headers=[converter.latex_to_text(value) for value in header],
+        headers=[converter.latex_to_text(value) for value in (latex_header if label_header else header)],
         tablefmt="simple_outline",
         floatfmt=f".{num_decimals}f",
         disable_numparse=disable_numparse,
@@ -201,8 +205,9 @@ def _pair_rows(
 
     estimate_cells = [cell(value) for value in estimates]
     se_cells = [se_cell(value) for value in standard_errors]
-    latex = [" & ".join([_escape_latex(row_label), *estimate_cells]) + r" \\"]
-    preview: list[tuple[str, ...]] = [(row_label, *estimate_cells)]
+    latex_label = _latex_label(row_label)
+    latex = [" & ".join([latex_label, *estimate_cells]) + r" \\"]
+    preview: list[tuple[str, ...]] = [(LatexNodes2Text().latex_to_text(latex_label), *estimate_cells)]
     # A row whose standard errors are all missing -- an unidentified covariance,
     # or the reference class of the membership model -- would otherwise print a
     # line of empty parentheses and double the height of the table for nothing.
@@ -338,16 +343,16 @@ def format_class_coefficients(
         preview_rows,
         "Standard errors in parentheses are Delta-method errors of the "
         "class-specific coefficients.",
-        "Standard errors are unavailable: the observed information is "
-        "singular at this fit, so no coefficient has an identified standard "
-        "error. Fewer classes or a leaner specification usually restores it.",
+        "Standard errors are unavailable. Inference may have been skipped, or "
+        "the covariance may be unidentified; consult the fit diagnostics.",
     )
+    note += " Displayed classes are 1-based; returned class IDs are 0-based."
     return _combine_renderings(
         latex_rows,
         preview_rows,
         header,
         num_decimals,
-        escape_header=True,
+        label_header=True,
         note=note,
         disable_numparse=True,
     )
@@ -464,16 +469,16 @@ def format_membership_coefficients(
     note = f"{normalisation} " + _standard_error_note(
         preview_rows,
         "Standard errors in parentheses.",
-        "Standard errors are unavailable: the observed information is singular "
-        "at this fit. A membership coefficient diverges whenever some "
-        "demographic cell is never assigned to a class.",
+        "Standard errors are unavailable. Inference may have been skipped, or "
+        "the covariance may be unidentified; consult the fit diagnostics.",
     )
+    note += " Displayed classes are 1-based; returned class IDs are 0-based."
     return _combine_renderings(
         latex_rows,
         preview_rows,
         header,
         num_decimals,
-        escape_header=True,
+        label_header=True,
         note=note,
         disable_numparse=True,
     )
@@ -553,10 +558,11 @@ def format_membership_marginal_effects(
             latex_rows.extend(latex)
             preview_rows.extend(preview)
     note = (
-        "Average marginal effects: the mean over panels of the change in the "
-        "probability of belonging to a class per one-unit change in the "
-        "demographic. Each variable's effects sum to zero across classes, and "
-        "unlike the log-odds above they do not depend on the reference class. "
+        "Average design-column derivatives in probability units, holding other "
+        "encoded columns fixed. For categorical variables these are not discrete "
+        "category contrasts; interactions and transforms are separate design "
+        "columns. Effects sum to zero across classes and are independent of the "
+        "reference class. They describe associations, not causal effects. "
     ) + _standard_error_note(
         preview_rows,
         "Standard errors in parentheses.",
@@ -567,7 +573,7 @@ def format_membership_marginal_effects(
         preview_rows,
         header,
         num_decimals,
-        escape_header=True,
+        label_header=True,
         note=note,
         disable_numparse=True,
     )
@@ -611,3 +617,9 @@ def _escape_latex(value: object) -> str:
         "^": r"\textasciicircum{}",
     }
     return "".join(replacements.get(char, char) for char in str(value))
+
+
+def _latex_label(value: str) -> str:
+    r"""Escape plain label text while preserving explicit $...$ or \(...\) math."""
+    parts = re.split(r"(\$[^$]+\$|\\\(.*?\\\))", value)
+    return "".join(part if i % 2 else _escape_latex(part) for i, part in enumerate(parts))

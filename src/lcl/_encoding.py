@@ -180,7 +180,7 @@ class ChoiceDataEncoder:
             original_cases=df[self.cases_col].to_numpy(),
             original_panels=df[self.panels_col].to_numpy(),
         )
-        validate_parsed_data(parsed)
+        validate_parsed_data(parsed, check_rank=fit)
         return parsed
 
     def _attach_sequential_ids(self, df: pl.DataFrame) -> pl.DataFrame:

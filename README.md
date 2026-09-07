@@ -14,7 +14,7 @@ Although I'm an economist by training, this package is intended for all social s
 - **`LatentClassConditionalLogit`**: finite-mixture conditional logit with a fractional-response multinomial logit regression of class membership on demographics.
 - **`ConditionalLogit`**: standard conditional logit, useful both as a baseline and as the inner kernel of the M-step.
 - **`cv_optimal_classes`**: blocked K-fold cross-validation for choosing the number of latent classes. Folds are split at the decision-maker level, so no individuals' choices appear in both training and hold-out data.
-- **Counterfactual prediction**: out-of-sample choice probabilities, expected consumer surplus, own- and cross-elasticities, and marginal willingness-to-pay broken out by demographic partitions.
+- **Counterfactual prediction**: demographic priors and Bayesian choice-history updates, including populations mixing new and returning consumers; welfare changes and market elasticities with joint parameter uncertainty; marginal WTP with demographic and attribute interactions.
 - **Inference & diagnostics**: clustered sandwich covariance at the panel level, the Delta method for non-linear functions of the parameters (such as the value of time), and one-call diagnostic reports (`results.diagnostics()`, `convergence_report()`, `audit_report()`).
 
 Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped design matrix should raise a readable error at the call site rather than a cryptic XLA trace.
@@ -211,6 +211,15 @@ panel demographics; the same alignment field is available on `PastChoicesData`.
 without printing and supports delta or parametric-bootstrap SEs. Prediction also
 provides `market_shares()` and demand-weighted `aggregate_elasticities()`; tied
 quantile values are never split across bins.
+
+History may cover only some forecast consumers. `prediction.class_membership()`
+reports priors, updated probabilities, and history counts. `marginal_wtp("quality")`
+includes utility interactions such as quality × income; `compute_wtp()` summarizes
+these values by demographic group. Welfare comparisons validate a common model,
+population, and weights, and distinguish identified changes from changes in
+normalization-dependent indices. Class coefficient and demographic summaries
+switch to class rows for large models while preserving the aggregate table style.
+See the [prediction and welfare guide](https://zeyveld.github.io/latent-class-conditional-logit/tutorials/prediction_welfare/).
 
 The tutorials document weight-key conventions, cross-validation failure
 semantics, panel alignment, and the current API patterns used above.

@@ -25,7 +25,7 @@ with install_import_hook("lcl", "beartype.beartype"):
     )
     from lcl._choice_model import ChoiceModel
     from lcl._diagnostics import LCLDiagnostics
-    from lcl._encoding import _coerce_frame
+    from lcl._predict_inputs import _aligned_raw_prediction_data
     from lcl._kernels import _choice_probabilities_and_logsum, _diff_logit_components
     from lcl._delta import apply_delta_method, parametric_bootstrap_se
     from lcl._inference import _aggregate_scores, _robust_covariance
@@ -709,7 +709,7 @@ class CLResults:
         alts_col: str | None = None,
         cases_col: str | None = None,
         panels_col: str | None = None,
-        panel_weights: str | Mapping[object, float] | Sequence[float] | None = None,
+        panel_weights: str | Mapping[object, float] | Sequence[float] | onp.ndarray | None = None,
     ) -> CLPrediction:
         """Predict conditional choice probabilities for a given set of alternatives.
 
@@ -802,11 +802,7 @@ class CLResults:
         encoder = self.model._encoder
         if encoder is None:
             raise ValueError("The fitted data encoder is unavailable.")
-        raw_data = _coerce_frame(data).sort(
-            list(
-                dict.fromkeys([encoder.panels_col, encoder.cases_col, encoder.alts_col])
-            )
-        )
+        raw_data = _aligned_raw_prediction_data(data, parsed, encoder)
         resolved_panel_weights = resolve_panel_weights(
             panel_weights, panel_ids, raw_data, encoder.panels_col
         )

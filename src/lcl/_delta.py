@@ -170,6 +170,11 @@ def parametric_bootstrap_se(
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         values = jax.vmap(target)(jnp.asarray(parameter_draws))
+    if not bool(jnp.all(jnp.isfinite(values))):
+        raise ValueError(
+            "Non-finite quantities occurred in parameter simulation. Inspect "
+            "the design, covariance, and denominator before interpreting SEs."
+        )
     return jnp.std(values, axis=0, ddof=1)
 
 

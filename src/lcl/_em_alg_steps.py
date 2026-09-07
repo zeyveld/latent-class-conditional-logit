@@ -18,9 +18,9 @@ from lcl.constraints import (
     pullback_negative_derivatives,
 )
 from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
-from lcl._demographics import _predict_class_membership_probs, _update_thetas
+from lcl._demographics import _update_thetas
 from lcl._jax_compat import Mesh, NamedSharding, P, shard_map
-from lcl._kernels import _diff_log_kernels, _diff_logit_components
+from lcl._kernels import _class_membership_log_probs, _diff_log_kernels, _diff_logit_components
 from lcl._optimize import exact_newton_minimize, newton_kwargs
 from lcl.options import FitOptions, OptimizationOptions
 from lcl._struct import Data, DiffUnchosenChosen, EMStepDiagnostics, EMVars
@@ -318,8 +318,9 @@ def _compute_conditional_class_probs(
         log_class_probs = jnp.log(jnp.maximum(shares, 1e-300))[None, :]
 
     else:
-        class_probs_given_dems = _predict_class_membership_probs(thetas, data)
-        log_class_probs = jnp.log(jnp.maximum(class_probs_given_dems, 1e-300))
+        if data.num_panels is None:
+            raise ValueError("Panel identifiers are required for class membership.")
+        log_class_probs = _class_membership_log_probs(thetas, data.dems, data.num_panels)
 
     log_kernels = _compute_log_kernels(structural_betas, diff_unchosen_chosen, data)
     conditional_class_probs = softmax(log_class_probs + log_kernels, axis=1)

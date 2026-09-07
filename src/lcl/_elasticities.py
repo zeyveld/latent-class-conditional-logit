@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 from typing import Any
+import re
 
 import jax.numpy as jnp
 import numpy as onp
@@ -19,6 +20,15 @@ def elasticity_design_derivative(
     data = prediction.predict_data
     raw = prediction.raw_prediction_data
     encoder = getattr(model, "_encoder", None)
+    # Preserve exact derivatives for a bare linear term; formulas involving the
+    # same raw variable elsewhere need the full chain rule below.
+    if variable in model.case_varnames:
+        token = re.compile(r"(?<!\w)" + re.escape(variable) + r"(?!\w)")
+        related = [name for name in model.case_varnames if token.search(name)]
+        if related == [variable]:
+            index = model.case_varnames.index(variable)
+            derivative = jnp.zeros_like(data.X).at[:, index].set(1.0)
+            return data.X[:, index], derivative
     if raw is not None and variable in raw.columns:
         try:
             raw_values = raw[variable].cast(pl.Float64).to_numpy()
@@ -110,7 +120,7 @@ def compute_elasticities(
         "_cases": onp.asarray(data.cases),
         "cases": prediction.original_cases,
         "alts": prediction.original_alts,
-        "P_j": onp.asarray(jnp.maximum(probabilities, 1e-250)),
+        "P_j": onp.asarray(probabilities),
     }
     if prediction.original_panels is not None:
         j_values["panels"] = prediction.original_panels
@@ -162,7 +172,9 @@ def compute_elasticities(
         )
         name = f"elasticity_{variable}"
         cross = cross.with_columns(
-            (pl.col("D_jk") * pl.col("X_k") / pl.col("P_j")).alias(name)
+            pl.when(pl.col("P_j") > 0.0)
+            .then(pl.col("D_jk") * pl.col("X_k") / pl.col("P_j"))
+            .otherwise(float("nan")).alias(name)
         )
         ids = ["_cases"]
         if "panels" in cross.columns:

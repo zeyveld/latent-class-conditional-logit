@@ -72,12 +72,20 @@ aggregate = prediction.aggregate_elasticities(["cost", "time"])
 Pass `panel_weights=` to `predict` as a panel-keyed mapping, a prediction-data
 column name, or a vector in sorted prediction-panel order. WTP supports
 `se="delta"`, `se="bootstrap"` (an asymptotic parametric bootstrap), and
-`se="none"`. Posterior-conditioned WTP uncertainty is refused because the
-current implementation does not differentiate through the Bayesian update.
+`se="none"`. Both inference methods propagate uncertainty through the Bayesian
+update when `past_choices` is supplied. History can cover a subset of prediction
+consumers; `prediction.class_membership()` reports the probability source and
+history count for each consumer. Prediction demographics supply the prior.
 
 Surplus frames include `surplus_units` (`money` with a numeraire, otherwise
 `utils`). Use `baseline_prediction.surplus_change(counterfactual_prediction)`
 for the identified welfare change rather than comparing unnormalised levels.
+Changes check model, consumer/occasion identity, and weights, and include
+`change_identified`. Monetary summaries require a linear numeraire without extra
+price transforms or interactions. `marginal_wtp("quality")` evaluates the full
+raw-attribute derivative at each offered profile; `compute_wtp` aggregates it by
+consumer and demographic group. See the
+[economic definitions and worked examples](../tutorials/prediction_welfare.md).
 
 For array-style prediction, supply `dem_panel_ids` with `dems` so demographic
 rows can be validated and reordered. Without those IDs, demographic rows must
