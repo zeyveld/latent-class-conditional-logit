@@ -1,7 +1,8 @@
 """Shared observed-information and covariance helpers."""
 
 import logging
-from typing import NamedTuple, cast
+from collections.abc import Sequence
+from typing import NamedTuple, TypedDict, cast
 
 import jax.numpy as jnp
 import numpy as onp
@@ -189,3 +190,45 @@ def _invert_information(
             inverse = onp.linalg.pinv(symmetric, hermitian=True)
         inverse = 0.5 * (inverse + inverse.T)
     return jnp.asarray(inverse), diagnostics
+
+
+class WeakInformationDirection(TypedDict):
+    """A scaled information eigenvalue and its dominant named parameter loadings."""
+
+    normalized_eigenvalue: float
+    loadings: dict[str, float]
+
+
+def information_weak_directions(
+    information: Float64[ArrayLike, "params params"],
+    names: Sequence[str],
+) -> list[WeakInformationDirection]:
+    """Name poorly curved parameter combinations in diagonal-scaled coordinates.
+
+    Called only when ordinary information diagnostics indicate a problem.
+    Loadings suggest what to inspect; they are not an automatic deletion rule.
+    """
+    matrix = onp.asarray(information, dtype=float)
+    if not onp.isfinite(matrix).all() or not matrix.size:
+        return []
+    scale = onp.sqrt(onp.maximum(onp.abs(onp.diag(matrix)), onp.finfo(float).tiny))
+    standardized = (matrix / scale[:, None]) / scale[None, :]
+    if not onp.isfinite(standardized).all():
+        return []
+    values, vectors = onp.linalg.eigh((standardized + standardized.T) / 2)
+    selected = list(dict.fromkeys([0, *onp.argsort(onp.abs(values))[:2].tolist()]))
+    rows: list[WeakInformationDirection] = []
+    for index in selected:
+        vector = vectors[:, index]
+        strongest = onp.argsort(-onp.abs(vector))[:8]
+        rows.append(
+            WeakInformationDirection(
+                normalized_eigenvalue=float(values[index]),
+                loadings={
+                    names[i]: float(vector[i])
+                    for i in strongest
+                    if abs(vector[i]) >= 0.1 * onp.max(abs(vector))
+                },
+            )
+        )
+    return rows

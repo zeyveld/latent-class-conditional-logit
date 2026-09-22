@@ -263,15 +263,41 @@ class InferenceOptions:
         unclustered sandwich, matching Stata's maximum-likelihood convention.
     skip : bool, default=False
         Skip covariance estimation entirely and return a matrix of ``NaN``.
+    boundary : str, default="strict"
+        For LCL models, ``"conditional"`` estimates covariance on the free
+        parameter subspace, holding binding negative coefficients fixed.
+        This is conditional inference, not the nonnormal sampling distribution
+        of an inequality-constrained estimator. ``"strict"`` retains the full
+        information-matrix requirement. ``"projected"`` additionally uses
+        Gaussian critical-cone simulation for coefficient means and standard
+        deviations in ``beta_summary``; other inference remains conditional.
+        Boundary modes are LCL-only. They do not repair unidentified mixtures.
+    boundary_draws : int, default=2048
+        Number of small Gaussian/quadratic-program draws for summary inference.
+    boundary_seed : int, default=0
+        Seed for reproducible boundary summary inference.
     """
 
     covariance: str = "clustered"
     cluster: str | None = "panel"
     finite_sample_correction: bool = True
     skip: bool = False
+    boundary: str = "strict"
+    boundary_draws: int = 2048
+    boundary_seed: int = 0
 
     def __post_init__(self) -> None:
         """Normalize and validate covariance settings."""
+        if self.boundary not in {"strict", "conditional", "projected"}:
+            raise ValueError(
+                "InferenceOptions.boundary must be 'strict', 'conditional', or 'projected'."
+            )
+        _require_integer(self.boundary_draws, "boundary_draws")
+        _require_integer(self.boundary_seed, "boundary_seed")
+        if self.boundary_draws < 100 or self.boundary_seed < 0:
+            raise ValueError(
+                "boundary_draws must be >=100 and boundary_seed nonnegative."
+            )
         covariance = self.covariance.lower()
         if covariance in {"none", "unadjusted", "hessian"}:
             covariance = "unadjusted"

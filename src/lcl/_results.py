@@ -16,6 +16,8 @@ from jaxtyping import Array, ArrayLike, Float64, Integer
 
 from lcl._analytic_derivatives import _panel_scores_and_hessian
 from lcl._case_utils import _diff_unchosen_chosen
+from lcl._boundary import boundary_indices, boundary_kkt_violation, structural_score
+from lcl._boundary_types import BoundarySummaryDiagnostics, BoundarySummaryInputs
 from lcl._delta import apply_delta_method, parametric_bootstrap_se
 from lcl._diagnostics import LCLDiagnostics
 from lcl._em_alg_steps import (
@@ -23,7 +25,14 @@ from lcl._em_alg_steps import (
     _compute_panel_logliks,
 )
 from lcl._jax_compat import cpu_device, device_put_array_leaves
-from lcl._inference import _aggregate_scores, _invert_information, _symmetrize
+from lcl._inference import (
+    InformationDiagnostics,
+    WeakInformationDirection,
+    _aggregate_scores,
+    _invert_information,
+    _symmetrize,
+    information_weak_directions,
+)
 from lcl._kernels import _choice_probabilities_and_logsum
 from lcl._logging import log_or_print
 from lcl._params import ParamPacking
@@ -65,8 +74,30 @@ class LCLResults:
         Covariance of the *reported* (structural) parameters, aligned row for row
         with :meth:`parameter_names`.  Constrained coefficients appear on the
         scale printed by :meth:`class_coefficients`, so ``sqrt(diag(cov_matrix))``
-        matches the published standard errors.  Clustered covariance uses the
-        Stata maximum-likelihood multiplier :math:`(G / (G - 1))`.
+        matches the published standard errors away from binding constraints.
+        Clustered covariance uses the Stata maximum-likelihood multiplier
+        :math:`(G / (G - 1))`. With ``boundary="conditional"`` or
+        ``boundary="projected"``, numerically binding prices have zero rows and
+        columns; their class-specific SEs are suppressed. Prediction, WTP,
+        and membership inference then condition on those prices being fixed.
+        Projected coefficient-summary SEs are reported by :meth:`beta_summary`
+        separately; they cannot be recovered from this conditional matrix.
+    inference_status : str
+        Scope of ``cov_matrix``: ``"regular"``, ``"conditional_on_boundary"``,
+        ``"unavailable"``, or ``"skipped"``. This is separate from the
+        summary table's ``inference_status`` column.
+    boundary_parameter_indices : tuple[int, ...]
+        Numerically binding coefficient indices, aligned with
+        :meth:`parameter_names`. Valid boundaries do not veto a predictive fit.
+    boundary_kkt_violation : float
+        Largest feasible structural ascent per panel at a binding upper bound.
+        A value above ``score_tol`` makes the result nonconverged, including
+        when covariance estimation was skipped.
+    boundary_summary_diagnostics : dict
+        Summary inference method and, after projected :meth:`beta_summary`,
+        active/strict/weak indices, multiplier statistics, selection threshold,
+        directional-SD variables, Gaussian draw count and seed, information
+        diagnostics, elapsed time, and any conditional-fallback reason.
     latent_cov_matrix : Float64[Array, "all_params all_params"]
         Covariance in the unconstrained parameterization the optimizer works in.
         This is the matrix the delta method consumes: target functions apply the
@@ -185,10 +216,50 @@ class LCLResults:
         )
         self._num_clusters = num_clusters
         # Populated by _compute_covariance; stays None when inference is skipped.
-        self.information_diagnostics: Any = None
+        self.information_diagnostics: InformationDiagnostics | None = None
+        self.information_weak_directions: list[WeakInformationDirection] = []
         self.observed_score_max = float(observed_score_max)
+        self.boundary_parameter_indices = tuple(
+            int(i)
+            for i in boundary_indices(self.em_res.structural_betas, self._param_packing)
+        )
+        self.boundary_kkt_violation = 0.0
+        self.inference_status = "skipped" if self.inference.skip else "regular"
+        self._boundary_summary_inputs: BoundarySummaryInputs | None = None
+        self._boundary_summary_cache: pl.DataFrame | None = None
+        self.boundary_summary_diagnostics: BoundarySummaryDiagnostics = {
+            "method": self.inference_status
+        }
+        if self.boundary_parameter_indices and (
+            self.inference.skip or self.inference.boundary == "strict"
+        ):
+            cpu = cpu_device()
+            with jax.default_device(cpu):
+                boundary_data = device_put_array_leaves(self.data, cpu)
+                score = structural_score(
+                    device_put_array_leaves(self.flat_params, cpu),
+                    _diff_unchosen_chosen(boundary_data),
+                    boundary_data,
+                    self._param_packing,
+                )
+            self.boundary_kkt_violation = boundary_kkt_violation(
+                score, list(self.boundary_parameter_indices)
+            )
+            self.observed_score_max = max(
+                self.observed_score_max, self.boundary_kkt_violation
+            )
+            self.converged = bool(self.observed_score_max <= self.score_tol)
+            if not self.converged:
+                logger.warning(
+                    "Boundary KKT violation per panel: %.3e (tolerance %.3e).",
+                    self.boundary_kkt_violation,
+                    self.score_tol,
+                )
         self.latent_cov_matrix = self._compute_covariance()
         self.cov_matrix = self._structural_covariance(self.latent_cov_matrix)
+        if not self.inference.skip and not self.covariance_available:
+            self.inference_status = "unavailable"
+        self.boundary_summary_diagnostics["method"] = self.inference_status
 
         # Compute information criteria
         num_panels = self.data.num_panels
@@ -350,15 +421,32 @@ class LCLResults:
                 _diff_unchosen_chosen(data), cpu
             )
 
+            if self._param_packing.numeraire_idx is not None and (
+                self.inference.boundary == "projected"
+                or (
+                    self.boundary_parameter_indices
+                    and self.inference.boundary == "conditional"
+                )
+            ):
+                from lcl._boundary_inference import boundary_covariance
+
+                return boundary_covariance(self, flat_params, diff_unchosen_chosen, data)
             J, H = _panel_scores_and_hessian(
                 flat_params, diff_unchosen_chosen, data, self._param_packing
             )
-            self.observed_score_max = float(jnp.max(jnp.abs(jnp.mean(J, axis=0))))
+            self.observed_score_max = max(
+                float(jnp.max(jnp.abs(jnp.mean(J, axis=0)))),
+                self.boundary_kkt_violation,
+            )
             self.converged = bool(self.observed_score_max <= self.score_tol)
             H_inv, diagnostics = _invert_information(
                 -H, label="latent-class observed information matrix"
             )
             self.information_diagnostics = diagnostics
+            if not diagnostics.positive_definite or diagnostics.condition_number > 1e8:
+                self.information_weak_directions = information_weak_directions(
+                    -H, self.parameter_names()
+                )
             H_inv = jax.device_put(H_inv, cpu)
 
             if self.inference.covariance == "unadjusted":
@@ -417,7 +505,7 @@ class LCLResults:
 
     @property
     def covariance_available(self) -> bool:
-        """Report whether a usable covariance matrix was estimated."""
+        """Report a finite covariance; inspect inference_status for conditional scope."""
         return bool(onp.all(onp.isfinite(onp.asarray(self.cov_matrix))))
 
     def _panel_loglik_fn(
@@ -668,7 +756,12 @@ class LCLResults:
                         "label": _model_variable_label(self.model, variable),
                         "class": class_idx,
                         "coefficient": float(beta_array[var_idx, class_idx]),
-                        "std_error": float(se_array[var_idx, class_idx]),
+                        "std_error": (float("nan") if var_idx * self.model.num_classes + class_idx
+                                      in getattr(self, "boundary_parameter_indices", ())
+                                      else float(se_array[var_idx, class_idx])),
+                        "boundary": var_idx * self.model.num_classes + class_idx
+                                      in getattr(self, "boundary_parameter_indices", ()),
+                        "inference_status": getattr(self, "inference_status", "regular"),
                         "constrained": variable == self.model.numeraire,
                     }
                 )
@@ -862,16 +955,27 @@ class LCLResults:
         return pl.DataFrame(rows)
 
     def beta_summary(self) -> pl.DataFrame:
-        """Return population-level coefficient moments with Delta-method SEs.
+        """Return population coefficient moments and explicitly labelled uncertainty.
+
+        With boundary="projected", nearby price constraints use Gaussian
+        critical-cone simulation; otherwise the ordinary/conditional delta
+        method applies. These SEs do not imply normal confidence intervals.
+        See docs/boundary_inference.md.
 
         Returns
         -------
         pl.DataFrame
             Raw variables, display labels, mean coefficients, standard deviations
-            across classes, Delta-method standard errors, and class-specific extrema.
+            across classes, their standard errors, class-specific extrema, and
+            an ``inference_status`` column. Projected rows use a Gaussian
+            critical-cone approximation, with an explicitly labelled
+            conditional fallback when that approximation is unavailable.
         """
         if self.data.num_panels is None:
             raise ValueError("Panel identifiers are required to summarize LCL results.")
+        if getattr(self, "_boundary_summary_inputs", None) is not None:
+            from lcl._boundary_inference import projected_beta_summary
+            return projected_beta_summary(self)
 
         means, se_means = self._apply_delta_method(
             self._calc_population_mean_betas,
@@ -920,7 +1024,11 @@ class LCLResults:
                     "variable": variable,
                     "label": _model_variable_label(self.model, variable),
                     "mean": float(means[idx]),
-                    "mean_se": float(se_means[idx]),
+                    "mean_se": (float("nan") if all(
+                        idx * self.model.num_classes + cls in getattr(self, "boundary_parameter_indices", ())
+                        for cls in range(self.model.num_classes)
+                    ) else float(se_means[idx])),
+                    "inference_status": getattr(self, "inference_status", "regular"),
                     "sd": float(stds[idx]),
                     "sd_se": float(se_stds[idx]),
                     "min_class": float(onp.min(structural[idx, :])),
@@ -1202,6 +1310,16 @@ class LCLResults:
             },
         ]
 
+        rows.extend([
+            {"section": "fit", "check": "boundary_kkt_violation",
+             "value": getattr(self, "boundary_kkt_violation", 0.),
+             "status": "ok" if getattr(self, "boundary_kkt_violation", 0.) <= self.score_tol else "warning",
+             "message": "Feasible structural ascent at binding negative coefficients; valid boundaries satisfy KKT."},
+            {"section": "inference", "check": "boundary_inference",
+             "value": getattr(self, "inference_status", "regular"),
+             "status": "warning" if getattr(self, "boundary_parameter_indices", ()) else "ok",
+             "message": "Conditional covariance holds binding prices fixed; it is not full boundary uncertainty."},
+        ])
         if self.polish_report is not None:
             report = self.polish_report
             rows.append(
@@ -1322,6 +1440,12 @@ class LCLResults:
                 }
             )
 
+        for index, direction in enumerate(getattr(self, "information_weak_directions", [])):
+            rows.append({"section": "inference", "check": f"weak_parameter_direction_{index + 1}",
+                         "value": direction["normalized_eigenvalue"], "status": "warning",
+                         "message": "Inspect this scaled parameter combination: " + str(direction["loadings"])
+                                    + ". Check redundant attributes, sparse classes, or separated membership; "
+                                    "more iterations cannot restore missing identification."})
         if self.em_res.class_probs_by_panel is not None:
             posterior = onp.asarray(self.em_res.class_probs_by_panel)
             entropy = -onp.sum(
@@ -1439,6 +1563,8 @@ class LCLResults:
             f"Final log likelihood: {float(self.em_res.unconditional_loglik):.6g}",
             f"Max observed-data score: {self.observed_score_max:.3e} "
             f"(tolerance {self.score_tol:.3g})",
+            f"Boundary KKT violation: {getattr(self, 'boundary_kkt_violation', 0.):.3e}",
+            f"Inference: {getattr(self, 'inference_status', 'regular')}",
             f"Warnings: {warnings.height}",
         ]
         if self.polish_report is not None:

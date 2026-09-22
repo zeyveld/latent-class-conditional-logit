@@ -305,6 +305,26 @@ The class-specific estimates reveal heterogeneity that population averages conce
 and diagnostics in a text report. `results.em_history_` and
 `results.optimization_history_` expose iteration histories as Polars frames.
 
+### Price-insensitive classes (0.1.42)
+
+A constrained fare coefficient may reach its upper bound in a useful predictive
+fit. To obtain coefficient mean/SD uncertainty in this case, request
+`InferenceOptions(covariance="clustered", boundary="projected")` when calling
+`fit`. The default remains `boundary="strict"`.
+
+Individual binding-fare SEs are suppressed; other class-specific SEs condition on
+binding fares being fixed. `beta_summary()` instead propagates joint taste and
+membership uncertainty through a Gaussian critical-cone approximation. Read its
+`inference_status` column and `result.boundary_summary_diagnostics` for the selected
+constraints or an explicitly conditional fallback. These nonnormal SEs do not
+justify normal Wald intervals, and they do not repair unstable WTP denominators.
+
+Follow the [runnable boundary-price tutorial](boundary_prices.md) for both a
+strictly binding and a zero-sensitivity example. The
+[method guide and papers](../boundary_inference.md#literature-and-implemented-approximation)
+explain projection, directional SD derivatives, and the required identification
+assumptions.
+
 ## Score observed choices without refitting
 
 Use `loglik` to evaluate a validation or test sample with the fitted model. The

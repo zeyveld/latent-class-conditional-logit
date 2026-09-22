@@ -19,6 +19,16 @@ Although I'm an economist by training, this package is intended for all social s
 
 Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped design matrix should raise a readable error at the call site rather than a cryptic XLA trace.
 
+## Boundary prices in 0.1.42
+
+Use `InferenceOptions(covariance="clustered", boundary="projected")` to retain
+valid boundary-price predictive fits and obtain coefficient mean/SD uncertainty
+through a Gaussian critical-cone approximation. The default remains `"strict"`.
+Individual binding-price SEs are suppressed; other class and prediction SEs
+condition on binding prices being fixed. See the
+[worked tutorial](docs/tutorials/boundary_prices.md) and
+[method, assumptions, and references](docs/boundary_inference.md).
+
 ## Documentation
 
 Full documentation—worked tutorials, an API reference, and a model-selection guide—is hosted at [zeyveld.github.io/latent-class-conditional-logit](https://zeyveld.github.io/latent-class-conditional-logit/).

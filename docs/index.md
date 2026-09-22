@@ -50,6 +50,16 @@ changes, market elasticities, and demographic WTP with parameter uncertainty.
 
 </div>
 
+## Boundary prices in 0.1.42
+
+Retain valid price-insensitive classes in predictive models and quantify
+uncertainty in coefficient means and standard deviations with
+`InferenceOptions(boundary="projected")`. The
+[boundary-price tutorial](tutorials/boundary_prices.md) includes a reproducible
+example and [links to the underlying papers](boundary_inference.md#literature-and-implemented-approximation).
+Class-specific binding-price SEs are suppressed; other class and prediction SEs
+remain conditional. The default `boundary="strict"` is unchanged.
+
 ## Install
 
 The [prediction and welfare guide](tutorials/prediction_welfare.md) covers mixed

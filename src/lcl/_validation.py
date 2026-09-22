@@ -1,11 +1,15 @@
 """Validation for aligned choice-model inputs."""
 
 from collections.abc import Sequence
+import logging
 
 import numpy as onp
 import polars as pl
+from jaxtyping import Float64
 
 from lcl._struct import ParsedData
+
+logger = logging.getLogger(__name__)
 
 
 def _require_columns(df: pl.DataFrame, columns: Sequence[str]) -> None:
@@ -109,11 +113,50 @@ def validate_parsed_data(parsed: ParsedData, *, check_rank: bool = True) -> None
     chosen_X = X[y_bool]
     unchosen = ~y_bool
     differenced = X[unchosen] - chosen_X[cases[unchosen]]
-    rank = int(onp.linalg.matrix_rank(differenced)) if differenced.size else 0
-    if rank < X.shape[1]:
-        raise ValueError(
-            "The chosen-differenced utility design is rank deficient "
-            f"(rank {rank} for {X.shape[1]} columns). Conditional-logit "
-            "coefficients—and utility levels such as consumer surplus—are not "
-            "identified. Remove collinear columns or use K-1 alternative constants."
+    _check_design(differenced, parsed.case_varnames, "chosen-differenced utility design")
+    if parsed.dems is not None:
+        membership = onp.column_stack((onp.ones(len(dems)), dems))
+        _check_design(
+            membership,
+            ["Intercept", *(parsed.dem_varnames or [])],
+            "class-membership design",
+        )
+
+
+def _check_design(
+    matrix: Float64[onp.ndarray, "observations variables"],
+    names: Sequence[str],
+    label: str,
+) -> None:
+    """Reject exact aliases and name weak normalized directions before optimization."""
+    if not matrix.size:
+        raise ValueError(f"The {label} has no identifying observations.")
+    norms = onp.linalg.norm(matrix, axis=0)
+    matrix /= onp.where(norms > 0, norms, 1.0)
+    singular = onp.linalg.svd(matrix, compute_uv=False)
+    tolerance = max(matrix.shape) * onp.finfo(float).eps * singular[0]
+    rank = int(onp.sum(singular > tolerance))
+    condition = singular[0] / singular[-1] if singular[-1] > 0 else onp.inf
+    if rank < len(names) or condition > 1e4:
+        # A tiny Gram eigensystem supplies explanatory loadings without
+        # allocating the tall left singular vectors of the full design.
+        _, vectors = onp.linalg.eigh(matrix.T @ matrix)
+        weak = vectors[:, 0]
+        terms = [
+            f"{name} ({weight:+.3g})"
+            for name, weight in zip(names, weak)
+            if abs(weight) >= 0.15 * onp.max(abs(weak))
+        ]
+        detail = "Weak normalized direction: " + ", ".join(terms) + "."
+        if rank < len(names):
+            raise ValueError(
+                f"The {label} is rank deficient (rank {rank} for {len(names)} columns). "
+                "Remove collinear columns or use K-1 alternative constants. "
+                "For membership, omit constant or aliased demographics. " + detail
+            )
+        logger.warning(
+            "The %s is nearly collinear (normalized condition %.3e). %s",
+            label,
+            condition,
+            detail,
         )

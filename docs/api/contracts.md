@@ -31,7 +31,14 @@ Use `newton_decrement_tol` for solver tolerance. Polishing retains its separate
 `FitOptions.polish_maxiter` budget and fixed `1e-10` Newton tolerance; the remaining
 solver controls also apply to polishing. `FitOptions.score_tol` determines LCL's
 final convergence flag after EM and polishing. The EM stopping flag is separately
-available as `em_criterion_met`.
+available as `em_criterion_met`. Binding prices additionally undergo a structural
+KKT check: softplus saturation must not conceal a feasible improving direction.
+
+Boundary inference modes and their limits are explicit in the
+[options reference](specification.md#boundary-inference-options-0142) and
+[result contracts](latent_class.md#boundary-results-and-diagnostics). A conditional
+covariance has zero rows for fixed prices, while the class coefficient table
+suppresses their SEs. Projected mean/SD SEs are separate from that matrix.
 
 For numeraire warnings, `NegativeCoefficient.warn_below`, when present, overrides
 `DiagnosticsOptions.near_zero_numeraire_threshold`. The

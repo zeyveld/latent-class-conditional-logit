@@ -58,6 +58,39 @@ classification = results.classification_diagnostics()
 `cov_matrix`, and `adjusted_bic` are the canonical names shared with conditional
 logit; `convergence`, `covariance`, and `abic` are deprecated aliases.
 
+### Boundary results and diagnostics
+
+In 0.1.42, `class_coefficients()` adds `boundary` and `inference_status`.
+`beta_summary()` adds `inference_status` and supports projected uncertainty for
+class-weighted coefficient means and SDs when requested at fit time.
+
+| Attribute / column | Contract |
+| --- | --- |
+| `result.inference_status` | Covariance scope: `regular`, `conditional_on_boundary`, `unavailable`, or `skipped`. |
+| `result.boundary_parameter_indices` | Tuple of numerically binding structural-coefficient indices, aligned with `parameter_names()`. |
+| `result.boundary_kkt_violation` | Maximum feasible structural ascent per panel at those bounds. A violation above `score_tol` marks the fit nonconverged. |
+| `result.cov_matrix` | Structural covariance. In conditional/projected modes, binding-price rows and columns are zero by conditioning; individual price SEs are suppressed. |
+| Summary `inference_status` | `critical_cone_projection`, `conditional_on_boundary_fallback`, or the covariance status when the ordinary/conditional delta method applies. |
+| `result.boundary_summary_diagnostics` | Initially contains `method`. After projected summarization, also includes the selected constraints, multiplier tests, tuning threshold, directional-SD variables, draw count/seed, information audit, time, and any fallback reason. |
+
+The dictionary keys for selected constraints are `active_parameters`,
+`strict_parameters`, and `weak_parameters`; all use the full parameter ordering.
+`multiplier_z` follows `active_parameters`. `selection_threshold` records the
+pointwise active-set tuning rule. `directional_sd_variables` names coefficient
+spreads treated with the norm derivative at zero. `fallback_reason` is `None`
+when the projection succeeds.
+
+Call `beta_summary()` before reading its projection diagnostics. A finite
+`cov_matrix` alone does not establish full boundary uncertainty: it can be
+conditional even when moment SEs use projection. Prediction, WTP, elasticity,
+and membership SEs retain that covariance's conditional interpretation. When
+prices are interior and far from their bounds, projected mode uses regular
+summary inference.
+
+The [boundary-price tutorial](../tutorials/boundary_prices.md) demonstrates this
+API. The [method guide](../boundary_inference.md) cites Geyer, Andrews, Kim–Stone–White,
+Liao–Kroer, and Fang–Santos, and states the assumptions and conditional fallback.
+
 ## Diagnostics
 
 ::: lcl.results.LCLDiagnostics

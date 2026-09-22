@@ -176,6 +176,8 @@ class ConditionalLogit(ChoiceModel):
         )
         optimization_options = resolved_options.optimization
         inference = resolved_options.inference
+        if inference.boundary != "strict":
+            raise ValueError("Conditional/projected boundary inference is supported only for LCL models.")
 
         # If no panels are provided, we substitute cases for panels purely to satisfy
         # the contiguity checks in the ingestion engine.
