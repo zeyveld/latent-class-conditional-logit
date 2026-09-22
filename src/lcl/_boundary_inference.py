@@ -95,6 +95,18 @@ def boundary_covariance(
     latent[np.ix_(free, free)] = covariance / np.outer(jac[free], jac[free])
     result.inference_status = "conditional_on_boundary" if active.size else "regular"
     result.boundary_summary_diagnostics = {"method": result.inference_status}
+    threshold = _selection_threshold(groups)
+    multiplier_z = _multiplier_statistics(
+        score * data.num_panels, information, meat, active, free, inverse
+    )
+    if result.inference.covariance == "unadjusted" and np.any(multiplier_z > threshold):
+        logger.warning(
+            "A price is selected as strictly binding, suggesting a positive "
+            "population multiplier and misspecification of the constrained model. "
+            "The information equality required by covariance='unadjusted' is "
+            "therefore not justified. Prefer "
+            "covariance='clustered'."
+        )
     # Statistical near-boundaries matter even when a finite-sample estimate
     # is interior. Looking only at numerically binding prices would miss these.
     near_boundary = bool(active.size)
@@ -104,14 +116,12 @@ def boundary_covariance(
             -np.asarray(packing.to_structural(beta))[packing.numeraire_idx]
             - packing.numeraire_min_abs
         )
-        near_boundary = bool(
-            np.any(distances <= np.sqrt(np.log(max(groups, 3))) * price_sd)
-        )
+        near_boundary = bool(np.any(distances <= threshold * price_sd))
     if result.inference.boundary == "projected" and near_boundary:
         result._boundary_summary_inputs = dict(
             information=information,
             meat=meat,
-            score=score * data.num_panels,
+            multiplier_z=multiplier_z,
             groups=groups,
             price_indices=price_indices,
         )
@@ -122,6 +132,85 @@ def boundary_covariance(
             len(active),
         )
     return jnp.asarray((latent + latent.T) / 2)
+
+
+def _selection_threshold(groups: int) -> float:
+    """Return the pointwise active-set cutoff ``sqrt(log G)``.
+
+    This is the BIC-type moment-selection constant recommended by Andrews and
+    Soares (2010, Econometrica 78:119): it diverges, so zero-multiplier
+    boundaries are eventually recognized, but more slowly than ``sqrt(G)``.
+    """
+    return float(np.sqrt(np.log(max(groups, 3))))
+
+
+def _multiplier_statistics(
+    total_score: Float64[np.ndarray, "all_params"],
+    information: Float64[np.ndarray, "all_params all_params"],
+    meat: Float64[np.ndarray, "all_params all_params"],
+    active: Integer[np.ndarray, "binding_prices"],
+    free: Integer[np.ndarray, "free_params"],
+    free_inverse_information: Float64[np.ndarray, "free_params free_params"],
+) -> Float64[np.ndarray, "binding_prices"]:
+    """Standardize each estimated KKT multiplier by its own sampling SD.
+
+    With binding prices ``A`` held at the bound and the free coordinates ``F``
+    re-optimized, the multiplier ``S_A(theta_hat)`` is to first order the
+    nuisance-adjusted score ``S_A - I_AF I_FF^{-1} S_F``. Its sandwich variance,
+    rather than the raw score variance ``B_AA``, is the scale of a robust
+    Lagrange-multiplier statistic on this fixed face. Under information equality
+    the raw variance overstates it; with misspecification or clustering the
+    adjustment can increase or decrease it. With weak boundaries this is a
+    selection scale, not the unconditional SD of the constrained multiplier.
+    """
+    if not active.size:
+        return np.empty(0)
+    # Rows map centered structural scores to first-order multiplier changes.
+    loading = np.zeros((active.size, len(total_score)))
+    loading[np.arange(active.size), active] = 1.0
+    loading[:, free] = -information[np.ix_(active, free)] @ free_inverse_information
+    variance = np.sum((loading @ meat) * loading, axis=1)
+    return total_score[active] / np.sqrt(np.maximum(variance, np.finfo(float).tiny))
+
+
+def _dual_multipliers(
+    targets: Float64[np.ndarray, "draws weak_prices"],
+    metric: Float64[np.ndarray, "weak_prices weak_prices"],
+) -> Float64[np.ndarray, "draws weak_prices"]:
+    """Solve ``min_{mu >= 0} mu' M mu / 2 - mu' z`` for each row ``z``.
+
+    Zero is optimal exactly when every component of ``z`` is nonpositive, so
+    those rows skip the solver; a single constraint has the closed form
+    ``max(z, 0) / M``. The Cholesky factor doubles as a positive-definiteness
+    check on ``M``.
+    """
+    factor = np.linalg.cholesky((metric + metric.T) / 2)
+    if targets.shape[1] == 1:
+        return np.maximum(targets, 0.0) / metric[0, 0]
+    multipliers = np.zeros_like(targets)
+    rows = np.flatnonzero(np.any(targets > 0.0, axis=1))
+    rhs = solve_triangular(factor, targets[rows].T, lower=True).T
+    for row, target in zip(rows, rhs):
+        multipliers[row] = nnls(factor.T, target, maxiter=20 * targets.shape[1])[0]
+    return multipliers
+
+
+def _project_with_multipliers(
+    draws: Float64[np.ndarray, "draws free_params"],
+    inverse_information: Float64[np.ndarray, "free_params free_params"],
+    constrained: Integer[np.ndarray, "weak_prices"],
+) -> tuple[
+    Float64[np.ndarray, "draws free_params"], Float64[np.ndarray, "draws weak_prices"]
+]:
+    """Project draws onto ``h[A] <= 0`` and return the dual multipliers too."""
+    multipliers = _dual_multipliers(
+        draws[:, constrained],
+        inverse_information[np.ix_(constrained, constrained)],
+    )
+    projected = draws - multipliers @ inverse_information[:, constrained].T
+    if np.max(projected[:, constrained]) > 1e-7 * max(1.0, np.max(abs(draws))):
+        raise ValueError("Boundary projection failed its primal feasibility check.")
+    return projected, multipliers
 
 
 def project_upper_gaussian(
@@ -137,16 +226,7 @@ def project_upper_gaussian(
     indices = np.asarray(constrained, dtype=int)
     if not indices.size:
         return draws.copy()
-    metric = inverse_information[np.ix_(indices, indices)]
-    factor = np.linalg.cholesky((metric + metric.T) / 2)
-    rhs = solve_triangular(factor, draws[:, indices].T, lower=True).T
-    multipliers = np.empty_like(rhs)
-    for row, target in enumerate(rhs):
-        multipliers[row] = nnls(factor.T, target, maxiter=20 * len(indices))[0]
-    projected = draws - multipliers @ inverse_information[:, indices].T
-    if np.max(projected[:, indices]) > 1e-7 * max(1.0, np.max(abs(draws))):
-        raise ValueError("Boundary projection failed its primal feasibility check.")
-    return np.asarray(projected)
+    return _project_with_multipliers(draws, inverse_information, indices)[0]
 
 
 def _normal_draws(
@@ -154,7 +234,12 @@ def _normal_draws(
     draws: int,
     seed: int,
 ) -> Float64[np.ndarray, "draws free_params"]:
-    """Generate centered Gaussian draws without silently repairing indefiniteness."""
+    """Generate independent mean-zero Gaussian draws, rejecting indefiniteness.
+
+    Antithetic pairs can help estimate means but duplicate even directional
+    functionals and can increase noise in the variances needed here. Independent
+    rows also justify the usual ``ddof=1`` sample variance correction.
+    """
     values, vectors = np.linalg.eigh((covariance + covariance.T) / 2)
     tolerance = (
         100 * len(values) * np.finfo(float).eps * max(np.max(abs(values)), 1e-300)
@@ -163,9 +248,8 @@ def _normal_draws(
         raise ValueError("Structural sandwich covariance is not positive semidefinite.")
     root = vectors * np.sqrt(np.maximum(values, 0))
     rng = np.random.default_rng(seed)
-    # Antithetic pairs improve reproducibility of means and boundary masses.
-    normal = rng.normal(size=((draws + 1) // 2, len(values)))
-    return np.asarray(np.concatenate((normal, -normal), axis=0)[:draws] @ root.T)
+    normal = rng.normal(size=(draws, len(values)))
+    return np.asarray(normal @ root.T)
 
 
 def _summary_jacobian(result: LCLResults) -> CoefficientMoments:
@@ -230,9 +314,8 @@ def projected_beta_summary(result: LCLResults) -> pl.DataFrame:
     # Pointwise consistent critical-cone selection: sqrt(log G) diverges but
     # is o(sqrt G). Positive multipliers distinguish strict binding from a
     # zero-gradient boundary. This tuning is recorded, not claimed uniform.
-    threshold = np.sqrt(np.log(max(inputs["groups"], 3)))
-    score_sd = np.sqrt(np.maximum(np.diag(meat), np.finfo(float).tiny))
-    multiplier_z = inputs["score"][active] / score_sd[active]
+    threshold = _selection_threshold(inputs["groups"])
+    multiplier_z = inputs["multiplier_z"]
     strong = active[multiplier_z > threshold]
     free = np.setdiff1d(np.arange(p), strong)
     inverse_array, info = _invert_information(
@@ -241,10 +324,11 @@ def projected_beta_summary(result: LCLResults) -> pl.DataFrame:
     method = "critical_cone_projection"
     fallback = None
     weak: list[int] = []
-    means, variances, shares, jac_mean, jac_var = _summary_jacobian(result)
-    stds = np.sqrt(np.maximum(variances, 0))
+    simulated_dimension = 0
+    moments = _summary_jacobian(result)
+    stds = np.sqrt(np.maximum(moments.variances, 0))
     beta = _structural_betas(result)
-    identified = variances > 1e-12 * np.maximum(np.max(beta**2, axis=1), 1.0)
+    identified = moments.variances > 1e-12 * np.maximum(np.max(beta**2, axis=1), 1.0)
     if info.positive_definite:
         inverse = np.asarray(inverse_array)
         covariance = _sandwich_covariance(
@@ -252,7 +336,9 @@ def projected_beta_summary(result: LCLResults) -> pl.DataFrame:
         )
         unconstrained_sd = np.sqrt(np.maximum(np.diag(covariance), 0))
         positions = {int(index): i for i, index in enumerate(free)}
-        identified &= _separated_spread_mask(stds, shares, covariance, free, threshold)
+        identified &= _separated_spread_mask(
+            stds, moments.shares, covariance, free, threshold
+        )
         distances = -beta[result.model.numeraire_idx] - result.model.numeraire_min_abs
         weak = [
             positions[int(i)]
@@ -261,27 +347,24 @@ def projected_beta_summary(result: LCLResults) -> pl.DataFrame:
             and distances[cls] <= threshold * unconstrained_sd[positions[int(i)]]
         ]
         try:
-            normal = _normal_draws(
+            mean_se, sd_se, simulated_dimension = _projected_moment_errors(
                 covariance,
+                inverse,
+                np.asarray(weak, dtype=int),
+                free,
+                moments,
+                identified,
                 result.inference.boundary_draws,
                 result.inference.boundary_seed,
             )
-            projected = project_upper_gaussian(normal, inverse, weak)
         except (ValueError, RuntimeError, np.linalg.LinAlgError) as error:
             fallback = str(error)
-        if fallback is None:
-            mean_se, sd_se = _propagate_summary_draws(
-                projected,
-                free,
-                p,
-                CoefficientMoments(means, variances, shares, jac_mean, jac_var),
-                identified,
-            )
     else:
         fallback = "Structural information is not positive definite after strict-boundary reduction."
     if fallback is not None:
         method = "conditional_on_boundary_fallback"
         covariance = np.asarray(result.cov_matrix)
+        jac_mean, jac_var = moments.mean_jacobian, moments.variance_jacobian
         mean_se = np.sqrt(
             np.maximum(np.einsum("ip,pq,iq->i", jac_mean, covariance, jac_mean), 0)
         )
@@ -307,6 +390,7 @@ def projected_beta_summary(result: LCLResults) -> pl.DataFrame:
         ],
         draws=result.inference.boundary_draws,
         seed=result.inference.boundary_seed,
+        simulated_dimension=simulated_dimension,
         information=info._asdict(),
         seconds=perf_counter() - started,
     )
@@ -317,7 +401,7 @@ def projected_beta_summary(result: LCLResults) -> pl.DataFrame:
             dict(
                 variable=variable,
                 label=_model_variable_label(result.model, variable),
-                mean=float(means[index]),
+                mean=float(moments.means[index]),
                 mean_se=float(mean_se[index]),
                 sd=float(stds[index]),
                 sd_se=float(sd_se[index]),
@@ -416,28 +500,102 @@ def _separated_spread_mask(
     return separated
 
 
-def _propagate_summary_draws(
-    projected: Float64[np.ndarray, "draws free_params"],
+def _projected_moment_errors(
+    covariance: Float64[np.ndarray, "free_params free_params"],
+    inverse_information: Float64[np.ndarray, "free_params free_params"],
+    weak: Integer[np.ndarray, "weak_prices"],
     free_indices: Integer[np.ndarray, "free_params"],
-    num_params: int,
     moments: CoefficientMoments,
     separated_spread: Bool[np.ndarray, "alt_vars"],
-) -> tuple[Float64[np.ndarray, "alt_vars"], Float64[np.ndarray, "alt_vars"]]:
-    """Propagate joint taste/membership changes through mean and SD derivatives."""
-    full_draws = np.zeros((len(projected), num_params))
-    full_draws[:, free_indices] = projected
-    mean_changes = full_draws @ moments.mean_jacobian.T
-    variance_changes = full_draws @ moments.variance_jacobian.T
-    sd_changes = np.empty_like(mean_changes)
-    standard_deviations = np.sqrt(np.maximum(moments.variances, 0))
-    sd_changes[:, separated_spread] = variance_changes[:, separated_spread] / (
-        2 * standard_deviations[separated_spread]
+    draws: int,
+    seed: int,
+) -> tuple[Float64[np.ndarray, "alt_vars"], Float64[np.ndarray, "alt_vars"], int]:
+    """SDs of first-order mean/SD changes under the projected Gaussian limit.
+
+    The limit is ``h = z - I^{-1}[:, A] mu(z_A)`` with ``z ~ N(0, covariance)``
+    and ``mu`` the dual multipliers of the weak constraints ``A``. Means and
+    separated SDs are linear in ``h``. Write each such functional as
+    ``L z = a z_A + e`` with ``e`` independent of ``z_A`` and hence of ``mu``:
+
+        Var(L h) = Var(e) + Var(a z_A - L I^{-1}[:, A] mu).
+
+    The first term is exact; only the second is simulated, from draws of
+    ``z_A`` alone. Without weak constraints these SEs are therefore the
+    ordinary delta method, free of simulation noise. Functionals with
+    ``L I^{-1}[:, A] = 0`` also retain their exact Gaussian variance, even when
+    their scores correlate with the weak prices. Zero-spread SDs use the
+    directional derivative and are simulated jointly with ``z_A``. Draws have
+    only as many columns as these coordinates, rather than all free parameters
+    unless every free parameter is needed.
+    """
+    positions = {int(index): i for i, index in enumerate(free_indices)}
+    classes = len(moments.shares)
+    stds = np.sqrt(np.maximum(moments.variances, 0))
+    linear = np.vstack(
+        (
+            moments.mean_jacobian[:, free_indices],
+            moments.variance_jacobian[np.ix_(separated_spread, free_indices)]
+            / (2 * stds[separated_spread][:, None]),
+        )
     )
-    for variable in np.flatnonzero(~separated_spread):
-        classes = len(moments.shares)
-        changes = full_draws[:, variable * classes : (variable + 1) * classes]
+    linear_variance = np.sum((linear @ covariance) * linear, axis=1)
+
+    # Free class coordinates of each zero-spread SD; strict prices stay at zero.
+    directional: dict[int, Integer[np.ndarray, "free_classes 2"]] = {}
+    for variable in np.flatnonzero(~separated_spread).tolist():
+        flat = [variable * classes + c for c in range(classes)]
+        directional[variable] = np.array(
+            [(c, positions[i]) for c, i in enumerate(flat) if i in positions],
+            dtype=int,
+        ).reshape(-1, 2)
+    simulated = np.unique(
+        np.concatenate([weak, *(pairs[:, 1] for pairs in directional.values())])
+    ).astype(int)
+    column = {int(index): i for i, index in enumerate(simulated)}
+    projected = normal = (
+        _normal_draws(covariance[np.ix_(simulated, simulated)], draws, seed)
+        if simulated.size
+        else np.zeros((draws, 0))
+    )
+    if weak.size:
+        weak_columns = np.array([column[int(i)] for i in weak])
+        projected, multipliers = _project_with_multipliers(
+            normal, inverse_information[np.ix_(simulated, simulated)], weak_columns
+        )
+        weak_covariance = covariance[np.ix_(weak, weak)]
+        # Standardize before the pseudoinverse so units alone cannot cause a
+        # small, informative price direction to be truncated. A singular score
+        # covariance is allowed; information still must be positive definite.
+        scales = np.sqrt(np.maximum(np.diag(weak_covariance), 0))
+        scales = np.where(scales > 0, scales, 1.0)
+        correlation = (weak_covariance / scales[:, None]) / scales[None, :]
+        regression = ((linear @ covariance[:, weak]) / scales) @ np.linalg.pinv(
+            correlation, hermitian=True
+        )
+        residual_variance = linear_variance - np.sum(
+            (regression @ correlation) * regression, axis=1
+        )
+        loading = linear @ inverse_information[:, weak]
+        affected = np.any(loading != 0, axis=1)
+        adjustment = loading[affected] @ multipliers.T
+        linear_variance[affected] = np.maximum(residual_variance[affected], 0) + np.var(
+            regression[affected] @ (normal[:, weak_columns] / scales).T - adjustment,
+            axis=1,
+            ddof=1,
+        )
+
+    num_vars = len(stds)
+    linear_se = np.sqrt(np.maximum(linear_variance, 0))
+    mean_se = linear_se[:num_vars]
+    sd_se = np.full(num_vars, np.nan)
+    sd_se[separated_spread] = linear_se[num_vars:]
+    for variable, pairs in directional.items():
+        # At equal class tastes, d(SD) is the share-weighted spread of changes.
+        changes = np.zeros((len(projected), classes))
+        changes[:, pairs[:, 0]] = projected[:, [column[int(i)] for i in pairs[:, 1]]]
         average = changes @ moments.shares
-        sd_changes[:, variable] = np.sqrt(
+        spread = np.sqrt(
             np.maximum(((changes - average[:, None]) ** 2) @ moments.shares, 0)
         )
-    return mean_changes.std(axis=0, ddof=1), sd_changes.std(axis=0, ddof=1)
+        sd_se[variable] = spread.std(ddof=1)
+    return mean_se, sd_se, int(simulated.size)

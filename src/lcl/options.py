@@ -274,6 +274,10 @@ class InferenceOptions:
         Boundary modes are LCL-only. They do not repair unidentified mixtures.
     boundary_draws : int, default=2048
         Number of small Gaussian/quadratic-program draws for summary inference.
+        Independent draws cover the weak price constraints and any zero-spread
+        class coefficients. Gaussian residual variances are integrated exactly.
+        When neither is selected, summary SEs equal the delta method without
+        Monte Carlo error and the draws are unused.
     boundary_seed : int, default=0
         Seed for reproducible boundary summary inference.
     """

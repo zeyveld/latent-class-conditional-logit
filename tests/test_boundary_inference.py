@@ -17,10 +17,13 @@ from lcl import (
 )
 from lcl._boundary_inference import (
     project_upper_gaussian,
-    _summary_jacobian,
     _normal_draws,
+    _multiplier_statistics,
+    _projected_moment_errors,
+    _summary_jacobian,
 )
 from lcl._boundary import boundary_kkt_violation, structural_score
+from lcl._boundary_types import CoefficientMoments
 from lcl._case_utils import _diff_unchosen_chosen
 from lcl._polish import em_vars_from_flat
 from lcl._results import LCLResults
@@ -242,10 +245,6 @@ def test_invalid_gaussian_covariance_is_not_silently_repaired():
 
 
 def test_zero_spread_directional_derivative_matches_folded_normal_law():
-    from lcl._boundary_inference import _propagate_summary_draws
-    from lcl._boundary_types import CoefficientMoments
-
-    draws = np.random.default_rng(284).normal(size=(50000, 2))
     moments = CoefficientMoments(
         means=np.array([0.0]),
         variances=np.array([0.0]),
@@ -253,16 +252,216 @@ def test_zero_spread_directional_derivative_matches_folded_normal_law():
         mean_jacobian=np.array([[0.5, 0.5]]),
         variance_jacobian=np.zeros((1, 2)),
     )
-    mean_se, sd_se = _propagate_summary_draws(
-        draws,
+    mean_se, sd_se, dimension = _projected_moment_errors(
+        np.eye(2),
+        np.eye(2),
+        np.array([], dtype=int),
         np.array([0, 1]),
-        2,
         moments,
         np.array([False]),
+        50000,
+        284,
     )
     # At equal tastes, d(SD) = abs(h_0-h_1)/2, rather than division by zero.
-    assert mean_se[0] == pytest.approx(np.sqrt(0.5), abs=0.008)
+    assert mean_se[0] == pytest.approx(np.sqrt(0.5), abs=1e-14)
     assert sd_se[0] == pytest.approx(np.sqrt((1 - 2 / np.pi) / 2), abs=0.008)
+    assert dimension == 2
+
+
+def _synthetic_projection_problem():
+    """Two variables by three classes; class 0 and 1 of variable 0 are weak."""
+    rng = np.random.default_rng(71)
+    root = rng.normal(size=(6, 6))
+    information = root @ root.T + 2 * np.eye(6)
+    inverse = np.linalg.inv(information)
+    meat_root = rng.normal(size=(6, 6))
+    covariance = inverse @ (meat_root @ meat_root.T + np.eye(6)) @ inverse
+    moments = CoefficientMoments(
+        means=np.zeros(2),
+        variances=np.array([0.7, 0.0]),
+        shares=np.array([0.5, 0.3, 0.2]),
+        mean_jacobian=rng.normal(size=(2, 6)),
+        variance_jacobian=rng.normal(size=(2, 6)),
+    )
+    return covariance, inverse, np.array([0, 1]), moments
+
+
+def test_moment_errors_are_exact_delta_method_without_weak_constraints():
+    covariance, inverse, _, moments = _synthetic_projection_problem()
+    separated = np.array([True, True])
+    moments = moments._replace(variances=np.array([0.7, 0.4]))
+    first = _projected_moment_errors(
+        covariance, inverse, np.array([], dtype=int), np.arange(6),
+        moments, separated, 200, 0,
+    )
+    second = _projected_moment_errors(
+        covariance, inverse, np.array([], dtype=int), np.arange(6),
+        moments, separated, 200, 99,
+    )
+    jm, jv = moments.mean_jacobian, moments.variance_jacobian
+    expected_mean = np.sqrt(np.einsum("ip,pq,iq->i", jm, covariance, jm))
+    expected_sd = np.sqrt(np.einsum("ip,pq,iq->i", jv, covariance, jv)) / (
+        2 * np.sqrt(moments.variances)
+    )
+    np.testing.assert_allclose(first[0], expected_mean, rtol=1e-13)
+    np.testing.assert_allclose(first[1], expected_sd, rtol=1e-13)
+    np.testing.assert_array_equal(first[0], second[0])
+    assert first[2] == 0
+
+
+def test_low_dimensional_simulation_matches_full_projection():
+    covariance, inverse, weak, moments = _synthetic_projection_problem()
+    separated = np.array([True, False])
+    mean_se, sd_se, dimension = _projected_moment_errors(
+        covariance, inverse, weak, np.arange(6), moments, separated, 40000, 3
+    )
+    # Brute force: simulate every coordinate and project whole draws.
+    z = np.random.default_rng(8).multivariate_normal(
+        np.zeros(6), covariance, size=400000
+    )
+    h = project_upper_gaussian(z, inverse, weak)
+    shares = moments.shares
+    spread = h[:, 3:] - (h[:, 3:] @ shares)[:, None]
+    expected_mean = (h @ moments.mean_jacobian.T).std(axis=0)
+    expected_sd = [
+        (h @ moments.variance_jacobian[0]).std() / (2 * np.sqrt(0.7)),
+        np.sqrt((spread**2) @ shares).std(),
+    ]
+    np.testing.assert_allclose(mean_se, expected_mean, rtol=0.01)
+    np.testing.assert_allclose(sd_se, expected_sd, rtol=0.015)
+    assert dimension == 5  # two weak prices plus three zero-spread classes
+
+
+def test_unaffected_summary_is_exact_despite_correlated_weak_scores() -> None:
+    covariance = np.array([[1.0, 0.8], [0.8, 1.0]])
+    moments = CoefficientMoments(
+        np.zeros(1), np.ones(1), np.ones(1),
+        np.array([[0.0, 1.0]]), np.array([[0.0, 2.0]]),
+    )
+    # The metric leaves coordinate 1 untouched, even though z_0 and z_1 covary.
+    for seed in (0, 99):
+        mean_se, sd_se, _ = _projected_moment_errors(
+            covariance, np.eye(2), np.array([0]), np.arange(2),
+            moments, np.array([True]), 200, seed,
+        )
+        np.testing.assert_array_equal(mean_se, [1.0])
+        np.testing.assert_array_equal(sd_se, [1.0])
+
+
+@pytest.mark.parametrize("small_variance", [1.0, 1e-20])
+def test_weak_covariance_regression_preserves_small_variance_directions(
+    small_variance: float,
+) -> None:
+    moments = CoefficientMoments(
+        np.zeros(1), np.ones(1), np.ones(1),
+        np.array([[1.0, 0.0]]), np.array([[2.0, 0.0]]),
+    )
+    mean_se, sd_se, _ = _projected_moment_errors(
+        np.diag([small_variance, 1.0]), np.eye(2), np.array([0, 1]),
+        np.arange(2), moments, np.array([True]), 50000, 0,
+    )
+    expected = np.sqrt(small_variance * (0.5 - 1 / (2 * np.pi)))
+    np.testing.assert_allclose(mean_se, [expected], rtol=0.02)
+    np.testing.assert_allclose(sd_se, [expected], rtol=0.02)
+
+
+def test_multiplier_adjustment_can_increase_robust_sampling_variance() -> None:
+    information = np.array([[2.0, 1.0], [1.0, 1.0]])
+    meat = np.array([[1.0, -0.5], [-0.5, 1.0]])
+    statistic = _multiplier_statistics(
+        np.array([1.0, 0.0]), information, meat,
+        np.array([0]), np.array([1]), np.ones((1, 1)),
+    )
+    # The multiplier influence is s_0 - s_1, with variance 3, not raw variance 1.
+    np.testing.assert_allclose(statistic, [1 / np.sqrt(3)])
+
+
+@pytest.mark.parametrize("score_variance", [0.0, 1.0])
+def test_singular_weak_score_covariance_retains_its_gaussian_support(
+    score_variance: float,
+) -> None:
+    moments = CoefficientMoments(
+        np.zeros(1), np.ones(1), np.array([0.5, 0.5]),
+        np.array([[0.5, 0.5]]), np.array([[1.0, 1.0]]),
+    )
+    # Both coordinates are the same Gaussian variable, or identically zero.
+    mean_se, sd_se, _ = _projected_moment_errors(
+        score_variance * np.ones((2, 2)), np.eye(2), np.array([0, 1]),
+        np.arange(2), moments, np.array([True]), 50000, 7,
+    )
+    expected = np.sqrt(score_variance * (0.5 - 1 / (2 * np.pi)))
+    np.testing.assert_allclose(mean_se, [expected], rtol=0.02)
+    np.testing.assert_allclose(sd_se, [expected], rtol=0.02)
+
+
+def test_normal_draws_are_independent_and_reproducible() -> None:
+    draws = _normal_draws(np.eye(2), 200, 17)
+    np.testing.assert_array_equal(draws, _normal_draws(np.eye(2), 200, 17))
+    # Pairing would duplicate every even directional functional, such as a norm.
+    assert not np.allclose(draws[:100], -draws[100:])
+
+
+def test_multiplier_statistic_uses_nuisance_adjusted_score_variance(mixed_boundary):
+    from lcl._analytic_derivatives import _panel_scores_and_hessian
+
+    r = mixed_boundary
+    structural = r._structural_from_latent(r.flat_params)
+    scores, _ = _panel_scores_and_hessian(
+        structural,
+        _diff_unchosen_chosen(r.data),
+        r.data,
+        replace(r._param_packing, numeraire_idx=None),
+    )
+    scores = np.asarray(scores)
+    information = r._boundary_summary_inputs["information"]
+    active = np.asarray(r.boundary_parameter_indices)
+    free = np.setdiff1d(np.arange(r.num_params), active)
+    loading = information[np.ix_(active, free)] @ np.linalg.inv(
+        information[np.ix_(free, free)]
+    )
+    # Per-panel influence of each multiplier: s_A - I_AF I_FF^{-1} s_F.
+    influence = scores[:, active] - scores[:, free] @ loading.T
+    influence -= influence.mean(axis=0)
+    groups = len(scores)
+    variance = (influence**2).sum(axis=0) * groups / (groups - 1)
+    expected = scores[:, active].sum(axis=0) / np.sqrt(variance)
+    np.testing.assert_allclose(
+        r._boundary_summary_inputs["multiplier_z"], expected, rtol=1e-8
+    )
+
+
+def test_strict_only_projection_equals_conditional_delta_method(mixed_boundary):
+    r = mixed_boundary
+    summary = r.beta_summary()
+    assert r.boundary_summary_diagnostics["weak_parameters"] == []
+    moments = _summary_jacobian(r)
+    covariance = np.asarray(r.cov_matrix)
+    jm = moments.mean_jacobian
+    np.testing.assert_allclose(
+        summary["mean_se"].to_numpy(),
+        np.sqrt(np.einsum("ip,pq,iq->i", jm, covariance, jm)),
+        rtol=1e-8,
+    )
+
+
+@pytest.mark.parametrize("boundary", ["conditional", "projected"])
+def test_unadjusted_covariance_warns_when_price_strictly_binds(
+    mixed_boundary: LCLResults, caplog: pytest.LogCaptureFixture, boundary: str,
+):
+    r = mixed_boundary
+    with caplog.at_level("WARNING", logger="lcl._boundary_inference"):
+        LCLResults(
+            r.model,
+            r.em_res,
+            r.data,
+            r.total_recursions,
+            r.converged,
+            InferenceOptions(covariance="unadjusted", boundary=boundary),
+            0.0,
+            observed_score_max=r.observed_score_max,
+            param_packing=r._param_packing,
+        )
+    assert "information equality" in caplog.text
 
 
 def test_interior_projected_mode_agrees_with_regular_covariance():

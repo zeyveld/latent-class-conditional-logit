@@ -95,9 +95,10 @@ class LCLResults:
         when covariance estimation was skipped.
     boundary_summary_diagnostics : dict
         Summary inference method and, after projected :meth:`beta_summary`,
-        active/strict/weak indices, multiplier statistics, selection threshold,
-        directional-SD variables, Gaussian draw count and seed, information
-        diagnostics, elapsed time, and any conditional-fallback reason.
+        active/strict/weak indices, nuisance-adjusted multiplier statistics,
+        selection threshold, directional-SD variables, Gaussian draw count,
+        seed, and simulated dimension, information diagnostics, elapsed time,
+        and any conditional-fallback reason.
     latent_cov_matrix : Float64[Array, "all_params all_params"]
         Covariance in the unconstrained parameterization the optimizer works in.
         This is the matrix the delta method consumes: target functions apply the

@@ -75,10 +75,15 @@ class-weighted coefficient means and SDs when requested at fit time.
 
 The dictionary keys for selected constraints are `active_parameters`,
 `strict_parameters`, and `weak_parameters`; all use the full parameter ordering.
-`multiplier_z` follows `active_parameters`. `selection_threshold` records the
+`multiplier_z` follows `active_parameters`; each entry is an estimated KKT
+multiplier divided by its nuisance-adjusted, fixed-face score SD.
+`selection_threshold` records the
 pointwise active-set tuning rule. `directional_sd_variables` names coefficient
-spreads treated with the norm derivative at zero. `fallback_reason` is `None`
-when the projection succeeds.
+spreads treated with the norm derivative at zero. `simulated_dimension` counts
+the Gaussian coordinates actually simulated; after successful projection, `0`
+means the summary SEs have no Monte Carlo error. It does not establish exact
+finite-sample inference or rule out a conditional fallback.
+`fallback_reason` is `None` when the projection succeeds.
 
 Call `beta_summary()` before reading its projection diagnostics. A finite
 `cov_matrix` alone does not establish full boundary uncertainty: it can be
@@ -89,7 +94,8 @@ summary inference.
 
 The [boundary-price tutorial](../tutorials/boundary_prices.md) demonstrates this
 API. The [method guide](../boundary_inference.md) cites Geyer, Andrews, Kim–Stone–White,
-Liao–Kroer, and Fang–Santos, and states the assumptions and conditional fallback.
+Liao–Kroer, Andrews–Soares, and Fang–Santos, and states the assumptions and
+conditional fallback.
 
 ## Diagnostics
 

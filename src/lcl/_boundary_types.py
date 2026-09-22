@@ -11,7 +11,7 @@ class BoundarySummaryInputs(TypedDict):
 
     information: Float64[np.ndarray, "all_params all_params"]
     meat: Float64[np.ndarray, "all_params all_params"]
-    score: Float64[np.ndarray, "all_params"]
+    multiplier_z: Float64[np.ndarray, "binding_prices"]
     groups: int
     price_indices: Integer[np.ndarray, "classes"]
 
@@ -29,6 +29,7 @@ class BoundarySummaryDiagnostics(TypedDict, total=False):
     directional_sd_variables: list[str]
     draws: int
     seed: int
+    simulated_dimension: int
     information: dict[str, int | float | bool]
     seconds: float
 

@@ -8,6 +8,7 @@ import jax.numpy as jnp
 import numpy as onp
 from jax.ops import segment_sum
 from jaxtyping import Array, ArrayLike, Float64, Integer, Real
+from scipy.linalg import cho_factor, cho_solve
 
 from lcl.options import _resolve_weight_type
 
@@ -45,7 +46,10 @@ def _aggregate_scores(
     ids = jnp.asarray(group_ids)
     if ids.shape[0] != jnp.asarray(scores).shape[0]:
         raise ValueError("Cluster identifiers must align one-to-one with score rows.")
-    return cast(Array, segment_sum(jnp.asarray(scores), ids, num_segments=num_groups))
+    return cast(
+        Float64[Array, "num_groups params"],
+        segment_sum(jnp.asarray(scores), ids, num_segments=num_groups),
+    )
 
 
 def _robust_covariance(
@@ -112,7 +116,9 @@ def _robust_covariance(
     if n < 2:
         raise ValueError("Robust covariance requires at least two score contributions.")
     correction = n / (n - 1) if finite_sample_correction else 1.0
-    return cast(Array, correction * (hess_inv @ inner @ hess_inv))
+    return cast(
+        Float64[Array, "params params"], correction * (hess_inv @ inner @ hess_inv)
+    )
 
 
 class InformationDiagnostics(NamedTuple):
@@ -182,10 +188,8 @@ def _invert_information(
         # solve is both faster than a pseudo-inverse and free of its silent
         # truncation of small singular values.
         try:
-            factor = onp.linalg.cholesky(symmetric)
-            identity = onp.eye(num_params, dtype=onp.float64)
-            forward = onp.linalg.solve(factor, identity)
-            inverse = onp.linalg.solve(factor.T, forward)
+            factor = cho_factor(symmetric, lower=True)
+            inverse = cho_solve(factor, onp.eye(num_params, dtype=onp.float64))
         except onp.linalg.LinAlgError:  # pragma: no cover - guarded by the check
             inverse = onp.linalg.pinv(symmetric, hermitian=True)
         inverse = 0.5 * (inverse + inverse.T)

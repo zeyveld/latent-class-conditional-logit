@@ -65,6 +65,10 @@ fixed. The coefficient summary still reports positive SEs for the population
 price mean and between-class price SD: the other price and estimated membership
 weights remain uncertain. Class numbering can vary across fits.
 
+Here the binding price is strictly binding, so no inequality is left to simulate
+(`simulated_dimension` is `0`). The summary SEs are then the exact delta method
+on the remaining parameters and do not change with `boundary_seed`.
+
 Read both inference labels: `result.inference_status` describes the covariance
 matrix, while `result.beta_summary()["inference_status"]` describes the moment
 SEs. A conditional covariance matrix and projected summary SEs can coexist.
