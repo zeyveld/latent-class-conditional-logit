@@ -32,7 +32,8 @@ Use `newton_decrement_tol` for solver tolerance. Polishing retains its separate
 solver controls also apply to polishing. `FitOptions.score_tol` determines LCL's
 final convergence flag after EM and polishing. The EM stopping flag is separately
 available as `em_criterion_met`. Binding prices additionally undergo a structural
-KKT check: softplus saturation must not conceal a feasible improving direction.
+KKT check: a negative likelihood score at an upper bound still indicates a
+feasible improving direction.
 
 Boundary inference modes and their limits are explicit in the
 [options reference](specification.md#boundary-inference-options-0142) and
@@ -156,3 +157,21 @@ accepted array and sequence forms; ingestion validates values and converts
 numerical designs to 64-bit arrays. Scalar arrays have shape `""`; general
 nonlinear targets retain variable output shapes. Runtime type checking and
 explicit value checks complement each other.
+
+## Coefficient coordinates
+
+Taste coefficients are stored directly in economic units. `NegativeCoefficient`
+enforces `beta <= -min_abs` during optimization. Conditional-logit `init_beta`
+uses those same units; infeasible entries are projected onto their bounds.
+
+`flat_params` and `cov_matrix` use one common layout. For CL, it is the coefficient
+vector in design-column order. For LCL, it is the coefficient matrix in row-major
+(variable, class) order followed by non-baseline membership logits. There is no
+separate transformed parameter vector or covariance. `parameter_names()` labels
+this layout. Gaussian parameter simulation uses unmodified coefficient draws.
+WTP and monetary surplus screen the fitted marginal probability above each
+numeraire bound at 0.001, independently of seed and draw count; shares and
+elasticities omit this denominator screen. `denominator_diagnostics()` reports
+Gaussian probabilities above the configured bound and above zero, denominator
+SEs, and the screening cutoff. This policy does not guarantee finite ratio
+moments or provide boundary-aware uncertainty; see [price optimization](../price_optimization.md).

@@ -47,9 +47,7 @@ def test_two_class_parameter_recovery_up_to_canonical_order() -> None:
     )
 
     assert result.converged
-    np.testing.assert_allclose(
-        np.asarray(result.em_res.structural_betas), true_betas, atol=0.25
-    )
+    np.testing.assert_allclose(np.asarray(result.em_res.betas), true_betas, atol=0.25)
     realized_shares = np.bincount(realized_classes, minlength=2) / len(realized_classes)
     np.testing.assert_allclose(result.em_res.shares, realized_shares, atol=0.12)
 

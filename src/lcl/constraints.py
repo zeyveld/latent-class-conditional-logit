@@ -1,10 +1,4 @@
-"""Parameter constraints and chain-rule helpers.
-
-This module keeps transformations between unconstrained optimizer parameters and
-structural econometric parameters in one place.  Optimizers can then share the
-same forward map, gradient pullback, and Hessian pullback rather than carrying
-parallel copies of derivative logic.
-"""
+"""Negative coefficient specifications and optimizer bounds."""
 
 from __future__ import annotations
 
@@ -13,7 +7,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
-from jax.nn import sigmoid, softplus
+import jax.numpy as jnp
 from jaxtyping import Array, Float64
 
 
@@ -30,8 +24,8 @@ class NegativeCoefficient:
         Name of the variable being constrained.  It may be omitted when the
         object is supplied in a mapping keyed by variable name.
     min_abs : float, default=1e-5
-        Minimum absolute magnitude of the structural coefficient.  The forward
-        transform is ``-(softplus(raw) + min_abs)``.
+        Minimum absolute magnitude of the coefficient, enforced as
+        ``coefficient <= -min_abs``.
     units : str | None, default=None
         Optional human-readable units for summaries and audit reports.
     warn_below : float | None, default=None
@@ -52,7 +46,9 @@ class NegativeCoefficient:
         if self.warn_below is not None and (
             not math.isfinite(self.warn_below) or self.warn_below <= 0
         ):
-            raise ValueError("NegativeCoefficient.warn_below must be finite and positive.")
+            raise ValueError(
+                "NegativeCoefficient.warn_below must be finite and positive."
+            )
 
     def bind(self, variable: str) -> "NegativeCoefficient":
         """Return a copy tied to ``variable``.
@@ -74,198 +70,34 @@ class NegativeCoefficient:
             )
         return replace(self, variable=variable)
 
-    def forward(self, raw: Float64[Array, "..."]) -> Float64[Array, "..."]:
-        """Map unconstrained parameters to negative structural coefficients."""
-        return -(softplus(raw) + self.min_abs)
 
-    def jacobian_diag(self, raw: Float64[Array, "..."]) -> Float64[Array, "..."]:
-        """Return the diagonal Jacobian element of :meth:`forward`."""
-        return -sigmoid(raw)
+@dataclass(frozen=True)
+class NegativeCoefficientBound:
+    """Resolved design-column constraint used by internal numerical kernels.
 
-    def hessian_diag(self, raw: Float64[Array, "..."]) -> Float64[Array, "..."]:
-        """Return the diagonal second derivative of :meth:`forward`."""
-        d1 = self.jacobian_diag(raw)
-        return d1 * (1.0 + d1)
-
-
-def transform_negative_coefficient(
-    latent_params: Float64[Array, "..."],
-    index: int | None,
-    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
-) -> Float64[Array, "..."]:
-    """Apply a negative-coefficient transform at ``index``.
-
-    Parameters
-    ----------
-    latent_params : Array
-        Unconstrained optimizer parameters.  The constrained variable is expected
-        on axis 0, matching the package's ``(variables, classes)`` convention.
-    index : int | None
-        Variable index to constrain.  If ``None``, ``latent_params`` is returned
-        unchanged.
-    min_abs : float, default=1e-5
-        Minimum absolute magnitude for the transformed coefficient.
-
-    Returns
-    -------
-    Array
-        Structural parameters with the selected row constrained negative.
+    Unlike the user-facing specification this holds a column index, not a
+    variable name. ``index=None`` denotes an unconstrained fit. Frozen values
+    are safe static JIT/cache keys.
     """
-    if index is None:
-        return latent_params
-    transformed = NegativeCoefficient(min_abs=min_abs).forward(latent_params[index])
-    return latent_params.at[index].set(transformed)
 
+    index: int | None = None
+    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS
 
-def pullback_negative_gradient(
-    raw_params: Float64[Array, "..."],
-    index: int | None,
-    grad_struct: Float64[Array, "..."],
-    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
-) -> Float64[Array, "..."]:
-    """Pull a structural gradient back to unconstrained parameter space.
+    def upper_bounds(
+        self, params: Float64[Array, "params"], *, width: int = 1
+    ) -> Float64[Array, "params"] | None:
+        """Build structural bounds, repeating a column across packed classes.
 
-    Parameters
-    ----------
-    raw_params : Array
-        Unconstrained optimizer parameters.
-    index : int | None
-        Index of the constrained variable.  If ``None``, ``grad_struct`` is
-        returned unchanged.
-    grad_struct : Array
-        Structural gradient evaluated at the transformed parameters.
-    min_abs : float, default=1e-5
-        Minimum absolute magnitude used by the forward transform.  Must match
-        the value used to produce ``grad_struct``.
-
-    Returns
-    -------
-    Array
-        Gradient in unconstrained parameter space.
-    """
-    if index is None:
-        return grad_struct
-    derivative = NegativeCoefficient(min_abs=min_abs).jacobian_diag(raw_params[index])
-    return grad_struct.at[index].multiply(derivative)
-
-
-def pullback_negative_score_rows(
-    raw_params: Float64[Array, "..."],
-    index: int | None,
-    score_rows: Float64[Array, "..."],
-    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
-) -> Float64[Array, "..."]:
-    """Pull case-level score rows back to unconstrained parameter space.
-
-    Parameters
-    ----------
-    raw_params : Array
-        Unconstrained optimizer parameters.
-    index : int | None
-        Index of the constrained variable.  If ``None``, ``score_rows`` is
-        returned unchanged.
-    score_rows : Array
-        Structural per-observation score contributions.
-    min_abs : float, default=1e-5
-        Minimum absolute magnitude used by the forward transform.  Must match
-        the value used to produce ``score_rows``.
-
-    Returns
-    -------
-    Array
-        Score rows in unconstrained parameter space.
-    """
-    if index is None:
-        return score_rows
-    derivative = NegativeCoefficient(min_abs=min_abs).jacobian_diag(raw_params[index])
-    return score_rows.at[:, index].multiply(derivative)
-
-
-def pullback_negative_hessian(
-    raw_params: Float64[Array, "..."],
-    index: int | None,
-    grad_struct: Float64[Array, "..."],
-    hessian_struct: Float64[Array, "..."],
-    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
-) -> Float64[Array, "..."]:
-    """Pull a structural Hessian back to unconstrained parameter space.
-
-    Parameters
-    ----------
-    raw_params : Array
-        Unconstrained optimizer parameters.
-    index : int | None
-        Index of the constrained variable.  If ``None``, ``hessian_struct`` is
-        returned unchanged.
-    grad_struct : Array
-        Structural gradient evaluated at the transformed parameters.
-    hessian_struct : Array
-        Structural Hessian evaluated at the transformed parameters.
-    min_abs : float, default=1e-5
-        Minimum absolute magnitude used by the forward transform.  Must match
-        the value used to produce ``grad_struct`` and ``hessian_struct``.
-
-    Returns
-    -------
-    Array
-        Hessian with the constrained row and column transformed by the chain rule.
-    """
-    if index is None:
-        return hessian_struct
-    constraint = NegativeCoefficient(min_abs=min_abs)
-    derivative = constraint.jacobian_diag(raw_params[index])
-    hessian = hessian_struct.at[index, :].multiply(derivative)
-    hessian = hessian.at[:, index].multiply(derivative)
-    second_derivative = constraint.hessian_diag(raw_params[index])
-    return hessian.at[index, index].add(grad_struct[index] * second_derivative)
-
-
-def pullback_negative_derivatives(
-    raw_params: Float64[Array, "..."],
-    index: int | None,
-    grad_struct: Float64[Array, "..."],
-    score_rows_struct: Float64[Array, "..."],
-    hessian_struct: Float64[Array, "..."],
-    min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
-) -> tuple[
-    Float64[Array, "..."],
-    Float64[Array, "..."],
-    Float64[Array, "..."],
-]:
-    """Pull gradient, score rows, and Hessian through a negative constraint.
-
-    Parameters
-    ----------
-    raw_params : Array
-        Unconstrained optimizer parameters.
-    index : int | None
-        Index of the constrained variable.
-    grad_struct : Array
-        Structural gradient evaluated at the transformed parameters.
-    score_rows_struct : Array
-        Structural per-observation score contributions.
-    hessian_struct : Array
-        Structural Hessian evaluated at the transformed parameters.
-    min_abs : float, default=1e-5
-        Minimum absolute magnitude used by the forward transform.  Must match
-        the value used to produce the structural derivatives.  The current
-        transform's derivatives do not depend on it, but passing the caller's
-        value keeps the chain rule correct for any constraint whose derivatives
-        do.
-
-    Returns
-    -------
-    tuple[Array, Array, Array]
-        Gradient, score rows, and Hessian in unconstrained parameter space.
-    """
-    grad = pullback_negative_gradient(raw_params, index, grad_struct, min_abs)
-    score_rows = pullback_negative_score_rows(
-        raw_params, index, score_rows_struct, min_abs
-    )
-    hessian = pullback_negative_hessian(
-        raw_params, index, grad_struct, hessian_struct, min_abs
-    )
-    return grad, score_rows, hessian
+        ``width=1`` is a CL or single-class M-step vector. For flat LCL vectors,
+        ``width=num_classes`` selects the row-major beta block while leaving
+        all membership parameters free.
+        """
+        if self.index is None:
+            return None
+        start = self.index * width
+        return (
+            jnp.full_like(params, jnp.inf).at[start : start + width].set(-self.min_abs)
+        )
 
 
 def normalize_negative_constraints(

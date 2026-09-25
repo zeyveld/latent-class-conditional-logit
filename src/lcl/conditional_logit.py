@@ -10,20 +10,18 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import jacrev
 from lcl._typing import CaseWeightsInput, InitialCoefficientsInput, PanelWeightsInput
 from jaxtyping import Array, ArrayLike, Float64, Integer, install_import_hook
 from scipy.stats import norm
 
 # Decorate `@jaxtyped(typechecker=beartype.beartype)`
 with install_import_hook("lcl", "beartype.beartype"):
-    from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS, NegativeCoefficient
-    from lcl._case_utils import (
-        _diff_unchosen_chosen,
-        _loglik_gradient,
-        _loglik_value,
-        _to_structural_betas,
+    from lcl._boundary import BOUNDARY_DISTANCE_TOL, projected_score
+    from lcl.constraints import (
+        DEFAULT_NEGATIVE_MIN_ABS,
+        NegativeCoefficient,
     )
+    from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient, _loglik_value
     from lcl._choice_model import ChoiceModel
     from lcl._diagnostics import LCLDiagnostics
     from lcl._predict_inputs import _aligned_raw_prediction_data
@@ -148,9 +146,9 @@ class ConditionalLogit(ChoiceModel):
             every weight is one.  Survey weights are the common case in household
             panel data, so they are the default.
         init_beta : ArrayLike | None, optional
-            ``(alt_vars,)`` vector in optimizer (latent) coordinates, in expanded
-            design-column order. A constrained numeraire is transformed by
-            ``-(softplus(raw) + numeraire_min_abs)``.
+            ``(alt_vars,)`` vector of economic coefficients in expanded design-column
+            order. The solver projects constrained entries onto their bounds.
+            Omission starts at zero, projected onto those same bounds.
         options : Options | None, optional
             Complete configuration. Conditional logit uses ``optimization``,
             ``inference``, and ``diagnostics.check_collinearity``; it has no EM
@@ -177,7 +175,9 @@ class ConditionalLogit(ChoiceModel):
         optimization_options = resolved_options.optimization
         inference = resolved_options.inference
         if inference.boundary != "strict":
-            raise ValueError("Conditional/projected boundary inference is supported only for LCL models.")
+            raise ValueError(
+                "Conditional/projected boundary inference is supported only for LCL models."
+            )
 
         # If no panels are provided, we substitute cases for panels purely to satisfy
         # the contiguity checks in the ingestion engine.
@@ -262,8 +262,7 @@ class ConditionalLogit(ChoiceModel):
             init_beta_arr,
             args=(diff_unchosen_chosen, weights_arr),
             optimization_options=optimization_options,
-            numeraire_idx=self.numeraire_idx,
-            numeraire_min_abs=self.numeraire_min_abs,
+            negative_bound=self._negative_bound,
             objective_scale=jnp.sum(weights_arr),
         )
 
@@ -291,8 +290,8 @@ class ConditionalLogit(ChoiceModel):
 class CLResults:
     """Post-estimation results and inference container for Conditional Logit.
 
-    Automatically handles the derivation of robust standard errors via the Delta Method
-    if a softplus-constrained numeraire is specified in the model specification.
+    Coefficients, covariance, and prediction derivatives share one parameterization.
+    Ordinary covariance is unavailable when a coefficient bound is binding.
     """
 
     def __init__(
@@ -341,20 +340,15 @@ class CLResults:
         self.data = data_struct
         self.inference = replace(inference)
         self.diagnostics_config = (
-            DiagnosticsOptions() if diagnostics_config is None else replace(diagnostics_config)
+            DiagnosticsOptions()
+            if diagnostics_config is None
+            else replace(diagnostics_config)
         )
         self.has_panels = has_panels
         self.case_weights = jnp.asarray(case_weights)
         self.weight_type = _resolve_weight_type(weight_type)
         self.converged = optim_res.success
-        self.latent_coeff_ = optim_res.params
-
-        # Recover structural parameters if numeraire was applied
-        self.coeff_ = _to_structural_betas(
-            self.latent_coeff_,
-            self.model.numeraire_idx,
-            self.model.numeraire_min_abs,
-        )
+        self.coeff_ = optim_res.params
         self.hess_inv = optim_res.hess_inv
         self.information_diagnostics = optim_res.information_diagnostics
 
@@ -364,7 +358,7 @@ class CLResults:
         # interpretations coincide once a cluster sum has been taken.
         if inference.skip:
             self.hess_inv = jnp.full_like(self.hess_inv, jnp.nan)
-            latent_cov = self.hess_inv
+            covariance = self.hess_inv
         elif inference.covariance in {"clustered", "robust"}:
             cluster_ids, num_groups = self._resolve_cluster_groups(
                 inference,
@@ -383,12 +377,12 @@ class CLResults:
                     cluster_ids,
                     num_groups,
                 )
-                latent_cov = _robust_covariance(
+                covariance = _robust_covariance(
                     self.hess_inv, grad_g, inference.finite_sample_correction
                 )
             else:
                 # Standard Huber-White Robust Standard Errors
-                latent_cov = _robust_covariance(
+                covariance = _robust_covariance(
                     self.hess_inv,
                     optim_res.grad_n,
                     inference.finite_sample_correction,
@@ -396,36 +390,26 @@ class CLResults:
                     weight_type=self.weight_type,
                 )
         else:
-            latent_cov = self.hess_inv
+            covariance = self.hess_inv
 
-        # The public covariance is reported on the same scale as ``coeff_``, so
-        # ``sqrt(diag(cov_matrix))`` reproduces ``stderr``.  ``latent_cov_matrix``
-        # keeps the unconstrained parameterization the delta method and the
-        # parametric bootstrap consume.
-        self.latent_cov_matrix = latent_cov
-        if self.model.numeraire_idx is not None:
-
-            def struct_fn(
-                p: Float64[Array, "alt_vars"],
-            ) -> Float64[Array, "alt_vars"]:
-                """Map latent coefficients to structural coefficients."""
-                return _to_structural_betas(
-                    p, self.model.numeraire_idx, self.model.numeraire_min_abs
-                )
-
-            jac = jacrev(struct_fn)(self.latent_coeff_)
-            struct_cov = jac @ latent_cov @ jac.T
-            self.cov_matrix = 0.5 * (struct_cov + struct_cov.T)
-        else:
-            self.cov_matrix = latent_cov
+        bounds = self.model._negative_bound.upper_bounds(self.coeff_)
+        if (
+            not inference.skip
+            and bounds is not None
+            and bool(jnp.any(self.coeff_ >= bounds - BOUNDARY_DISTANCE_TOL))
+        ):
+            logger.warning(
+                "Ordinary covariance is unavailable at a binding coefficient bound."
+            )
+            covariance = jnp.full_like(covariance, jnp.nan)
+        self.cov_matrix = covariance
         self.stderr = jnp.sqrt(jnp.diag(self.cov_matrix))
 
         self.zvalues = onp.array(self.coeff_ / self.stderr, dtype=onp.float64)
         self.pvalues = 2 * norm.cdf(-onp.abs(self.zvalues))
         if self.model.numeraire_idx is not None:
-            # The softplus transform makes the constrained coefficient strictly
-            # negative by construction, so a test against zero is vacuous: the
-            # null is excluded by the parameterization, not by the data.
+            # Zero is outside the coefficient's allowed range, so there is no
+            # ordinary zero-null test for this parameter.
             self.zvalues[self.model.numeraire_idx] = onp.nan
             self.pvalues[self.model.numeraire_idx] = onp.nan
         self.loglikelihood = -optim_res.neg_loglik
@@ -442,7 +426,13 @@ class CLResults:
         self.grad_n = optim_res.grad_n
         self.observed_score_max = float(
             jnp.max(
-                jnp.abs(jnp.sum(optim_res.grad_n * self.case_weights[:, None], axis=0))
+                jnp.abs(
+                    projected_score(
+                        jnp.sum(optim_res.grad_n * self.case_weights[:, None], axis=0),
+                        self.coeff_,
+                        bounds,
+                    )
+                )
             )
         )
 
@@ -503,8 +493,8 @@ class CLResults:
 
     @property
     def flat_params(self) -> Float64[Array, "alt_vars"]:
-        """Latent parameter vector, aligned with :attr:`latent_cov_matrix`."""
-        return self.latent_coeff_
+        """Coefficient vector, aligned with :attr:`cov_matrix`."""
+        return self.coeff_
 
     @property
     def covariance_available(self) -> bool:
@@ -517,8 +507,8 @@ class CLResults:
         flat_params: Float64[Array, "alt_vars"],
         **kwargs: Any,
     ) -> tuple[Float64[Array, "*output"], Float64[Array, "*output"]]:
-        """Apply the delta method to a function of the latent coefficients."""
-        return apply_delta_method(func, flat_params, self.latent_cov_matrix, **kwargs)
+        """Apply the delta method to a function of the coefficients."""
+        return apply_delta_method(func, flat_params, self.cov_matrix, **kwargs)
 
     def _parametric_bootstrap_se(
         self,
@@ -527,19 +517,25 @@ class CLResults:
         *,
         draws: int = 500,
         seed: int = 0,
+        requires_negative_numeraire: bool = False,
         **kwargs: Any,
     ) -> Float64[Array, "*output"]:
         """Estimate nonlinear standard errors from asymptotic parameter draws."""
         return parametric_bootstrap_se(
             func,
             flat_params,
-            self.latent_cov_matrix,
+            self.cov_matrix,
             draws=draws,
             seed=seed,
+            upper_bounds=(
+                self.model._negative_bound.upper_bounds(flat_params)
+                if requires_negative_numeraire
+                else None
+            ),
             **kwargs,
         )
 
-    def _structural_betas_and_class_probs(
+    def _betas_and_class_probs(
         self,
         flat_params: Float64[Array, "alt_vars"],
         dems: Float64[Array, "panels dem_vars"] | None,
@@ -551,9 +547,7 @@ class CLResults:
         that way lets the counterfactual inference in
         :mod:`lcl._prediction_inference` serve both estimators unchanged.
         """
-        betas = _to_structural_betas(
-            flat_params, self.model.numeraire_idx, self.model.numeraire_min_abs
-        )
+        betas = flat_params
         return betas[:, None], jnp.ones((num_panels, 1), dtype=betas.dtype)
 
     def coefficient_table(self) -> pl.DataFrame:
@@ -652,7 +646,10 @@ class CLResults:
         return self.summarize_betas(num_decimals=num_decimals, show=show)
 
     def loglik(
-        self, data: Any, *, per_case: bool = False,
+        self,
+        data: Any,
+        *,
+        per_case: bool = False,
         weights: str | Mapping[object, float | int] | CaseWeightsInput | None = None,
     ) -> float | pl.DataFrame:
         """Score observed choices with the fitted encoder.
@@ -678,10 +675,15 @@ class CLResults:
         if encoder is None:
             raise ValueError("The fitted data encoder is unavailable.")
         aligned_weights = self.model._resolve_case_weights(
-            data, parsed, weights, cases_col=encoder.cases_col,
+            data,
+            parsed,
+            weights,
+            cases_col=encoder.cases_col,
             panels_col=encoder.panels_col,
         )
-        data_struct, weights_arr, _ = self.model._setup_data(parsed, weights=aligned_weights)
+        data_struct, weights_arr, _ = self.model._setup_data(
+            parsed, weights=aligned_weights
+        )
         differenced = _diff_unchosen_chosen(data_struct)
         log_probabilities, _ = _diff_logit_components(
             differenced.X,
@@ -794,10 +796,14 @@ class CLResults:
         if encoder is None:
             raise ValueError("The fitted data encoder is unavailable.")
         for name, value in (
-            ("alts_col", alts_col), ("cases_col", cases_col), ("panels_col", panels_col)
+            ("alts_col", alts_col),
+            ("cases_col", cases_col),
+            ("panels_col", panels_col),
         ):
             if value is not None and value != getattr(encoder, name):
-                raise ValueError(f"{name} must match the fitted encoder ({getattr(encoder, name)!r}).")
+                raise ValueError(
+                    f"{name} must match the fitted encoder ({getattr(encoder, name)!r})."
+                )
         if any(value is not None for value in (alts_col, cases_col, panels_col)):
             warnings.warn(
                 "alts_col, cases_col, and panels_col are no longer needed by predict(); the "

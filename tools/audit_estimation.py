@@ -27,7 +27,7 @@ from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 def independent_likelihood(result):
     """Score the undifferenced long design with NumPy/SciPy only."""
     data, state = result.data, result.em_res
-    utility = np.asarray(data.X) @ np.asarray(state.structural_betas)
+    utility = np.asarray(data.X) @ np.asarray(state.betas)
     cases = np.asarray(data.cases)
     starts = np.r_[0, np.flatnonzero(np.diff(cases)) + 1]
     maxima = np.maximum.reduceat(utility, starts, axis=0)
@@ -106,7 +106,7 @@ def fit_benchmark(args):
         min_em_increment=float(np.min(np.diff(history))) if len(history) > 1 else None,
         score=float(result.observed_score_max),
         converged=bool(result.converged),
-        betas=np.asarray(result.em_res.structural_betas).tolist(),
+        betas=np.asarray(result.em_res.betas).tolist(),
         thetas=np.asarray(result.em_res.thetas).tolist(),
         shares=np.asarray(result.em_res.shares).tolist(),
         covariance=np.asarray(result.cov_matrix).tolist(),
@@ -121,6 +121,7 @@ def kernel_benchmark(args):
     from lcl._case_utils import _diff_unchosen_chosen
     from lcl._em_alg_startup import _get_starting_vals
     from lcl._em_alg_steps import _compiled_em_step, place_em_vars
+    from lcl.constraints import NegativeCoefficientBound
     from lcl._struct import Data
     from lcl.options import OptimizationOptions
 
@@ -148,7 +149,7 @@ def kernel_benchmark(args):
     jax.block_until_ready(state)
     startup = perf_counter() - start
     state = place_em_vars(state, args.devices)
-    step = _compiled_em_step(c, opt, args.devices, None, 1e-5)
+    step = _compiled_em_step(c, opt, args.devices, NegativeCoefficientBound())
     start = perf_counter()
     compiled = step.lower(state, diff, data).compile()
     compile_time = perf_counter() - start

@@ -114,7 +114,7 @@ def test_market_share_standard_errors_match_finite_differences(fitted) -> None:
     )
     reported = prediction.market_shares()
     expected = _finite_difference_se(
-        market_shares, results.flat_params, results.latent_cov_matrix, **kwargs
+        market_shares, results.flat_params, results.cov_matrix, **kwargs
     )
     onp.testing.assert_allclose(
         reported["std_error"].to_numpy(), expected, rtol=1e-5, atol=1e-12
@@ -125,9 +125,7 @@ def test_market_share_standard_errors_match_finite_differences(fitted) -> None:
 def test_aggregate_elasticities_match_the_row_level_aggregation(fitted) -> None:
     """The differentiable aggregate reproduces the per-row demand-weighted mean."""
     _, _, prediction = fitted
-    aggregate = prediction.aggregate_elasticities("price").sort(
-        ["alts", "target_alts"]
-    )
+    aggregate = prediction.aggregate_elasticities("price").sort(["alts", "target_alts"])
     rows = prediction.elasticities("price").join(
         prediction.predicted_probs.select(["panels", "cases", "alts", "choice_probs"]),
         on=["panels", "cases", "alts"],
@@ -173,10 +171,8 @@ def test_bootstrap_converges_to_the_delta_method_as_curvature_vanishes(
         weight_total=float(onp.asarray(row_weights)[first_case_rows].sum()),
         **prediction._design_kwargs(),
     )
-    shrunk = jnp.asarray(results.latent_cov_matrix) * 1e-4
-    _, delta = apply_delta_method(
-        market_shares, results.flat_params, shrunk, **kwargs
-    )
+    shrunk = jnp.asarray(results.cov_matrix) * 1e-4
+    _, delta = apply_delta_method(market_shares, results.flat_params, shrunk, **kwargs)
     bootstrap = parametric_bootstrap_se(
         market_shares,
         results.flat_params,
@@ -185,9 +181,7 @@ def test_bootstrap_converges_to_the_delta_method_as_curvature_vanishes(
         seed=11,
         **kwargs,
     )
-    onp.testing.assert_allclose(
-        onp.asarray(bootstrap), onp.asarray(delta), rtol=0.05
-    )
+    onp.testing.assert_allclose(onp.asarray(bootstrap), onp.asarray(delta), rtol=0.05)
 
 
 def test_surplus_change_is_signed_and_shares_parameter_uncertainty(fitted) -> None:
@@ -232,9 +226,9 @@ def test_point_estimates_do_not_depend_on_the_uncertainty_method(
         prediction.mean_surplus(se="none")["mean_surplus"][0],
     )
     onp.testing.assert_allclose(
-        counterfactual.mean_surplus_change(prediction, **kwargs)[
-            "mean_surplus_change"
-        ][0],
+        counterfactual.mean_surplus_change(prediction, **kwargs)["mean_surplus_change"][
+            0
+        ],
         counterfactual.mean_surplus_change(prediction, se="none")[
             "mean_surplus_change"
         ][0],
@@ -311,11 +305,9 @@ def test_coarser_clustering_changes_only_the_covariance() -> None:
     cluster_ids = onp.asarray(df.sort("panel")["region"].unique(maintain_order=True))
     grouped = _aggregate_scores(scores, by_region._cluster_ids, len(cluster_ids))
     groups = len(cluster_ids)
-    expected_latent = _symmetrize(
+    expected = _symmetrize(
         (bread @ (grouped.T @ grouped) @ bread) * (groups / (groups - 1))
     )
-    jacobian = jax.jacfwd(by_region._structural_from_latent)(by_region.flat_params)
-    expected = _symmetrize(jacobian @ expected_latent @ jacobian.T)
     onp.testing.assert_allclose(
         onp.asarray(by_region.cov_matrix), onp.asarray(expected), rtol=1e-9, atol=1e-12
     )
@@ -416,9 +408,7 @@ def test_posterior_weighted_standard_errors_respond_to_membership_parameters(
     num_taste_params = results.model.num_classes * len(results.model.case_varnames)
     assert onp.abs(jacobian[:num_taste_params]).max() > 0.0
     assert onp.abs(jacobian[num_taste_params:]).max() > 0.0
-    assert onp.isfinite(
-        posterior.mean_surplus()["std_error"][0]
-    )
+    assert onp.isfinite(posterior.mean_surplus()["std_error"][0])
 
 
 def test_surplus_change_is_normalisation_free_only_at_fixed_class_weights(
@@ -470,7 +460,7 @@ def _mean_surplus_target(flat_params, **kwargs):
 
 def _mean_surplus_change_with_constant(results, baseline, counterfactual, constant):
     """Recompute the mean surplus change with an explicit utility constant."""
-    betas = onp.asarray(results.em_res.structural_betas)
+    betas = onp.asarray(results.em_res.betas)
     alpha = -betas[results.model.numeraire_idx, :]
 
     def mean_surplus(prediction):

@@ -90,7 +90,7 @@ def test_constructor_overrides_survive_spec_resolution(frame, spec, quick_option
     result = model.fit(frame, options=quick_options)
     assert result.model.spec.classes == 3
     assert result._param_packing.numeraire_min_abs == 0.4
-    assert np.all(-np.asarray(result.em_res.structural_betas)[1] >= 0.4)
+    assert np.all(-np.asarray(result.em_res.betas)[1] >= 0.4)
     assert result.model.spec.negative_constraint.warn_below == 100.0
     inherited = lcl.LatentClassConditionalLogit(spec=spec)
     assert inherited.num_classes == 2 and inherited.numeraire_min_abs == 0.01

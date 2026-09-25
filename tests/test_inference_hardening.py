@@ -1,4 +1,4 @@
-"""Tests for rank diagnostics, sandwich conventions, and constraint pullbacks.
+"""Tests for rank diagnostics, sandwich conventions, and coefficient bounds.
 
 These cover the inference-side behaviours that are easy to get silently wrong:
 a pseudo-inverse absorbing a rank deficiency without complaint, two robust
@@ -17,13 +17,6 @@ import pytest
 import lcl  # noqa: F401  (enables x64)
 from lcl.options import FitOptions, InferenceOptions
 from lcl.conditional_logit import ConditionalLogit
-from lcl.constraints import (
-    NegativeCoefficient,
-    pullback_negative_derivatives,
-    pullback_negative_gradient,
-    pullback_negative_hessian,
-    pullback_negative_score_rows,
-)
 from lcl._inference import _invert_information, _robust_covariance
 
 
@@ -204,66 +197,13 @@ def test_clustered_and_unclustered_branches_share_conventions() -> None:
 
 
 # --------------------------------------------------------------------------
-# Constraint pullbacks honour the caller's min_abs
-# --------------------------------------------------------------------------
-@pytest.mark.parametrize("min_abs", [1e-8, 1e-5, 1e-2, 0.5])
-def test_pullbacks_accept_and_use_min_abs(min_abs) -> None:
-    """Each pullback takes ``min_abs`` and applies the matching constraint."""
-    rng = onp.random.default_rng(11)
-    raw = jnp.asarray(rng.normal(size=4))
-    grad = jnp.asarray(rng.normal(size=4))
-    score_rows = jnp.asarray(rng.normal(size=(7, 4)))
-    hessian = jnp.asarray(rng.normal(size=(4, 4)))
-    index = 2
-    constraint = NegativeCoefficient(min_abs=min_abs)
-    jacobian = float(constraint.jacobian_diag(raw[index]))
-    curvature = float(constraint.hessian_diag(raw[index]))
-
-    pulled_grad = pullback_negative_gradient(raw, index, grad, min_abs)
-    assert float(pulled_grad[index]) == pytest.approx(float(grad[index]) * jacobian)
-
-    pulled_rows = pullback_negative_score_rows(raw, index, score_rows, min_abs)
-    onp.testing.assert_allclose(
-        onp.asarray(pulled_rows[:, index]),
-        onp.asarray(score_rows[:, index]) * jacobian,
-        rtol=1e-12,
-    )
-
-    pulled_hess = pullback_negative_hessian(raw, index, grad, hessian, min_abs)
-    expected_diagonal = (
-        float(hessian[index, index]) * jacobian**2 + float(grad[index]) * curvature
-    )
-    assert float(pulled_hess[index, index]) == pytest.approx(expected_diagonal)
-
-    combined = pullback_negative_derivatives(
-        raw, index, grad, score_rows, hessian, min_abs
-    )
-    onp.testing.assert_allclose(onp.asarray(combined[0]), onp.asarray(pulled_grad))
-    onp.testing.assert_allclose(onp.asarray(combined[1]), onp.asarray(pulled_rows))
-    onp.testing.assert_allclose(onp.asarray(combined[2]), onp.asarray(pulled_hess))
-
-
-def test_pullback_min_abs_defaults_are_backward_compatible() -> None:
-    """Omitting ``min_abs`` reproduces the previous default behaviour."""
-    rng = onp.random.default_rng(13)
-    raw = jnp.asarray(rng.normal(size=3))
-    grad = jnp.asarray(rng.normal(size=3))
-    score_rows = jnp.asarray(rng.normal(size=(5, 3)))
-    hessian = jnp.asarray(rng.normal(size=(3, 3)))
-
-    without = pullback_negative_derivatives(raw, 1, grad, score_rows, hessian)
-    with_default = pullback_negative_derivatives(
-        raw, 1, grad, score_rows, hessian, 1e-5
-    )
-    for left, right in zip(without, with_default):
-        onp.testing.assert_array_equal(onp.asarray(left), onp.asarray(right))
 
 
 # --------------------------------------------------------------------------
 # No test statistic for the constrained numeraire
 # --------------------------------------------------------------------------
 def test_numeraire_z_and_p_values_are_suppressed() -> None:
-    """The softplus null is excluded by construction, so no statistic is shown."""
+    """The zero null is excluded by the constraint, so no statistic is shown."""
     df = _choice_frame(seed=7)
     results = ConditionalLogit(numeraire="price").fit(
         df,
@@ -406,18 +346,20 @@ def test_between_class_spread_without_variation_has_no_standard_error() -> None:
         inference=InferenceOptions(covariance="unadjusted"),
     )
     # Force the two classes to coincide, which is the degenerate case.
-    latent = results.em_res.latent_betas.at[:, 1].set(results.em_res.latent_betas[:, 0])
+    betas = results.em_res.betas.at[:, 1].set(results.em_res.betas[:, 0])
     results.em_res = results.em_res._replace(
-        latent_betas=latent,
-        structural_betas=results._param_packing.to_structural(latent),
+        betas=betas,
     )
     results.flat_params = results._pack_params()
     summary = results.beta_summary()
-    assert onp.all(onp.asarray(summary["sd"]) == 0.0)
+    # Weighted centering can leave one rounding unit even for identical tastes.
+    onp.testing.assert_allclose(onp.asarray(summary["sd"]), 0.0, atol=1e-14)
     assert onp.all(onp.isnan(onp.asarray(summary["sd_se"])))
 
 
-def test_the_polish_reaches_a_stationary_point_and_never_lowers_the_likelihood() -> None:
+def test_the_polish_reaches_a_stationary_point_and_never_lowers_the_likelihood() -> (
+    None
+):
     """Newton steps on the observed-data likelihood finish what EM starts."""
     from lcl import ChoiceIds, LCLSpec, NegativeCoefficient
     from lcl import fit as lcl_fit

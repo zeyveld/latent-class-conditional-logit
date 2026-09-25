@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from lcl._case_utils import _diff_unchosen_chosen, _to_structural_betas
+from lcl._case_utils import _diff_unchosen_chosen
 from lcl._demographics import _update_thetas
 from lcl._em_alg_startup import _fit_starting_beta, _get_starting_vals
 from lcl._em_alg_steps import (
@@ -21,6 +21,7 @@ from lcl._em_alg_steps import (
     place_em_vars,
 )
 from lcl._struct import EMVars
+from lcl.constraints import NegativeCoefficientBound
 from lcl.options import FitOptions, OptimizationOptions
 from lcl._polish import aitken_extrapolated_gap, _compiled_polish, POLISH_DECREMENT_TOL
 from lcl._params import ParamPacking
@@ -40,7 +41,10 @@ def test_reused_em_matches_recomputed_estep(dem_vars, numeraire, devices, classe
     opt = OptimizationOptions()
     # Odd counts test dummy-class padding and the final partial likelihood block.
     state = place_em_vars(
-        _get_starting_vals(diff, data, classes, fit, opt, numeraire), devices
+        _get_starting_vals(
+            diff, data, classes, fit, opt, NegativeCoefficientBound(numeraire)
+        ),
+        devices,
     )
 
     @eqx.filter_jit
@@ -48,10 +52,10 @@ def test_reused_em_matches_recomputed_estep(dem_vars, numeraire, devices, classe
         # Original mathematical EM order: independently recompute the E-step,
         # expand all case weights, and then perform both M-steps.
         posterior, weights = _compute_conditional_class_probs(
-            old.structural_betas, old.thetas, old.shares, diff, data
+            old.betas, old.thetas, old.shares, diff, data
         )
-        latent, _ = _update_betas(
-            old.latent_betas, weights, diff, opt, devices, numeraire
+        betas, _ = _update_betas(
+            old.betas, weights, diff, opt, devices, NegativeCoefficientBound(numeraire)
         )
         if data.dems is None:
             shares = posterior.sum(axis=0) / posterior.sum()
@@ -60,21 +64,22 @@ def test_reused_em_matches_recomputed_estep(dem_vars, numeraire, devices, classe
         else:
             thetas, prior, _ = _update_thetas(old.thetas, posterior, data, classes, opt)
             shares = prior.mean(axis=0)
-        structural = _to_structural_betas(latent, numeraire)
-        loglik = _compute_unconditional_loglik(structural, prior, diff, data)
+        loglik = _compute_unconditional_loglik(betas, prior, diff, data)
         posterior, _ = _compute_conditional_class_probs(
-            structural, thetas, shares, diff, data
+            betas, thetas, shares, diff, data
         )
-        return EMVars(latent, structural, thetas, shares, loglik, posterior)
+        return EMVars(betas, thetas, shares, loglik, posterior)
 
     # The cached posterior must already match the actual initialized prior.
     posterior, _ = _compute_conditional_class_probs(
-        state.structural_betas, state.thetas, state.shares, diff, data
+        state.betas, state.thetas, state.shares, diff, data
     )
     np.testing.assert_allclose(state.class_probs_by_panel, posterior, atol=1e-13)
     for _ in range(4):
         expected = reference(state)
-        updated, _ = _em_step(state, diff, data, classes, opt, fit, numeraire)
+        updated, _ = _em_step(
+            state, diff, data, classes, opt, fit, NegativeCoefficientBound(numeraire)
+        )
         for actual, target in zip(jax.tree.leaves(updated), jax.tree.leaves(expected)):
             np.testing.assert_allclose(actual, target, rtol=1e-8, atol=1e-9)
         assert (
@@ -84,22 +89,38 @@ def test_reused_em_matches_recomputed_estep(dem_vars, numeraire, devices, classe
         state = updated
 
 
-def test_startup_and_em_reuse_compilations(caplog):
+@pytest.mark.parametrize("numeraire", [None, 0])
+def test_startup_and_em_reuse_compilations(caplog, numeraire):
     data = _random_panel_data(np.random.default_rng(318), 27, 2, 1)
     diff = _diff_unchosen_chosen(data)
     opt = OptimizationOptions(maxiter=13)
     fit = FitOptions(num_devices=1)
-    state = place_em_vars(_get_starting_vals(diff, data, 2, fit, opt), 1)
+    state = place_em_vars(
+        _get_starting_vals(
+            diff, data, 2, fit, opt, NegativeCoefficientBound(numeraire)
+        ),
+        1,
+    )
     _compiled_em_step.cache_clear()
     caplog.set_level(logging.WARNING, logger="jax._src.interpreters.pxla")
     with jax.log_compiles(True):
         for offset in (0.0, 0.1, 0.2):
-            beta = _fit_starting_beta(diff._replace(X=diff.X + offset), opt, None, 1e-5)
+            beta = _fit_starting_beta(
+                diff._replace(X=diff.X + offset),
+                opt,
+                NegativeCoefficientBound(numeraire),
+            )
             jax.block_until_ready(beta)
         for seed in (31, 32):
             for _ in range(3):
                 state, diagnostics = _em_step(
-                    state, diff, data, 2, opt, replace(fit, seed=seed)
+                    state,
+                    diff,
+                    data,
+                    2,
+                    opt,
+                    replace(fit, seed=seed),
+                    NegativeCoefficientBound(numeraire),
                 )
                 jax.block_until_ready((state, diagnostics))
     messages = [record.getMessage() for record in caplog.records]
@@ -147,7 +168,18 @@ def test_polish_honors_solver_controls(monkeypatch):
     data = _random_panel_data(np.random.default_rng(21), 9, 2, 0)
     diff = _diff_unchosen_chosen(data)
     packing = ParamPacking(2, 2, 0, None)
-    solve = _compiled_polish(packing, 1, 50.0, 7, 0.02, 0.3, True)
+    solve = _compiled_polish(
+        packing,
+        OptimizationOptions(
+            maxiter=1,
+            newton_decrement_tol=POLISH_DECREMENT_TOL,
+            max_step_norm=50.0,
+            line_search_maxiter=7,
+            hessian_damping=0.02,
+            initial_trust_radius=0.3,
+            accept_any_decrease=True,
+        ),
+    )
     params, _ = solve(jnp.zeros(packing.num_params), diff, data, jnp.array(9.0))
     jax.block_until_ready(params)
     assert len(captured) == 1
@@ -159,6 +191,7 @@ def test_polish_honors_solver_controls(monkeypatch):
         damping=0.02,
         initial_trust_radius=0.3,
         accept_any_decrease=True,
+        upper_bounds=None,
     )
 
 

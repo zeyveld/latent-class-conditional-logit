@@ -35,7 +35,7 @@ same `weights` forms; omitting scoring weights gives equal weight to every case.
 
 With `panels_col`, BIC, CAIC, and adjusted BIC use the number of panels as their
 sample size; otherwise they use the number of choice situations. A
-softplus-constrained numeraire does not have an ordinary zero-null p-value, so its
+negatively constrained numeraire does not have an ordinary zero-null p-value, so its
 reported p-value is `NaN`.
 
 `covariance="clustered"` clusters at the panel level when `panels_col` is

@@ -3,11 +3,17 @@
 **Available from 0.1.42.** Start with the [runnable tutorial](tutorials/boundary_prices.md),
 then consult the [options](api/specification.md) and [result contracts](api/latent_class.md#boundary-results-and-diagnostics).
 
-A negative coefficient is `-(softplus(raw) + min_abs)`. At its upper bound,
-the derivative with respect to `raw` vanishes. Consequently, a perfectly useful
-constrained predictive fit can have a singular *latent-coordinate* information
-matrix. A small raw score alone can also conceal a feasible improving direction.
-Neither fact establishes collinearity among product attributes.
+A negative coefficient is stored directly and constrained to
+`beta_price <= -min_abs`. At a binding upper bound, a nonnegative log-likelihood
+score is consistent with optimality: the improving direction is infeasible.
+A negative score still requires moving into the feasible interior. Convergence
+uses this KKT condition, not a transformed or artificially small gradient.
+
+A binding constraint can make ordinary Wald inference invalid even when the
+coefficient information matrix is positive definite. This does not establish
+collinearity among product attributes. See the
+[price optimization investigation](price_optimization.md) for the algorithm,
+literature, JIT checks, and performance measurements.
 
 ```python
 from lcl import InferenceOptions, fit
@@ -21,8 +27,8 @@ result.boundary_summary_diagnostics
 result.diagnostics().print()
 ```
 
-The default `boundary="strict"` preserves the existing requirement for a full
-positive-definite information matrix. `"conditional"` holds numerically binding
+The default `boundary="strict"` requires an interior estimate and a full
+positive-definite information matrix; otherwise covariance is unavailable. `"conditional"` holds numerically binding
 prices fixed. `"projected"` also computes boundary-aware uncertainty for the
 population coefficient means and between-class standard deviations. These modes
 are for LCL; ordinary conditional-logit fits reject the two new modes explicitly.
@@ -231,7 +237,7 @@ the sampling variance.
 Analytic mean/variance Jacobians, including membership terms, agree with JAX
 automatic differentiation. Centered coarser-cluster score products agree with
 explicit panel centering and aggregation. Interior structural covariance agrees
-with the ordinary latent-coordinate calculation at a stationary fit.
+with the ordinary coefficient-coordinate calculation at a stationary fit.
 
 These checks verify implementation identities and synthetic behavior, not
 uniform confidence-interval coverage for arbitrary finite mixtures. In

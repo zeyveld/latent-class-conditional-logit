@@ -42,7 +42,7 @@ summary = results.beta_summary()
 
 | Option | Default | Contract |
 | --- | --- | --- |
-| `boundary` | `"strict"` | Require full latent information; `"conditional"` instead fixes numerically binding prices for covariance; `"projected"` additionally estimates boundary-aware mean/SD uncertainty in `beta_summary()`. |
+| `boundary` | `"strict"` | Require an interior estimate and full positive-definite information; `"conditional"` instead fixes numerically binding prices for covariance; `"projected"` additionally estimates boundary-aware mean/SD uncertainty in `beta_summary()`. |
 | `boundary_draws` | `2048` | Integer, at least 100; Gaussian simulation draws for summaries, with no model refits. |
 | `boundary_seed` | `0` | Nonnegative integer; repeated summary calls use a cached result. |
 

@@ -8,17 +8,14 @@ from equinox import filter_jit
 from jax.nn import softmax
 from jaxtyping import Array, Float64
 
-from lcl.constraints import (
-    DEFAULT_NEGATIVE_MIN_ABS,
-    pullback_negative_derivatives,
-)
-from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
+from lcl.constraints import NegativeCoefficientBound
+from lcl._case_utils import _loglik_gradient, _loglik_value
 from lcl._demographics import _predict_class_membership_probs
 from lcl._em_alg_steps import (
     _compute_em_log_kernels,
     _posterior_and_loglik,
 )
-from lcl._optimize import exact_newton_minimize, newton_kwargs
+from lcl._optimize import exact_newton_minimize, newton_kwargs, scaled_objective
 from lcl.options import FitOptions, OptimizationOptions
 from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
@@ -27,8 +24,7 @@ from lcl._struct import Data, DiffUnchosenChosen, EMVars
 def _fit_starting_beta(
     diff: DiffUnchosenChosen,
     optimization_options: OptimizationOptions,
-    numeraire_idx: int | None,
-    numeraire_min_abs: float,
+    negative_bound: NegativeCoefficientBound,
 ) -> Float64[Array, "alt_vars"]:
     """Fit one starting subset, reusing the executable across equal shapes.
 
@@ -39,26 +35,19 @@ def _fit_starting_beta(
     weights = jnp.ones(diff.num_cases)
     scale = max(diff.num_cases, 1)
 
-    def value(p: Float64[Array, "alt_vars"]) -> Float64[Array, ""]:
-        """Evaluate the mean subset objective."""
-        structural = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-        return _loglik_value(structural, diff, weights) / scale
+    value, derivatives = scaled_objective(_loglik_value, _loglik_gradient, scale)
 
-    def derivatives(p: Float64[Array, "alt_vars"]) -> tuple[Float64[Array, ""], Float64[Array, "alt_vars"], Float64[Array, "alt_vars alt_vars"]]:
-        """Evaluate the mean subset derivatives in latent coordinates."""
-        structural = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-        (val, aux), grad, hess = _loglik_gradient(structural, diff, weights)
-        grad, _, hess = pullback_negative_derivatives(
-            p, numeraire_idx, grad, aux, hess, numeraire_min_abs
-        )
-        return val / scale, grad / scale, hess / scale
-
-    return exact_newton_minimize(
+    initial = jnp.zeros(diff.X.shape[1])
+    state = exact_newton_minimize(
         value,
         derivatives,
-        jnp.zeros(diff.X.shape[1]),
+        initial,
+        diff,
+        weights,
         **newton_kwargs(optimization_options),
-    ).params
+        upper_bounds=negative_bound.upper_bounds(initial),
+    )
+    return state.params
 
 
 def _get_starting_vals(
@@ -67,8 +56,7 @@ def _get_starting_vals(
     num_classes: int,
     fit_options: FitOptions,
     optimization_options: OptimizationOptions,
-    numeraire_idx: int | None = None,
-    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
+    negative_bound: NegativeCoefficientBound = NegativeCoefficientBound(),
 ) -> EMVars:
     """Generate robust initial parameter estimates to seed the EM algorithm.
 
@@ -89,10 +77,8 @@ def _get_starting_vals(
         EM settings containing the reproducible partition seed.
     optimization_options : :class:`~lcl.options.OptimizationOptions`
         Optimization settings for the subset-level Newton routines.
-    numeraire_idx : int | None, optional
-        Column index of the numeraire variable, if applicable.
-    numeraire_min_abs : float, default=1e-5
-        Minimum absolute value imposed on the numeraire coefficient.
+    negative_bound : NegativeCoefficientBound
+        Resolved negative coefficient constraint, or an unconstrained record.
 
     Returns
     -------
@@ -107,25 +93,21 @@ def _get_starting_vals(
         diff_unchosen_chosen, data, num_classes, fit_options
     )
 
-    latent_betas_list = []
+    betas_list = []
 
     for class_diff_unchosen_chosen in diff_unchosen_chosen_by_class:
-        latent_betas_list.append(
+        betas_list.append(
             _fit_starting_beta(
                 class_diff_unchosen_chosen,
                 optimization_options,
-                numeraire_idx,
-                numeraire_min_abs,
+                negative_bound,
             )
         )
 
     # Stack the independently estimated parameter vectors into a (K, C) matrix
-    latent_betas = jnp.column_stack(latent_betas_list)
-    structural_betas = _to_structural_betas(
-        latent_betas, numeraire_idx, numeraire_min_abs
-    )
+    betas = jnp.column_stack(betas_list)
 
-    log_kernels = _compute_em_log_kernels(structural_betas, diff_unchosen_chosen, data)
+    log_kernels = _compute_em_log_kernels(betas, diff_unchosen_chosen, data)
     starting_class_probs_by_panel = softmax(log_kernels, axis=1)
     starting_shares = jnp.mean(starting_class_probs_by_panel, axis=0)
 
@@ -154,8 +136,7 @@ def _get_starting_vals(
     )
 
     return EMVars(
-        latent_betas=latent_betas,
-        structural_betas=structural_betas,
+        betas=betas,
         thetas=thetas,
         shares=starting_shares,
         unconditional_loglik=starting_loglik,

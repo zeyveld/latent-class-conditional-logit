@@ -208,7 +208,7 @@ demographics are treated as fixed for inference.
 
 Aggregate methods support `se="delta"`, `se="bootstrap"`, and `se="none"`.
 Both inference methods use the complete joint parameter covariance and account
-for the negative-price transform, demographic priors, and any Bayesian history
+for coefficient and membership uncertainty, demographic priors, and any Bayesian history
 update. Stored posterior WTP supports both methods.
 
 ```python
@@ -219,10 +219,18 @@ personal.compute_wtp(
 )
 ```
 
-Here “bootstrap” means asymptotic normal parameter simulation in the unconstrained
-parameterization, followed by structural transformation. It is **not** consumer
-resampling and model refitting, and it is not a posterior over estimated model
-parameters. The delta method computes $J\widehat\Sigma J'$. These SEs describe
+Here “bootstrap” means Gaussian simulation of coefficients and membership logits
+using `flat_params` and `cov_matrix`, without clipping or rejecting draws.
+For WTP and monetary surplus, a marginal Gaussian probability greater than
+0.001 above any numeraire bound raises an error before simulation; the screen
+is independent of seed and draw count. `denominator_diagnostics()` reports the
+probabilities above the bound and above zero, plus the denominator SEs and
+cutoff. Shares and elasticities do not use this ratio screen. It is a diagnostic
+policy, not a guarantee of valid ratio moments or coverage. A ratio of Gaussian
+variables generally has no variance; its finite simulation SD can be unstable
+even after this screen. The default delta SE remains the local asymptotic SE.
+It is **not** consumer resampling and model refitting, and it is not a posterior
+over estimated model parameters. The delta method computes $J\widehat\Sigma J'$. These SEs describe
 estimated expected quantities conditional on the supplied design and histories;
 they do not include random future choices, population sampling of prediction
 consumers, class-count selection, or model misspecification.

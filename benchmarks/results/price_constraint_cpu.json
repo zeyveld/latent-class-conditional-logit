@@ -1,0 +1,388 @@
+{
+  "baseline_commit": "24efba17a85d3ee0365864f69a356bf5bdb20499",
+  "notes": "CPU class M-step benchmarks, separate processes, 30 synchronized warm repetitions. Baseline starts are auxiliary coordinates; current starts are economic coefficients. Interior, step, and bound comparisons start at the same economic coefficient (-0.6931571805599453). Default uses zero projected onto the coefficient bound.",
+  "baseline_runs": {
+    "interior": {
+      "source": "/private/tmp/lcl-price-baseline/src",
+      "jax": "0.9.2",
+      "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+      "config": {
+        "source": "/private/tmp/lcl-price-baseline/src",
+        "cases": 10000,
+        "variables": 8,
+        "classes": 4,
+        "repeats": 30,
+        "maxiter": 100,
+        "price_effect": -1.2,
+        "raw_start": 0.0
+      },
+      "cold_seconds": 0.3154087920120219,
+      "warm_median_ms": 10.002646507928148,
+      "warm_p10_ms": 9.925462491810322,
+      "warm_p90_ms": 10.195925309380982,
+      "solver_compilations": 1,
+      "memory": {
+        "argument_size_in_bytes": 2480256,
+        "output_size_in_bytes": 320,
+        "temp_size_in_bytes": 5243288,
+        "alias_size_in_bytes": 0,
+        "total_buffer_bytes": 7723864
+      },
+      "process_peak_rss_bytes": 453853184,
+      "prices": [
+        -1.1952145851453941,
+        -1.1787415499800455,
+        -1.1872747518307953,
+        -1.1693006368867729
+      ],
+      "mean_losses": [
+        0.9831819570830557,
+        0.987213880014643,
+        0.9825031693281664,
+        0.9899174378416467
+      ],
+      "errors": [
+        1.5289275246792087e-07,
+        1.937088186719862e-07,
+        2.408105187278225e-07,
+        1.680995207649326e-07
+      ]
+    },
+    "step": {
+      "source": "/private/tmp/lcl-price-baseline/src",
+      "jax": "0.9.2",
+      "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+      "config": {
+        "source": "/private/tmp/lcl-price-baseline/src",
+        "cases": 10000,
+        "variables": 8,
+        "classes": 4,
+        "repeats": 30,
+        "maxiter": 1,
+        "price_effect": -1.2,
+        "raw_start": 0.0
+      },
+      "cold_seconds": 0.3180077919969335,
+      "warm_median_ms": 4.551707999780774,
+      "warm_p10_ms": 4.409579101775307,
+      "warm_p90_ms": 4.805725302139763,
+      "solver_compilations": 1,
+      "memory": {
+        "argument_size_in_bytes": 2480256,
+        "output_size_in_bytes": 320,
+        "temp_size_in_bytes": 5243288,
+        "alias_size_in_bytes": 0,
+        "total_buffer_bytes": 7723864
+      },
+      "process_peak_rss_bytes": 459292672,
+      "prices": [
+        -1.3177369301119177,
+        -1.28536084213929,
+        -1.3023793991665886,
+        -1.2685963493544752
+      ],
+      "mean_losses": [
+        0.9904796607292113,
+        0.9936261918659088,
+        0.9894394783437237,
+        0.9959028642082642
+      ],
+      "errors": [
+        0.12124341727114425,
+        0.11354480406089372,
+        0.11815333597715866,
+        0.10964022718956815
+      ]
+    },
+    "bound": {
+      "source": "/private/tmp/lcl-price-baseline/src",
+      "jax": "0.9.2",
+      "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+      "config": {
+        "source": "/private/tmp/lcl-price-baseline/src",
+        "cases": 10000,
+        "variables": 8,
+        "classes": 4,
+        "repeats": 30,
+        "maxiter": 100,
+        "price_effect": 0.8,
+        "raw_start": 0.0
+      },
+      "cold_seconds": 0.3856097500101896,
+      "warm_median_ms": 75.72052099567372,
+      "warm_p10_ms": 75.22677080123685,
+      "warm_p90_ms": 76.49049519532127,
+      "solver_compilations": 1,
+      "memory": {
+        "argument_size_in_bytes": 2480256,
+        "output_size_in_bytes": 320,
+        "temp_size_in_bytes": 5243288,
+        "alias_size_in_bytes": 0,
+        "total_buffer_bytes": 7723864
+      },
+      "process_peak_rss_bytes": 457719808,
+      "prices": [
+        -1.0000001486463858e-05,
+        -1.0000001498930545e-05,
+        -1.0000001476760746e-05,
+        -1.0000001480875704e-05
+      ],
+      "mean_losses": [
+        1.283778824211275,
+        1.2844918448333393,
+        1.2810691125412614,
+        1.2850733071989233
+      ],
+      "errors": [
+        8.529185690778174e-07,
+        8.530440241063961e-07,
+        8.552433682151587e-07,
+        8.569081756349706e-07
+      ]
+    }
+  },
+  "before_storage_cleanup": {
+    "source": "/Users/andrewjeffrieszeyveld/Developer/latent-class-conditional-logit/src",
+    "jax": "0.9.2",
+    "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+    "config": {
+      "source": "src",
+      "cases": 10000,
+      "variables": 8,
+      "classes": 4,
+      "repeats": 30,
+      "maxiter": 100,
+      "price_effect": -1.2,
+      "raw_start": 0.0
+    },
+    "cold_seconds": 0.3127963339939015,
+    "warm_median_ms": 12.687562506471295,
+    "warm_p10_ms": 12.473517000034917,
+    "warm_p90_ms": 12.99290410534013,
+    "solver_compilations": 1,
+    "memory": {
+      "argument_size_in_bytes": 2480256,
+      "output_size_in_bytes": 320,
+      "temp_size_in_bytes": 5243304,
+      "alias_size_in_bytes": 0,
+      "total_buffer_bytes": 7723880
+    },
+    "process_peak_rss_bytes": 451362816,
+    "prices": [
+      -1.1952143360837464,
+      -1.1787412012962535,
+      -1.1872743250838254,
+      -1.1693003381236593
+    ],
+    "mean_losses": [
+      0.9831819570830443,
+      0.9872138800146243,
+      0.9825031693281375,
+      0.9899174378416328
+    ],
+    "errors": [
+      1.6994863216004542e-08,
+      1.3328923809690489e-08,
+      1.6062093548476003e-08,
+      1.1438558818458328e-08
+    ]
+  },
+  "direct_coefficient_runs": {
+    "interior": {
+      "source": "/Users/andrewjeffrieszeyveld/Developer/latent-class-conditional-logit/src",
+      "jax": "0.9.2",
+      "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+      "config": {
+        "source": "src",
+        "cases": 10000,
+        "variables": 8,
+        "classes": 4,
+        "repeats": 30,
+        "maxiter": 100,
+        "price_effect": -1.2,
+        "start": -0.6931571805599454
+      },
+      "cold_seconds": 0.30465645900403615,
+      "warm_median_ms": 12.734728996292688,
+      "warm_p10_ms": 12.576417207310442,
+      "warm_p90_ms": 12.898845199379139,
+      "solver_compilations": 1,
+      "memory": {
+        "argument_size_in_bytes": 2480256,
+        "output_size_in_bytes": 320,
+        "temp_size_in_bytes": 5243304,
+        "alias_size_in_bytes": 0,
+        "total_buffer_bytes": 7723880
+      },
+      "process_peak_rss_bytes": 438960128,
+      "prices": [
+        -1.1952143360837464,
+        -1.1787412012962535,
+        -1.1872743250838251,
+        -1.1693003381236593
+      ],
+      "mean_losses": [
+        0.9831819570830443,
+        0.9872138800146243,
+        0.9825031693281375,
+        0.9899174378416328
+      ],
+      "errors": [
+        1.6994863216004542e-08,
+        1.3328923811105454e-08,
+        1.6062093548448382e-08,
+        1.1438558818458328e-08
+      ]
+    },
+    "step": {
+      "source": "/Users/andrewjeffrieszeyveld/Developer/latent-class-conditional-logit/src",
+      "jax": "0.9.2",
+      "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+      "config": {
+        "source": "src",
+        "cases": 10000,
+        "variables": 8,
+        "classes": 4,
+        "repeats": 30,
+        "maxiter": 1,
+        "price_effect": -1.2,
+        "start": -0.6931571805599454
+      },
+      "cold_seconds": 0.29120450001209974,
+      "warm_median_ms": 4.518020497926045,
+      "warm_p10_ms": 4.454195899597835,
+      "warm_p90_ms": 4.6172830945579335,
+      "solver_compilations": 1,
+      "memory": {
+        "argument_size_in_bytes": 2480256,
+        "output_size_in_bytes": 320,
+        "temp_size_in_bytes": 5243304,
+        "alias_size_in_bytes": 0,
+        "total_buffer_bytes": 7723880
+      },
+      "process_peak_rss_bytes": 447791104,
+      "prices": [
+        -1.027496375604909,
+        -1.0175330474208042,
+        -1.0220385121374296,
+        -1.0118087095794546
+      ],
+      "mean_losses": [
+        0.989642519606651,
+        0.9933555824375859,
+        0.9888949144295748,
+        0.995862111363834
+      ],
+      "errors": [
+        0.10974085794738059,
+        0.1071176756798606,
+        0.10918537590409849,
+        0.1054564154126182
+      ]
+    },
+    "bound": {
+      "source": "/Users/andrewjeffrieszeyveld/Developer/latent-class-conditional-logit/src",
+      "jax": "0.9.2",
+      "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+      "config": {
+        "source": "src",
+        "cases": 10000,
+        "variables": 8,
+        "classes": 4,
+        "repeats": 30,
+        "maxiter": 100,
+        "price_effect": 0.8,
+        "start": -0.6931571805599454
+      },
+      "cold_seconds": 0.30702445800125133,
+      "warm_median_ms": 12.729958005365916,
+      "warm_p10_ms": 12.619733292376623,
+      "warm_p90_ms": 12.81358719279524,
+      "solver_compilations": 1,
+      "memory": {
+        "argument_size_in_bytes": 2480256,
+        "output_size_in_bytes": 320,
+        "temp_size_in_bytes": 5243304,
+        "alias_size_in_bytes": 0,
+        "total_buffer_bytes": 7723880
+      },
+      "process_peak_rss_bytes": 445317120,
+      "prices": [
+        -1e-05,
+        -1e-05,
+        -1e-05,
+        -1e-05
+      ],
+      "mean_losses": [
+        1.2837788242105472,
+        1.2844918448326121,
+        1.2810691125405298,
+        1.2850733071981888
+      ],
+      "errors": [
+        5.656049711939109e-11,
+        4.4933647316386114e-11,
+        6.637746633076216e-11,
+        4.696624841680498e-11
+      ]
+    },
+    "default": {
+      "source": "/Users/andrewjeffrieszeyveld/Developer/latent-class-conditional-logit/src",
+      "jax": "0.9.2",
+      "platform": "macOS-27.0-arm64-arm-64bit-Mach-O",
+      "config": {
+        "source": "src",
+        "cases": 10000,
+        "variables": 8,
+        "classes": 4,
+        "repeats": 30,
+        "maxiter": 100,
+        "price_effect": -1.2,
+        "start": 0.0
+      },
+      "cold_seconds": 0.3162395830004243,
+      "warm_median_ms": 15.53987499937648,
+      "warm_p10_ms": 15.405882794584613,
+      "warm_p90_ms": 16.15184970141854,
+      "solver_compilations": 1,
+      "memory": {
+        "argument_size_in_bytes": 2480256,
+        "output_size_in_bytes": 320,
+        "temp_size_in_bytes": 5243304,
+        "alias_size_in_bytes": 0,
+        "total_buffer_bytes": 7723880
+      },
+      "process_peak_rss_bytes": 449183744,
+      "prices": [
+        -1.195214364178282,
+        -1.178741223049454,
+        -1.1872743514396233,
+        -1.1693003566695688
+      ],
+      "mean_losses": [
+        0.983181957083044,
+        0.9872138800146244,
+        0.9825031693281377,
+        0.9899174378416327
+      ],
+      "errors": [
+        2.5968758344675625e-12,
+        1.7360789533235556e-12,
+        2.1732267149619376e-12,
+        1.4191973954088905e-12
+      ]
+    }
+  },
+  "verification": {
+    "full_suite": {
+      "passed": 322,
+      "skipped": 8
+    },
+    "two_cpu_device_em_tests": {
+      "passed": 16
+    },
+    "ruff": "passed",
+    "mypy": "passed",
+    "strict_docs_build": "passed"
+  }
+}

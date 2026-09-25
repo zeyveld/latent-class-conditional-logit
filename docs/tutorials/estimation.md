@@ -68,7 +68,8 @@ shape: (8, 9)
 ## 2. Estimate the model
 
 We estimate three latent classes and treat fare as the numeraire, constraining its
-coefficient to be strictly negative through a softplus reparameterization. Formulaic
+coefficient to satisfy `beta <= -min_abs` during optimization. Coefficients are
+stored and reported directly. Formulaic
 uses familiar Wilkinson-style formulas to construct the utility and membership
 designs:
 

@@ -2,14 +2,13 @@
 
 from types import SimpleNamespace
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import polars as pl
 import pytest
 
 from lcl import InferenceOptions, OptimizationOptions
-from lcl._case_utils import _to_structural_betas
+
 from lcl._encoding import ChoiceDataEncoder
 from lcl._inference import _robust_covariance
 from lcl._prediction import LCLPrediction
@@ -128,14 +127,7 @@ def test_constrained_cl_exposes_structural_covariance() -> None:
         inference=InferenceOptions(covariance="unadjusted"),
     )
 
-    jacobian = jax.jacrev(
-        lambda raw: _to_structural_betas(
-            raw,
-            result.model.numeraire_idx,
-            result.model.numeraire_min_abs,
-        )
-    )(result.latent_coeff_)
-    expected = jacobian @ result.hess_inv @ jacobian.T
+    expected = result.hess_inv
     np.testing.assert_allclose(result.cov_matrix, expected, rtol=1e-10, atol=1e-12)
     np.testing.assert_allclose(result.stderr**2, jnp.diag(result.cov_matrix))
 
@@ -207,7 +199,9 @@ def test_elasticity_uses_original_ids_and_full_formula_chain_rule() -> None:
     assert own == pytest.approx(expected, rel=2e-6, abs=2e-7)
 
 
-def test_conditional_logit_weight_types_share_estimates_and_differ_in_variance() -> None:
+def test_conditional_logit_weight_types_share_estimates_and_differ_in_variance() -> (
+    None
+):
     """Survey and frequency weights change only the sandwich, and only when they vary."""
     data = _synthetic_cl(num_cases=400)
     rng = np.random.default_rng(2)
@@ -233,20 +227,18 @@ def test_conditional_logit_weight_types_share_estimates_and_differ_in_variance()
     assert float(probability.loglikelihood) == pytest.approx(
         float(frequency.loglikelihood)
     )
-    assert not np.allclose(
-        np.asarray(probability.stderr), np.asarray(frequency.stderr)
-    )
+    assert not np.allclose(np.asarray(probability.stderr), np.asarray(frequency.stderr))
 
     # The scores of the weighted objective are w_i s_i, so the probability meat
     # squares the weights.
-    scores = np.asarray(probability.grad_n) * np.asarray(probability.case_weights)[
-        :, None
-    ]
+    scores = (
+        np.asarray(probability.grad_n) * np.asarray(probability.case_weights)[:, None]
+    )
     bread = np.asarray(probability.hess_inv)
     n = scores.shape[0]
     expected = bread @ (scores.T @ scores) @ bread * (n / (n - 1))
     np.testing.assert_allclose(
-        np.asarray(probability.latent_cov_matrix), expected, rtol=1e-10, atol=1e-14
+        np.asarray(probability.cov_matrix), expected, rtol=1e-10, atol=1e-14
     )
 
 
@@ -268,13 +260,8 @@ def test_unweighted_fits_are_identical_under_either_weight_type() -> None:
 
 
 def test_conditional_logit_bootstrap_wtp_respects_the_sign_constraint() -> None:
-    """Ratio draws are taken where the numeraire coefficient cannot change sign.
-
-    Drawing structural coefficients directly puts mass on a positive numeraire,
-    which the softplus parameterization excludes; the ratios that follow are
-    heavy tailed and inflate the bootstrap standard error several fold.
-    """
-    data = _synthetic_cl(seed=31, num_cases=150)
+    """Interior Gaussian simulation agrees with the local delta approximation."""
+    data = _synthetic_cl(seed=31, num_cases=2500)
     result = ConditionalLogit(numeraire="price").fit(
         data,
         alts_col="alt",
@@ -295,18 +282,10 @@ def test_conditional_logit_bootstrap_wtp_respects_the_sign_constraint() -> None:
     assert bootstrap == pytest.approx(delta, rel=0.25)
 
     # The draws themselves stay inside the constrained region.
-    from lcl._case_utils import _to_structural_betas
 
-    covariance = np.asarray(result.latent_cov_matrix)
+    covariance = np.asarray(result.cov_matrix)
     rng = np.random.default_rng(1)
-    draws = np.asarray(result.latent_coeff_) + rng.multivariate_normal(
+    draws = np.asarray(result.coeff_) + rng.multivariate_normal(
         np.zeros(covariance.shape[0]), covariance, size=4000
     )
-    structural = np.asarray(
-        jax.vmap(
-            lambda p: _to_structural_betas(
-                p, result.model.numeraire_idx, result.model.numeraire_min_abs
-            )
-        )(jnp.asarray(draws))
-    )
-    assert np.all(structural[:, result.model.numeraire_idx] < 0.0)
+    assert np.all(draws[:, result.model.numeraire_idx] < 0.0)

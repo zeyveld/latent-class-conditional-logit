@@ -216,8 +216,7 @@ def _fake_em_state(data: Any, num_classes: int, loglik: float) -> EMVars:
     assert data.num_panels is not None
     betas = jnp.zeros((data.num_alt_vars, num_classes))
     return EMVars(
-        latent_betas=betas,
-        structural_betas=betas,
+        betas=betas,
         thetas=None,
         shares=jnp.full(num_classes, 1.0 / num_classes),
         unconditional_loglik=jnp.array(loglik),
@@ -287,9 +286,7 @@ def test_em_stops_on_the_aitken_extrapolated_gap(
     # tolerance, and not before.
     assert steps[-1] * tail_factor <= threshold
     assert steps[-2] * tail_factor > threshold
-    naive_stop = next(
-        index for index, step in enumerate(steps) if step <= threshold
-    )
+    naive_stop = next(index for index, step in enumerate(steps) if step <= threshold)
     if rate > 0.5:
         # A naive log-likelihood-change rule would have stopped strictly earlier,
         # with the geometric tail still outstanding.
@@ -554,7 +551,7 @@ def test_quantile_and_custom_wtp_partitions_have_numeric_bin_order() -> None:
     assert all("of" in label for label in tied["Partition"].unique())
 
 
-def test_param_packing_owns_structural_map_and_flat_layout() -> None:
+def test_param_packing_owns_bounds_and_flat_layout() -> None:
     packing = ParamPacking(
         num_alt_vars=2,
         num_classes=3,
@@ -562,18 +559,19 @@ def test_param_packing_owns_structural_map_and_flat_layout() -> None:
         numeraire_idx=0,
         numeraire_min_abs=0.01,
     )
-    latent_betas = jnp.arange(6.0).reshape(2, 3)
+    betas = jnp.arange(6.0).reshape(2, 3).at[0].set(jnp.array([-0.01, -1.0, -2.0]))
     shares = jnp.array([0.2, 0.3, 0.5])
-    flat = packing.pack(latent_betas, None, shares)
+    flat = packing.pack(betas, None, shares)
     unpacked_betas, unpacked_thetas = packing.unpack(flat)
 
-    assert jnp.array_equal(unpacked_betas, latent_betas)
+    assert jnp.array_equal(unpacked_betas, betas)
     assert unpacked_thetas.shape == (1, 2)
     assert jnp.allclose(
         packing.class_probs(unpacked_thetas, None, 2)[0],
         shares,
     )
-    assert jnp.all(packing.to_structural(latent_betas)[0] <= -0.01)
+    assert jnp.array_equal(packing.upper_bounds()[:3], jnp.full(3, -0.01))
+    assert jnp.all(jnp.isinf(packing.upper_bounds()[3:]))
 
 
 def test_array_demographics_can_be_validated_and_reordered_by_panel_id() -> None:

@@ -3,9 +3,8 @@
 Choice probabilities, market shares, consumer surplus, and elasticities are all
 smooth functions of the estimated coefficients, so the same delta method that
 gives a coefficient its standard error gives them theirs.  Writing each as a
-function of the flat *latent* parameter vector -- with the softplus transform
-applied inside -- lets :mod:`lcl._delta` differentiate through the constraint
-rather than requiring every call site to apply the chain rule by hand.
+function of the flat parameter vector lets :mod:`lcl._delta` use the fitted
+covariance directly.
 
 Aggregates carry standard errors; per-case and per-panel tables do not.  A
 policy conclusion rests on the aggregate, and a Jacobian with one row per
@@ -45,9 +44,7 @@ def _betas_and_class_probs(
     so the delta method and the parametric bootstrap propagate uncertainty
     through the update instead of treating it as a fixed constant.
     """
-    betas, prior = results._structural_betas_and_class_probs(
-        flat_params, dems, num_panels
-    )
+    betas, prior = results._betas_and_class_probs(flat_params, dems, num_panels)
     if past_data is None:
         return betas, prior
     if past_diff_unchosen_chosen is None:
@@ -55,7 +52,7 @@ def _betas_and_class_probs(
     _, thetas = results._unpack_params(flat_params)
     past_prior = results._get_class_probs(thetas, past_data.dems, past_data.num_panels)
     posterior, _ = _compute_conditional_class_probs(
-        structural_betas=betas,
+        betas=betas,
         thetas=thetas if past_data.dems is not None else None,
         shares=jnp.mean(past_prior, axis=0),
         diff_unchosen_chosen=past_diff_unchosen_chosen,
@@ -244,7 +241,9 @@ def normalisation_sensitivity(
     return jnp.sum(per_case * case_weights) / jnp.sum(case_weights)
 
 
-def build_within_case_pairs(cases: Integer[onp.ndarray, "rows"]) -> tuple[Int[onp.ndarray, "pairs"], Int[onp.ndarray, "pairs"]]:
+def build_within_case_pairs(
+    cases: Integer[onp.ndarray, "rows"],
+) -> tuple[Int[onp.ndarray, "pairs"], Int[onp.ndarray, "pairs"]]:
     """Enumerate ordered row pairs within each choice situation.
 
     Elasticities relate the probability of alternative ``j`` to an attribute of

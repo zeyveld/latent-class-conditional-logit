@@ -86,8 +86,7 @@ class EMStepDiagnostics(NamedTuple):
 class EMVars(NamedTuple):
     """Parameters, likelihood, and posterior evaluated at the same EM iterate."""
 
-    latent_betas: Float64[Array, "alt_vars classes"] | None
-    structural_betas: Float64[Array, "alt_vars classes"] | None
+    betas: Float64[Array, "alt_vars classes"] | None
     thetas: Float64[Array, "dem_vars+1 classes-1"] | None
     shares: Float64[Array, "classes"] | None
     unconditional_loglik: Float64[Array, ""]

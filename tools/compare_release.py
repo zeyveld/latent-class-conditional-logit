@@ -200,11 +200,7 @@ def fit_once(
                 optimization_options=OptimizationOptions(maxiter=75, gradient_tol=1e-5),
                 inference=InferenceOptions(covariance="clustered"),
             )
-    parameters = (
-        result.coeff_
-        if model_family == "conditional"
-        else result.em_res.structural_betas
-    )
+    parameters = result.coeff_ if model_family == "conditional" else result.em_res.betas
     jax.block_until_ready(parameters)
     elapsed = perf_counter() - start
     return result, elapsed
@@ -255,9 +251,7 @@ def main() -> None:
             else final_result.em_res.unconditional_loglik
         ),
         "betas": np.asarray(
-            final_result.coeff_
-            if is_conditional
-            else final_result.em_res.structural_betas
+            final_result.coeff_ if is_conditional else final_result.em_res.betas
         ).tolist(),
         "shares": (
             None if is_conditional else np.asarray(final_result.em_res.shares).tolist()

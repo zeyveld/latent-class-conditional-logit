@@ -38,6 +38,10 @@ class OptimizationOptions:
         parameters and approximates :math:`\sqrt{2(f - f^\star)}`, so a value
         of ``1e-5`` on the package's per-observation objective corresponds to
         roughly ``5e-11`` in objective units.
+        With price bounds, this uses structural derivatives, the Newton
+        decrement on free coordinates, and feasible displacement on active
+        coordinates. Outward slopes at an attained upper bound satisfy KKT;
+        inward slopes remain eligible for optimization.
     hessian_damping : float, default=0.0
         Initial diagonal shift used only when the undamped Cholesky solve does
         not produce a finite descent direction.
@@ -267,8 +271,8 @@ class InferenceOptions:
         For LCL models, ``"conditional"`` estimates covariance on the free
         parameter subspace, holding binding negative coefficients fixed.
         This is conditional inference, not the nonnormal sampling distribution
-        of an inequality-constrained estimator. ``"strict"`` retains the full
-        information-matrix requirement. ``"projected"`` additionally uses
+        of an inequality-constrained estimator. ``"strict"`` requires an interior
+        estimate and a positive-definite full information matrix. ``"projected"`` uses
         Gaussian critical-cone simulation for coefficient means and standard
         deviations in ``beta_summary``; other inference remains conditional.
         Boundary modes are LCL-only. They do not repair unidentified mixtures.

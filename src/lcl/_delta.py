@@ -1,11 +1,6 @@
 """Delta-method and parametric-bootstrap inference for functions of the parameters.
 
-Both fitted-model classes expose the same two routines, so a target function
-written once -- a willingness-to-pay ratio, a market share, an aggregate
-elasticity -- gets standard errors from either.  Everything here operates on the
-*latent* parameter vector and its covariance: constrained coefficients reach
-their structural scale inside the target function, so the softplus Jacobian is
-picked up by differentiation rather than applied by hand at each call site.
+Targets, estimates, and covariance all use the same coefficient coordinates.
 """
 
 from __future__ import annotations
@@ -21,6 +16,7 @@ import numpy as onp
 from jax import jacfwd, jacrev
 from jax.tree_util import Partial
 from jaxtyping import Array, Float64
+from scipy.special import ndtr
 
 from lcl._jax_compat import cpu_device, device_put_array_leaves
 
@@ -28,6 +24,33 @@ logger = logging.getLogger(__name__)
 
 NEGATIVE_VARIANCE_RTOL = 1e-8
 """Relative slack allowed on a negative delta-method variance before warning."""
+
+GAUSSIAN_BOUND_PROBABILITY_LIMIT = 1e-3
+"""Per-coordinate screening limit for Gaussian simulation of monetary ratios.
+
+This is a diagnostic policy, not a coverage guarantee or a finite-moment test.
+It is independent of the simulation seed and draw count.
+"""
+
+
+def gaussian_upper_tail_probability(
+    means: Any, variances: Any, upper_bounds: Any
+) -> Float64[onp.ndarray, "..."]:
+    """Return marginal P(X > upper) under the fitted Gaussian approximation.
+
+    A zero-variance coordinate is a point mass, including probability zero at
+    an attained bound. Unavailable or invalid marginal variance returns NaN.
+    """
+    means, variances, upper = onp.broadcast_arrays(
+        onp.asarray(means, dtype=float),
+        onp.asarray(variances, dtype=float),
+        onp.asarray(upper_bounds, dtype=float),
+    )
+    positive = variances > 0.0
+    scale = onp.sqrt(onp.where(positive, variances, 1.0))
+    probability = onp.where(positive, ndtr((means - upper) / scale), means > upper)
+    valid = onp.isfinite(means) & onp.isfinite(variances) & (variances >= 0.0)
+    return onp.where(valid, probability, onp.nan)
 
 
 def _jacobian(
@@ -57,12 +80,12 @@ def apply_delta_method(
     Parameters
     ----------
     func : Callable
-        Target taking the flat latent parameter vector as its only positional
+        Target taking the flat parameter vector as its only positional
         argument and returning a scalar or array.
     flat_params : Float64[Array, "all_params"]
-        Latent parameters at which to evaluate.
+        Coefficient and membership parameters at which to evaluate.
     cov_matrix : Float64[Array, "all_params all_params"]
-        Covariance of ``flat_params``, in the same latent parameterization.
+        Covariance in the same coordinates and ordering as ``flat_params``.
     label : str, default="delta method"
         Name used in diagnostics when a variance comes back negative.
     **kwargs
@@ -118,28 +141,32 @@ def parametric_bootstrap_se(
     *,
     draws: int = 500,
     seed: int = 0,
+    upper_bounds: Float64[Array, "all_params"] | None = None,
     **kwargs: Any,
 ) -> Float64[Array, "..."]:
-    """Estimate standard errors from asymptotic draws of the latent parameters.
+    """Estimate standard errors from Gaussian coefficient draws.
 
-    Draws are taken in the *latent* parameterization and passed through ``func``,
-    which applies the structural transform.  Drawing structural coefficients
-    directly would put mass on the sign-flipped region that the softplus
-    parameterization excludes, and a ratio with such a denominator has no finite
-    variance to estimate.
+    Draws are neither clipped nor rejected. Ratio callers supply bounds for a
+    deterministic marginal crossing-probability check before simulation. This
+    check screens a poor Gaussian approximation; it does not establish finite
+    moments for a ratio of Gaussian variables.
 
     Parameters
     ----------
     func : Callable
-        Target taking the flat latent parameter vector.
+        Target taking the flat parameter vector.
     flat_params : Float64[Array, "all_params"]
-        Latent parameter estimates.
+        Coefficient and membership parameter estimates.
     cov_matrix : Float64[Array, "all_params all_params"]
-        Latent covariance.
+        Coefficient and membership covariance.
     draws : int, default=500
         Number of draws.
     seed : int, default=0
         Reproducible seed.
+    upper_bounds : Float64[Array, "all_params"] | None
+        Optional denominator bounds. Refuse simulation if any marginal crossing
+        probability exceeds GAUSSIAN_BOUND_PROBABILITY_LIMIT (0.001). Smooth
+        quantities without a numeraire denominator should omit this argument.
     **kwargs
         Extra keyword arguments bound into ``func``.
 
@@ -161,9 +188,24 @@ def parametric_bootstrap_se(
     )
     if float(eigenvalues.min()) < -tolerance:
         raise ValueError("The covariance matrix is not positive semidefinite.")
+    parameters = onp.asarray(flat_params, dtype=onp.float64)
+    if upper_bounds is not None:
+        probabilities = gaussian_upper_tail_probability(
+            parameters, onp.maximum(onp.diag(covariance), 0.0), upper_bounds
+        )
+        if onp.any(probabilities > GAUSSIAN_BOUND_PROBABILITY_LIMIT):
+            raise ValueError(
+                "Gaussian denominator bound-crossing probability exceeds "
+                f"{GAUSSIAN_BOUND_PROBABILITY_LIMIT:g} "
+                f"(maximum {float(onp.max(probabilities)):.6g}). "
+                "Gaussian simulation SEs for monetary ratios are unreliable "
+                "near the boundary. Inspect denominator_diagnostics(); use "
+                "se='delta' for the local asymptotic SE, or boundary-aware "
+                "inference or a fitted-model bootstrap as appropriate. "
+                "Changing the seed or draw count does not change this check."
+            )
     root = eigenvectors * onp.sqrt(onp.maximum(eigenvalues, 0.0))[None, :]
     rng = onp.random.default_rng(seed)
-    parameters = onp.asarray(flat_params, dtype=onp.float64)
     standard_normal = rng.standard_normal((draws, parameters.size))
     parameter_draws = parameters + standard_normal @ root.T
     target = Partial(func, **kwargs)

@@ -149,7 +149,7 @@ def scores(prediction, observed):
 def independent(prediction):
     """Evaluate class logit probabilities and logsum welfare in NumPy/SciPy."""
     data = prediction.predict_data
-    beta = np.asarray(prediction.results.em_res.structural_betas)
+    beta = np.asarray(prediction.results.em_res.betas)
     cases = np.asarray(data.cases)
     utilities = np.asarray(data.X) @ beta
     logsum = np.stack(
@@ -212,7 +212,7 @@ def holdout(name, data, train, history, future, utility, demographics):
             abs(surplus - posterior.surplus["surplus"].to_numpy()).max()
         ),
         welfare_10pct_price_increase=welfare.to_dicts()[0],
-        covariance_finite=bool(np.isfinite(result.latent_cov_matrix).all()),
+        covariance_finite=bool(np.isfinite(result.cov_matrix).all()),
         elapsed_seconds=perf_counter() - start,
     )
     # Independent finite-difference parameter gradient for posterior welfare.
@@ -247,7 +247,7 @@ def holdout(name, data, train, history, future, utility, demographics):
             for i in range(params.size)
         ]
     )
-    se = float(np.sqrt(gradient @ np.asarray(result.latent_cov_matrix) @ gradient))
+    se = float(np.sqrt(gradient @ np.asarray(result.cov_matrix) @ gradient))
     output["welfare_se_finite_difference"] = se
     output["welfare_se_error"] = abs(se - welfare["std_error"][0])
     return output

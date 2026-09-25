@@ -2,31 +2,46 @@ from collections.abc import Callable
 from typing import Any, NamedTuple
 
 import jax.numpy as jnp
+from equinox import filter_jit
 from jax import lax
 from jax.scipy.linalg import cho_factor, cho_solve
 from jaxtyping import Array, Bool, Float64, Int
 
-from lcl.constraints import (
-    DEFAULT_NEGATIVE_MIN_ABS,
-    pullback_negative_derivatives,
-)
-from lcl._case_utils import _to_structural_betas
+from lcl.constraints import NegativeCoefficientBound
+
 from lcl._inference import _invert_information
 from lcl.options import OptimizationOptions
 from lcl._struct import OptimizeResult
 
 
+class NewtonDirection(NamedTuple):
+    """Direction and local metric, computed once at each accepted iterate."""
+
+    direction: Float64[Array, "params"]
+    decrement: Float64[Array, ""]
+    diagonal_scale: Float64[Array, "params"]
+    active: Bool[Array, "params"]
+    shift: Float64[Array, ""]
+
+
 class NewtonState(NamedTuple):
+    """Optimizer iterate with its cached direction and convergence diagnostic."""
+
     params: Float64[Array, "params"]
     loss: Float64[Array, ""]
     grad: Float64[Array, "params"]
     hess: Float64[Array, "params params"]
     step_num: int
-    error: Float64[Array, ""]
+    newton: NewtonDirection
     failed: Bool[Array, ""]
     num_fun_eval: Int[Array, ""]
     num_grad_hess_eval: Int[Array, ""]
     trust_radius: Float64[Array, ""]
+
+    @property
+    def error(self) -> Float64[Array, "..."]:
+        """Return the cached projected Newton decrement."""
+        return self.newton.decrement
 
 
 def newton_kwargs(
@@ -60,6 +75,188 @@ def newton_kwargs(
     }
 
 
+def curvature_scaling(
+    hess: Float64[Array, "params params"],
+) -> tuple[Float64[Array, "params params"], Float64[Array, "params"]]:
+    """Symmetrize and standardize local curvature by its absolute diagonal."""
+    symmetric = 0.5 * (hess + hess.T)
+    diagonal = jnp.abs(jnp.diag(symmetric))
+    scale = jnp.sqrt(jnp.where(diagonal > 0.0, diagonal, 1.0))
+    return symmetric / (scale[:, None] * scale[None, :]), scale
+
+
+def projected_active_set(
+    params: Float64[Array, "params"],
+    grad: Float64[Array, "params"],
+    scale: Float64[Array, "params"],
+    upper_bounds: Float64[Array, "params"] | None,
+) -> Bool[Array, "params"]:
+    """Identify near-bound outward slopes in curvature-scaled coordinates.
+
+    The neighborhood shrinks with the projected gradient residual (Bertsekas,
+    1982, eqs. 31--34). An inward slope always releases an attained bound.
+    """
+    if upper_bounds is None:
+        return jnp.zeros_like(grad, dtype=bool)
+    residual = scale * (params - jnp.minimum(params - grad / scale**2, upper_bounds))
+    epsilon = jnp.minimum(0.01, jnp.linalg.norm(residual))
+    return ((upper_bounds - params) * scale <= epsilon) & (grad < 0.0)
+
+
+def _two_metric_hessian(
+    scaled_hess: Float64[Array, "params params"],
+    active: Bool[Array, "params"],
+) -> Float64[Array, "params params"]:
+    """Decouple the active coordinates and give them positive diagonal curvature."""
+    free_pair = (~active)[:, None] & (~active)[None, :]
+    return jnp.where(free_pair, scaled_hess, 0.0) + jnp.diag(
+        active.astype(scaled_hess.dtype)
+    )
+
+
+class RegularizationState(NamedTuple):
+    """Standardized Cholesky solve and its diagonal shift."""
+
+    shift: Float64[Array, ""]
+    direction_scaled: Float64[Array, "params"]
+    attempts: int
+
+
+def regularized_solve(
+    scaled_hess: Float64[Array, "params params"],
+    scaled_grad: Float64[Array, "params"],
+    damping: float,
+) -> RegularizationState:
+    """Try exact Cholesky first, then diagonal shifts until finite descent.
+
+    An exactly zero slope is stationary even if curvature vanishes, as in a
+    zero-mass class. Small nonzero slopes must still solve or report failure.
+    """
+    identity = jnp.eye(scaled_grad.size, dtype=scaled_grad.dtype)
+
+    def solve(shift: Float64[Array, ""]) -> Float64[Array, "params"]:
+        """Solve the shifted standardized system."""
+        return -cho_solve(cho_factor(scaled_hess + identity * shift), scaled_grad)
+
+    zero = jnp.asarray(0.0, dtype=scaled_grad.dtype)
+    initial = RegularizationState(zero, solve(zero), 0)
+    stationary = jnp.all(scaled_grad == 0.0)
+
+    def cond(state: RegularizationState) -> Bool[Array, ""]:
+        """Keep regularizing a nonstationary system without a descent direction."""
+        valid = jnp.all(jnp.isfinite(state.direction_scaled)) & (
+            jnp.dot(scaled_grad, state.direction_scaled) < 0.0
+        )
+        return (~valid) & (~stationary) & (state.attempts < 12)
+
+    def body(state: RegularizationState) -> RegularizationState:
+        """Increase the fallback shift geometrically."""
+        fallback = jnp.maximum(
+            jnp.asarray(damping, dtype=scaled_grad.dtype),
+            jnp.sqrt(jnp.finfo(scaled_grad.dtype).eps),
+        )
+        shift = jnp.where(state.attempts == 0, fallback, state.shift * 10.0)
+        return RegularizationState(shift, solve(shift), state.attempts + 1)
+
+    return lax.while_loop(cond, body, initial)
+
+
+def projected_decrement(
+    params: Float64[Array, "params"],
+    feasible_grad: Float64[Array, "params"],
+    direction: Float64[Array, "params"],
+    active: Bool[Array, "params"],
+    upper_bounds: Float64[Array, "params"] | None,
+) -> Float64[Array, ""]:
+    """Combine free Newton decrease and feasible active-coordinate decrease.
+
+    ``feasible_grad`` omits outward slopes at attained bounds. Only an exactly
+    zero feasible slope can bypass a failed solve; invalid descent otherwise
+    has infinite decrement, independently of the raw gradient's magnitude.
+    """
+    valid = jnp.all(jnp.isfinite(direction)) & (jnp.dot(feasible_grad, direction) < 0)
+    displacement = direction
+    if upper_bounds is not None:
+        displacement = jnp.where(
+            active, jnp.minimum(params + direction, upper_bounds) - params, direction
+        )
+    decrease = -jnp.dot(feasible_grad, displacement)
+    return jnp.where(
+        valid,
+        jnp.sqrt(jnp.maximum(decrease, 0.0)),
+        jnp.where(jnp.all(feasible_grad == 0.0), 0.0, jnp.inf),
+    )
+
+
+def regularized_newton_direction(
+    params: Float64[Array, "params"],
+    grad: Float64[Array, "params"],
+    hess: Float64[Array, "params params"],
+    upper_bounds: Float64[Array, "params"] | None = None,
+    damping: float = 0.0,
+) -> NewtonDirection:
+    """Assemble a scale-equivariant two-metric direction and stopping statistic."""
+    scaled_hess, scale = curvature_scaling(hess)
+    active = projected_active_set(params, grad, scale, upper_bounds)
+    if upper_bounds is not None:
+        scaled_hess = _two_metric_hessian(scaled_hess, active)
+        # Outward motion at an attained bound cannot consume the trust radius.
+        grad = jnp.where(active & (params >= upper_bounds), 0.0, grad)
+    solved = regularized_solve(scaled_hess, grad / scale, damping)
+    direction = solved.direction_scaled / scale
+    decrement = projected_decrement(params, grad, direction, active, upper_bounds)
+    return NewtonDirection(direction, decrement, scale, active, solved.shift)
+
+
+def curvature_step_norm(
+    step: Float64[Array, "params"],
+    hess: Float64[Array, "params params"],
+    newton: NewtonDirection,
+) -> Float64[Array, ""]:
+    """Measure an accepted displacement in the positive metric used by the solve.
+
+    This is sqrt(step' H step) in the unregularized interior. At active bounds
+    it uses the decoupled diagonal block, and when regularized it includes the
+    standardized shift. The raw Hessian can be indefinite in a mixture model.
+    """
+    free_step = jnp.where(newton.active, 0.0, step)
+    scaled_step = newton.diagonal_scale * step
+    squared = (
+        jnp.dot(free_step, hess @ free_step)
+        + jnp.sum(jnp.where(newton.active, scaled_step**2, 0.0))
+        + newton.shift * jnp.dot(scaled_step, scaled_step)
+    )
+    return jnp.sqrt(jnp.maximum(squared, 0.0))
+
+
+def scaled_objective(
+    value_fn: Callable[..., Any],
+    value_grad_hess_fn: Callable[..., Any],
+    scale: int | float | Float64[Array, ""],
+    *,
+    has_aux: bool = True,
+) -> tuple[Callable[..., Any], Callable[..., Any]]:
+    """Normalize a value and its derivatives by the same observational mass.
+
+    By default the derivative kernel returns ``((value, scores), grad, hess)``;
+    use ``has_aux=False`` for a plain ``(value, grad, hess)`` kernel. Construct
+    these closures inside the compiled caller to retain stable JIT cache keys.
+    """
+    divisor = jnp.maximum(scale, 1.0)
+
+    def value(params: Float64[Array, "params"], *args: object) -> Any:
+        """Evaluate the normalized line-search objective."""
+        return value_fn(params, *args) / divisor
+
+    def derivatives(params: Float64[Array, "params"], *args: object) -> Any:
+        """Evaluate all derivatives on the same objective scale."""
+        result, grad, hess = value_grad_hess_fn(params, *args)
+        val = result[0] if has_aux else result
+        return val / divisor, grad / divisor, hess / divisor
+
+    return value, derivatives
+
+
 def exact_newton_minimize(
     value_fn: Callable[..., Float64[Array, ""]],
     value_grad_hess_fn: Callable[
@@ -79,6 +276,7 @@ def exact_newton_minimize(
     initial_trust_radius: float = 1.0,
     line_search_maxiter: int = 40,
     accept_any_decrease: bool = False,
+    upper_bounds: Float64[Array, "params"] | None = None,
 ) -> NewtonState:
     """Minimize a scalar objective with exact Newton steps and Armijo backtracking.
 
@@ -112,6 +310,11 @@ def exact_newton_minimize(
     accept_any_decrease : bool, default=False
         If True, accept a finite step that decreases the objective even when it does
         not satisfy the stricter Armijo sufficient-decrease rule.
+    upper_bounds : Array | None, optional
+        Structural upper bounds (infinity for free coordinates). Uses the
+        two-metric projected Newton method of Bertsekas (1982), with a diagonal
+        metric near binding bounds and the Newton metric on the free block.
+        Masks and linear systems retain their full shape under JIT and batching.
 
     Returns
     -------
@@ -119,94 +322,23 @@ def exact_newton_minimize(
         Final optimizer state containing parameters, value, gradient, Hessian, and
         convergence diagnostics.
     """
+
+    def project(params: Float64[Array, "params"]) -> Float64[Array, "params"]:
+        return params if upper_bounds is None else jnp.minimum(params, upper_bounds)
+
+    init_params = project(init_params)
     init_loss, init_grad, init_hess = value_grad_hess_fn(init_params, *args)
 
-    def regularized_newton_direction(
-        grad: Float64[Array, "params"], hess: Float64[Array, "params params"]
-    ) -> tuple[Float64[Array, "params"], Float64[Array, ""], Float64[Array, "params"]]:
-        """Return a scale-equivariant Newton direction and decrement.
-
-        Cholesky is first attempted on the undamped, symmetrized Hessian.  If it
-        fails, diagonal shifts are applied after standardizing each parameter by
-        the square root of its local curvature.  Under a diagonal reparameterization
-        this standardized system, its shifts, and the resulting decrement are
-        unchanged.
-        """
-        H_sym = 0.5 * (hess + hess.T)
-        diagonal = jnp.abs(jnp.diag(H_sym))
-        diagonal_scale = jnp.sqrt(
-            jnp.where(diagonal > 0.0, diagonal, jnp.ones_like(diagonal))
-        )
-        H_scaled = H_sym / (diagonal_scale[:, None] * diagonal_scale[None, :])
-        grad_scaled = grad / diagonal_scale
-        identity = jnp.eye(grad.shape[0], dtype=grad.dtype)
-
-        class RegularizationState(NamedTuple):
-            shift: Float64[Array, ""]
-            direction_scaled: Float64[Array, "params"]
-            attempts: int
-
-        def solve_scaled(shift: Float64[Array, ""]) -> Float64[Array, "params"]:
-            factor, lower = cho_factor(H_scaled + identity * shift)
-            return -cho_solve((factor, lower), grad_scaled)
-
-        zero = jnp.asarray(0.0, dtype=grad.dtype)
-        initial = RegularizationState(zero, solve_scaled(zero), 0)
-
-        # A block with no curvature and no slope -- a class padded out to fill a
-        # device, or one whose posterior mass has collapsed -- is already
-        # stationary.  Escalating diagonal shifts cannot manufacture a strict
-        # descent direction there, so the shift loop must not chase one.
-        stationary = jnp.max(jnp.abs(grad)) <= tol
-
-        def regularization_cond(reg_state: RegularizationState) -> Bool[Array, ""]:
-            direction = reg_state.direction_scaled / diagonal_scale
-            valid = jnp.all(jnp.isfinite(direction)) & (jnp.dot(grad, direction) < 0.0)
-            return (~valid) & (~stationary) & (reg_state.attempts < 12)
-
-        def regularization_body(
-            reg_state: RegularizationState,
-        ) -> RegularizationState:
-            fallback_shift = jnp.maximum(
-                jnp.asarray(damping, dtype=grad.dtype),
-                jnp.sqrt(jnp.finfo(grad.dtype).eps),
-            )
-            shift = jnp.where(
-                reg_state.attempts == 0,
-                fallback_shift,
-                reg_state.shift * 10.0,
-            )
-            return RegularizationState(
-                shift, solve_scaled(shift), reg_state.attempts + 1
-            )
-
-        regularization = lax.while_loop(
-            regularization_cond, regularization_body, initial
-        )
-        direction = regularization.direction_scaled / diagonal_scale
-        valid = jnp.all(jnp.isfinite(direction)) & (jnp.dot(grad, direction) < 0.0)
-        # Reserve an infinite decrement for a genuine non-descent direction.  A
-        # negligible gradient reports zero so the caller stops rather than
-        # burning the whole iteration budget on zero-length steps.
-        decrement = jnp.where(
-            valid,
-            jnp.sqrt(jnp.maximum(-jnp.dot(grad, direction), 0.0)),
-            jnp.where(
-                stationary,
-                jnp.asarray(0.0, dtype=grad.dtype),
-                jnp.asarray(jnp.inf, dtype=grad.dtype),
-            ),
-        )
-        return direction, decrement, diagonal_scale
-
-    _, init_decrement, _ = regularized_newton_direction(init_grad, init_hess)
+    init_newton = regularized_newton_direction(
+        init_params, init_grad, init_hess, upper_bounds, damping
+    )
     init_state = NewtonState(
         params=init_params,
         loss=init_loss,
         grad=init_grad,
         hess=init_hess,
         step_num=0,
-        error=init_decrement,
+        newton=init_newton,
         failed=jnp.array(False),
         num_fun_eval=jnp.array(0),
         num_grad_hess_eval=jnp.array(1),
@@ -224,14 +356,16 @@ def exact_newton_minimize(
 
     def outer_body(state: NewtonState) -> NewtonState:
         """Run one damped Newton step plus backtracking line search."""
-        newton_direction, decrement, diagonal_scale = regularized_newton_direction(
-            state.grad, state.hess
-        )
+        newton_direction, decrement, diagonal_scale, active, _ = state.newton
         newton_is_descent = jnp.all(jnp.isfinite(newton_direction)) & (
             jnp.dot(state.grad, newton_direction) < 0.0
         )
         # A diagonally preconditioned gradient is the scale-equivariant fallback.
         fallback_direction = -state.grad / (diagonal_scale**2)
+        if upper_bounds is not None:
+            fallback_direction = (
+                project(state.params + fallback_direction) - state.params
+            )
         search_direction = jnp.where(
             newton_is_descent, newton_direction, fallback_direction
         )
@@ -245,6 +379,19 @@ def exact_newton_minimize(
         )
         directional_derivative = jnp.dot(state.grad, search_direction)
 
+        def expected_change(
+            step_size: Float64[Array, ""], params: Float64[Array, "params"]
+        ) -> Float64[Array, ""]:
+            if upper_bounds is None:
+                return 1e-4 * step_size * directional_derivative
+            # Bertsekas (1982), eq. (37): projected active displacement plus
+            # the unprojected free displacement. Simply clipping a dense Newton
+            # step and using ordinary Armijo can fail even for convex quadratics.
+            displacement = jnp.where(
+                active, params - state.params, step_size * search_direction
+            )
+            return 1e-4 * jnp.dot(state.grad, displacement)
+
         class LSState(NamedTuple):
             step_size: Float64[Array, ""]
             params: Float64[Array, "params"]
@@ -253,7 +400,7 @@ def exact_newton_minimize(
 
         def ls_cond(ls_state: LSState) -> Bool[Array, ""]:
             """Continue backtracking until the candidate is finite and acceptable."""
-            expected_improvement = 1e-4 * ls_state.step_size * directional_derivative
+            expected_improvement = expected_change(ls_state.step_size, ls_state.params)
             finite_candidate = jnp.isfinite(ls_state.loss) & jnp.all(
                 jnp.isfinite(ls_state.params)
             )
@@ -268,14 +415,14 @@ def exact_newton_minimize(
         def ls_body(ls_state: LSState) -> LSState:
             """Halve the step size and re-evaluate the line-search candidate."""
             new_step = ls_state.step_size * 0.5
-            new_params = state.params + new_step * search_direction
+            new_params = project(state.params + new_step * search_direction)
 
             new_loss = value_fn(new_params, *args)
 
             return LSState(new_step, new_params, new_loss, ls_state.ls_iter + 1)
 
         # Try the full direction before backtracking.
-        full_params = state.params + search_direction
+        full_params = project(state.params + search_direction)
         full_loss = value_fn(full_params, *args)
 
         init_ls = LSState(
@@ -287,7 +434,7 @@ def exact_newton_minimize(
 
         final_ls = lax.while_loop(ls_cond, ls_body, init_ls)
 
-        expected_improvement = 1e-4 * final_ls.step_size * directional_derivative
+        expected_improvement = expected_change(final_ls.step_size, final_ls.params)
         finite_candidate = jnp.isfinite(final_ls.loss) & jnp.all(
             jnp.isfinite(final_ls.params)
         )
@@ -308,11 +455,18 @@ def exact_newton_minimize(
             operand=None,
         )
 
-        _, new_decrement, _ = regularized_newton_direction(new_grad, new_hess)
+        new_newton = lax.cond(
+            accepted,
+            lambda _: regularized_newton_direction(
+                params, new_grad, new_hess, upper_bounds, damping
+            ),
+            lambda _: state.newton,
+            operand=None,
+        )
 
         # Update the curvature-metric trust radius from agreement between the
         # local quadratic model and the accepted objective change.
-        accepted_step = final_ls.step_size * search_direction
+        accepted_step = params - state.params
         predicted_decrease = -(
             jnp.dot(state.grad, accepted_step)
             + 0.5 * jnp.dot(accepted_step, state.hess @ accepted_step)
@@ -328,8 +482,10 @@ def exact_newton_minimize(
         )
         # The step actually taken is the trust-truncated one, so the
         # "did the step reach the boundary" test must use the truncated length.
-        step_metric = final_ls.step_size * jnp.minimum(
-            direction_norm, state.trust_radius
+        step_metric = jnp.where(
+            newton_is_descent,
+            curvature_step_norm(accepted_step, state.hess, state.newton),
+            jnp.linalg.norm(diagonal_scale * accepted_step),
         )
         contracted_radius = jnp.maximum(0.25 * state.trust_radius, 1e-8)
         expanded_radius = jnp.minimum(2.0 * state.trust_radius, max_step_norm)
@@ -349,7 +505,7 @@ def exact_newton_minimize(
             grad=new_grad,
             hess=new_hess,
             step_num=state.step_num + 1,
-            error=jnp.where(accepted, new_decrement, state.error),
+            newton=new_newton,
             failed=~accepted,
             num_fun_eval=state.num_fun_eval + final_ls.ls_iter + 1,
             num_grad_hess_eval=state.num_grad_hess_eval + accepted.astype(jnp.int32),
@@ -357,6 +513,34 @@ def exact_newton_minimize(
         )
 
     return lax.while_loop(outer_cond, outer_body, init_state)
+
+
+@filter_jit
+def _minimize_kernel(
+    value_fn: Callable[..., Any],
+    value_grad_hess_fn: Callable[..., Any],
+    params: Float64[Array, "params"],
+    args: tuple[object, ...],
+    optimization_options: OptimizationOptions,
+    negative_bound: NegativeCoefficientBound,
+    scale_factor: Float64[Array, ""],
+) -> NewtonState:
+    """Compile the complete structural solve once per static configuration.
+
+    Data, starts, weights, and the normalization scale are dynamic leaves. Local
+    objective closures are created only during tracing, not as fresh JIT cache
+    keys for every standalone fit.
+    """
+    value, derivatives = scaled_objective(value_fn, value_grad_hess_fn, scale_factor)
+
+    return exact_newton_minimize(
+        value,
+        derivatives,
+        params,
+        *args,
+        **newton_kwargs(optimization_options),
+        upper_bounds=negative_bound.upper_bounds(params),
+    )
 
 
 def _minimize(
@@ -372,8 +556,7 @@ def _minimize(
     params: Float64[Array, "params"],
     args: tuple[object, ...],
     optimization_options: OptimizationOptions | None = None,
-    numeraire_idx: int | None = None,
-    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
+    negative_bound: NegativeCoefficientBound = NegativeCoefficientBound(),
     assert_converge: bool = False,
     objective_scale: float | Float64[Array, ""] | None = None,
 ) -> OptimizeResult:
@@ -390,16 +573,14 @@ def _minimize(
     value_grad_hess_fn : Callable
         Objective returning ``((neg_loglik, score_rows), gradient, hessian)``.
     params : Array
-        Initial guess for the unconstrained parameters.
+        Initial coefficient values; the solver projects them onto the bounds.
     args : tuple
         Tuple of static and dynamic arguments (e.g., design matrices, weights)
         required by the objective function.
     optimization_options : :class:`~lcl.options.OptimizationOptions`, optional
         Configuration holding tolerances and maximum iteration limits.
-    numeraire_idx : int | None, optional
-        Column index of the numeraire variable, if bounded to be strictly negative.
-    numeraire_min_abs : float, default=1e-5
-        Minimum absolute value imposed on the numeraire coefficient.
+    negative_bound : NegativeCoefficientBound
+        Resolved negative coefficient constraint, or an unconstrained record.
     assert_converge : bool, default=False
         If True, raises ``RuntimeError`` if the solver fails to reach the
         specified tolerance.
@@ -423,35 +604,14 @@ def _minimize(
         1.0,
     )
 
-    def _value_fn_closure(
-        p: Float64[Array, "params"], *inner_args: object
-    ) -> Float64[Array, ""]:
-        """Evaluate the normalized scalar objective for line search."""
-        p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-        value = value_fn(p_struct, *inner_args)
-        return value / scale_factor
-
-    def _value_grad_hess_closure(
-        p: Float64[Array, "params"], *inner_args: object
-    ) -> tuple[
-        Float64[Array, ""], Float64[Array, "params"], Float64[Array, "params params"]
-    ]:
-        """Evaluate normalized derivatives in unconstrained parameter space."""
-        p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-        (val, score_rows), grad_struct, hessian = value_grad_hess_fn(
-            p_struct, *inner_args
-        )
-        grad, _, hessian = pullback_negative_derivatives(
-            p, numeraire_idx, grad_struct, score_rows, hessian, numeraire_min_abs
-        )
-        return val / scale_factor, grad / scale_factor, hessian / scale_factor
-
-    state = exact_newton_minimize(
-        _value_fn_closure,
-        _value_grad_hess_closure,
+    state = _minimize_kernel(
+        value_fn,
+        value_grad_hess_fn,
         params,
-        *args,
-        **newton_kwargs(optimization_options),
+        args,
+        optimization_options,
+        negative_bound,
+        scale_factor,
     )
     params = state.params
 
@@ -475,13 +635,8 @@ def _minimize(
     if assert_converge and not success:
         raise RuntimeError(message)
 
-    final_eval = value_grad_hess_fn(
-        _to_structural_betas(params, numeraire_idx, numeraire_min_abs), *args
-    )
-    (neg_loglik, grad_n), grad_struct, hessian = final_eval
-    grad, grad_n, hessian = pullback_negative_derivatives(
-        params, numeraire_idx, grad_struct, grad_n, hessian, numeraire_min_abs
-    )
+    final_eval = value_grad_hess_fn(params, *args)
+    (neg_loglik, grad_n), grad, hessian = final_eval
     Hinv, information_diagnostics = _invert_information(
         hessian, label="conditional-logit information matrix"
     )

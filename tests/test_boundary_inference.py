@@ -22,7 +22,7 @@ from lcl._boundary_inference import (
     _projected_moment_errors,
     _summary_jacobian,
 )
-from lcl._boundary import boundary_kkt_violation, structural_score
+from lcl._boundary import boundary_kkt_violation, mean_score
 from lcl._boundary_types import CoefficientMoments
 from lcl._case_utils import _diff_unchosen_chosen
 from lcl._polish import em_vars_from_flat
@@ -132,7 +132,7 @@ def test_coarser_cluster_centering_matches_explicit_score_aggregation(mixed_boun
         cluster_ids=clusters,
         num_clusters=int(clusters.max()) + 1,
     )
-    structural = r._structural_from_latent(r.flat_params)
+    structural = r.flat_params
     scores, _ = _panel_scores_and_hessian(
         structural,
         _diff_unchosen_chosen(r.data),
@@ -175,7 +175,7 @@ def test_summary_jacobian_includes_membership_and_matches_autodiff(mixed_boundar
     r = mixed_boundary
     means, variances, _, dm, dv = _summary_jacobian(r)
     packing = replace(r._param_packing, numeraire_idx=None)
-    structural = r._structural_from_latent(r.flat_params)
+    structural = r.flat_params
 
     def moments(p):
         beta, theta = packing.unpack(p)
@@ -191,15 +191,16 @@ def test_summary_jacobian_includes_membership_and_matches_autodiff(mixed_boundar
 
 
 @pytest.mark.parametrize("skip", [False, True])
-def test_saturated_wrong_boundary_is_not_convergence_even_with_skipped_inference(
-    mixed_boundary, skip,
+def test_wrong_boundary_is_not_convergence_even_with_skipped_inference(
+    mixed_boundary,
+    skip,
 ):
     r = mixed_boundary
     beta, theta = r._param_packing.unpack(r.flat_params)
-    beta = beta.at[0, :].set(-100.0)
+    beta = beta.at[0, :].set(-r.model.numeraire_min_abs)
     flat = jnp.concatenate((beta.ravel(), theta.ravel()))
     diff = _diff_unchosen_chosen(r.data)
-    score = structural_score(flat, diff, r.data, r._param_packing)
+    score = mean_score(flat, diff, r.data, r._param_packing)
     assert boundary_kkt_violation(score, [0, 1]) > 0.01
     state = em_vars_from_flat(flat, diff, r.data, r._param_packing)
     invalid = LCLResults(
@@ -291,12 +292,24 @@ def test_moment_errors_are_exact_delta_method_without_weak_constraints():
     separated = np.array([True, True])
     moments = moments._replace(variances=np.array([0.7, 0.4]))
     first = _projected_moment_errors(
-        covariance, inverse, np.array([], dtype=int), np.arange(6),
-        moments, separated, 200, 0,
+        covariance,
+        inverse,
+        np.array([], dtype=int),
+        np.arange(6),
+        moments,
+        separated,
+        200,
+        0,
     )
     second = _projected_moment_errors(
-        covariance, inverse, np.array([], dtype=int), np.arange(6),
-        moments, separated, 200, 99,
+        covariance,
+        inverse,
+        np.array([], dtype=int),
+        np.arange(6),
+        moments,
+        separated,
+        200,
+        99,
     )
     jm, jv = moments.mean_jacobian, moments.variance_jacobian
     expected_mean = np.sqrt(np.einsum("ip,pq,iq->i", jm, covariance, jm))
@@ -335,14 +348,23 @@ def test_low_dimensional_simulation_matches_full_projection():
 def test_unaffected_summary_is_exact_despite_correlated_weak_scores() -> None:
     covariance = np.array([[1.0, 0.8], [0.8, 1.0]])
     moments = CoefficientMoments(
-        np.zeros(1), np.ones(1), np.ones(1),
-        np.array([[0.0, 1.0]]), np.array([[0.0, 2.0]]),
+        np.zeros(1),
+        np.ones(1),
+        np.ones(1),
+        np.array([[0.0, 1.0]]),
+        np.array([[0.0, 2.0]]),
     )
     # The metric leaves coordinate 1 untouched, even though z_0 and z_1 covary.
     for seed in (0, 99):
         mean_se, sd_se, _ = _projected_moment_errors(
-            covariance, np.eye(2), np.array([0]), np.arange(2),
-            moments, np.array([True]), 200, seed,
+            covariance,
+            np.eye(2),
+            np.array([0]),
+            np.arange(2),
+            moments,
+            np.array([True]),
+            200,
+            seed,
         )
         np.testing.assert_array_equal(mean_se, [1.0])
         np.testing.assert_array_equal(sd_se, [1.0])
@@ -353,12 +375,21 @@ def test_weak_covariance_regression_preserves_small_variance_directions(
     small_variance: float,
 ) -> None:
     moments = CoefficientMoments(
-        np.zeros(1), np.ones(1), np.ones(1),
-        np.array([[1.0, 0.0]]), np.array([[2.0, 0.0]]),
+        np.zeros(1),
+        np.ones(1),
+        np.ones(1),
+        np.array([[1.0, 0.0]]),
+        np.array([[2.0, 0.0]]),
     )
     mean_se, sd_se, _ = _projected_moment_errors(
-        np.diag([small_variance, 1.0]), np.eye(2), np.array([0, 1]),
-        np.arange(2), moments, np.array([True]), 50000, 0,
+        np.diag([small_variance, 1.0]),
+        np.eye(2),
+        np.array([0, 1]),
+        np.arange(2),
+        moments,
+        np.array([True]),
+        50000,
+        0,
     )
     expected = np.sqrt(small_variance * (0.5 - 1 / (2 * np.pi)))
     np.testing.assert_allclose(mean_se, [expected], rtol=0.02)
@@ -369,8 +400,12 @@ def test_multiplier_adjustment_can_increase_robust_sampling_variance() -> None:
     information = np.array([[2.0, 1.0], [1.0, 1.0]])
     meat = np.array([[1.0, -0.5], [-0.5, 1.0]])
     statistic = _multiplier_statistics(
-        np.array([1.0, 0.0]), information, meat,
-        np.array([0]), np.array([1]), np.ones((1, 1)),
+        np.array([1.0, 0.0]),
+        information,
+        meat,
+        np.array([0]),
+        np.array([1]),
+        np.ones((1, 1)),
     )
     # The multiplier influence is s_0 - s_1, with variance 3, not raw variance 1.
     np.testing.assert_allclose(statistic, [1 / np.sqrt(3)])
@@ -381,13 +416,22 @@ def test_singular_weak_score_covariance_retains_its_gaussian_support(
     score_variance: float,
 ) -> None:
     moments = CoefficientMoments(
-        np.zeros(1), np.ones(1), np.array([0.5, 0.5]),
-        np.array([[0.5, 0.5]]), np.array([[1.0, 1.0]]),
+        np.zeros(1),
+        np.ones(1),
+        np.array([0.5, 0.5]),
+        np.array([[0.5, 0.5]]),
+        np.array([[1.0, 1.0]]),
     )
     # Both coordinates are the same Gaussian variable, or identically zero.
     mean_se, sd_se, _ = _projected_moment_errors(
-        score_variance * np.ones((2, 2)), np.eye(2), np.array([0, 1]),
-        np.arange(2), moments, np.array([True]), 50000, 7,
+        score_variance * np.ones((2, 2)),
+        np.eye(2),
+        np.array([0, 1]),
+        np.arange(2),
+        moments,
+        np.array([True]),
+        50000,
+        7,
     )
     expected = np.sqrt(score_variance * (0.5 - 1 / (2 * np.pi)))
     np.testing.assert_allclose(mean_se, [expected], rtol=0.02)
@@ -405,7 +449,7 @@ def test_multiplier_statistic_uses_nuisance_adjusted_score_variance(mixed_bounda
     from lcl._analytic_derivatives import _panel_scores_and_hessian
 
     r = mixed_boundary
-    structural = r._structural_from_latent(r.flat_params)
+    structural = r.flat_params
     scores, _ = _panel_scores_and_hessian(
         structural,
         _diff_unchosen_chosen(r.data),
@@ -446,7 +490,9 @@ def test_strict_only_projection_equals_conditional_delta_method(mixed_boundary):
 
 @pytest.mark.parametrize("boundary", ["conditional", "projected"])
 def test_unadjusted_covariance_warns_when_price_strictly_binds(
-    mixed_boundary: LCLResults, caplog: pytest.LogCaptureFixture, boundary: str,
+    mixed_boundary: LCLResults,
+    caplog: pytest.LogCaptureFixture,
+    boundary: str,
 ):
     r = mixed_boundary
     with caplog.at_level("WARNING", logger="lcl._boundary_inference"):

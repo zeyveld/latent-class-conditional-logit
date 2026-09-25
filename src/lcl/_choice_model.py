@@ -12,6 +12,7 @@ from jaxtyping import Array, Float64, Int
 from lcl._encoding import ChoiceDataEncoder, _coerce_frame
 from lcl._labels import label_for_variable, normalize_variable_labels
 from lcl._struct import Data, ParsedData
+from lcl.constraints import NegativeCoefficientBound
 
 
 class ChoiceModel(ABC):
@@ -33,6 +34,8 @@ class ChoiceModel(ABC):
 
     case_varnames: list[str]
     numeraire: str | None
+    numeraire_idx: int | None
+    numeraire_min_abs: float
     dem_varnames: list[str] | None
     variable_labels: dict[str, str]
     convergence: bool
@@ -46,6 +49,11 @@ class ChoiceModel(ABC):
         self.convergence = False
         self._fit_start_time = 0.0
         self._encoder: ChoiceDataEncoder | None = None
+
+    @property
+    def _negative_bound(self) -> NegativeCoefficientBound:
+        """Resolve public numeraire metadata into one numerical constraint."""
+        return NegativeCoefficientBound(self.numeraire_idx, self.numeraire_min_abs)
 
     @abstractmethod
     def fit(self, *args: Any, **kwargs: Any) -> Any:
@@ -415,8 +423,7 @@ class ChoiceModel(ABC):
         missing = [panel for panel in panel_ids if panel not in value_by_panel]
         if missing:
             raise ValueError(
-                f"Cluster column {cluster_col!r} has no value for panels "
-                f"{missing[:5]}."
+                f"Cluster column {cluster_col!r} has no value for panels {missing[:5]}."
             )
 
         codes: list[int] = []

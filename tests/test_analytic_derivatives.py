@@ -97,10 +97,9 @@ def test_analytic_scores_and_hessian_match_autodiff(
     flat = jnp.asarray(rng.normal(size=packing.num_params) * param_scale)
 
     def panel_loglik(fp):
-        latent_betas, thetas = packing.unpack(fp)
-        structural_betas = packing.to_structural(latent_betas)
+        betas, thetas = packing.unpack(fp)
         class_probs = packing.class_probs(thetas, data.dems, data.num_panels)
-        return _compute_panel_logliks(structural_betas, class_probs, diff, data)
+        return _compute_panel_logliks(betas, class_probs, diff, data)
 
     scores_ad = jax.jacfwd(panel_loglik)(flat)
     hessian_ad = jax.hessian(lambda fp: jnp.sum(panel_loglik(fp)))(flat)
@@ -113,12 +112,7 @@ def test_analytic_scores_and_hessian_match_autodiff(
 
 
 def test_fitted_covariance_matches_autodiff_formulation() -> None:
-    """End to end: both public covariances equal their autodiff formulations.
-
-    ``latent_cov_matrix`` is the sandwich in the optimizer's unconstrained
-    parameterization; ``cov_matrix`` is that matrix pushed through the softplus
-    Jacobian so its rows match the coefficients ``parameter_names`` labels.
-    """
+    """The public coefficient covariance equals the autodiff sandwich."""
     rng = onp.random.default_rng(3)
     num_panels, cases_per_panel, num_alts = 25, 4, 3
     betas_by_class = {0: onp.array([-1.5, 0.5]), 1: onp.array([-0.3, 1.5])}
@@ -173,15 +167,9 @@ def test_fitted_covariance_matches_autodiff_formulation() -> None:
     expected = 0.5 * (expected + expected.T)
 
     onp.testing.assert_allclose(
-        onp.asarray(results.latent_cov_matrix), expected, rtol=1e-8, atol=1e-10
+        onp.asarray(results.cov_matrix), expected, rtol=1e-8, atol=1e-10
     )
 
-    jacobian = jax.jacfwd(results._structural_from_latent)(results.flat_params)
-    structural_expected = onp.asarray(jacobian) @ expected @ onp.asarray(jacobian).T
-    structural_expected = 0.5 * (structural_expected + structural_expected.T)
-    onp.testing.assert_allclose(
-        onp.asarray(results.cov_matrix), structural_expected, rtol=1e-8, atol=1e-10
-    )
     # The reported standard errors are the ones a user reads off cov_matrix.
     onp.testing.assert_allclose(
         onp.sqrt(onp.diag(onp.asarray(results.cov_matrix)))[
@@ -228,8 +216,7 @@ def test_batched_and_sequential_schedules_agree(
 
     monkeypatch.setattr(scheduling, "INFERENCE_THRESHOLD_BYTES", 2**62)
     scores_batched, hessian_batched = _fresh_schedule_call(
-        _panel_scores_and_hessian,
-        flat, diff, data, packing
+        _panel_scores_and_hessian, flat, diff, data, packing
     )
 
     monkeypatch.setattr(scheduling, "INFERENCE_THRESHOLD_BYTES", 0)
@@ -260,10 +247,9 @@ def test_sequential_schedule_still_matches_autodiff(monkeypatch) -> None:
     flat = jnp.asarray(rng.normal(size=packing.num_params))
 
     def panel_loglik(fp):
-        latent_betas, thetas = packing.unpack(fp)
-        structural_betas = packing.to_structural(latent_betas)
+        betas, thetas = packing.unpack(fp)
         class_probs = packing.class_probs(thetas, data.dems, data.num_panels)
-        return _compute_panel_logliks(structural_betas, class_probs, diff, data)
+        return _compute_panel_logliks(betas, class_probs, diff, data)
 
     scores_ad = jax.jacfwd(panel_loglik)(flat)
     hessian_ad = jax.hessian(lambda fp: jnp.sum(panel_loglik(fp)))(flat)
@@ -293,14 +279,12 @@ def test_membership_mstep_schedules_agree(
 
     monkeypatch.setattr(scheduling, "ITERATION_THRESHOLD_BYTES", 2**62)
     value_b, grad_b, hess_b = _fresh_schedule_call(
-        _compute_grouped_data_loglik_grad_hess,
-        thetas, targets, data, num_classes
+        _compute_grouped_data_loglik_grad_hess, thetas, targets, data, num_classes
     )
 
     monkeypatch.setattr(scheduling, "ITERATION_THRESHOLD_BYTES", 0)
     value_s, grad_s, hess_s = _fresh_schedule_call(
-        _compute_grouped_data_loglik_grad_hess,
-        thetas, targets, data, num_classes
+        _compute_grouped_data_loglik_grad_hess, thetas, targets, data, num_classes
     )
 
     onp.testing.assert_allclose(value_s, value_b, rtol=0, atol=0)

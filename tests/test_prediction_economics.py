@@ -52,22 +52,18 @@ def known():
         inference=InferenceOptions(skip=True),
     )
     beta = np.array([[-1.8, -0.5], [0.4, 1.6], [0.2, 0.8]])
-    latent = beta.copy()
-    latent[0] = np.log(np.expm1(-beta[0] - result.model.numeraire_min_abs))
     theta = np.array([[-0.2], [1.1]])
     prior = softmax(
         np.c_[np.zeros(12), theta[0, 0] + np.arange(12) / 6 * 1.1 - 1.1], axis=1
     )
     result.em_res = result.em_res._replace(
-        structural_betas=jnp.asarray(beta),
-        latent_betas=jnp.asarray(latent),
+        betas=jnp.asarray(beta),
         thetas=jnp.asarray(theta),
         shares=jnp.asarray(prior.mean(axis=0)),
     )
     result.flat_params = result._pack_params()
     root = rng.normal(size=(result.num_params, result.num_params)) * 0.002
-    result.latent_cov_matrix = jnp.asarray(root @ root.T)
-    result.cov_matrix = result._structural_covariance(result.latent_cov_matrix)
+    result.cov_matrix = jnp.asarray(root @ root.T)
     return data, result
 
 
@@ -86,7 +82,7 @@ def test_short_partial_history_matches_bayes_and_keeps_new_consumer_priors(known
     x = history.select(
         "price", "quality", (pl.col("quality") * pl.col("income")).alias("interaction")
     ).to_numpy()
-    utility = x @ np.asarray(result.em_res.structural_betas)
+    utility = x @ np.asarray(result.em_res.betas)
     log_likelihood = utility[0] - logsumexp(utility, axis=0)
     expected = prior.copy()
     expected[7] = softmax(np.log(prior[7]) + log_likelihood)
@@ -197,11 +193,10 @@ def test_welfare_checks_case_identity_model_and_weights(known):
 def test_demographic_changes_do_not_identify_welfare_when_money_scales_coincide(known):
     data, result = known
     equal = copy(result)
-    beta = result.em_res.structural_betas.at[0].set(-1.0)
-    latent = result.em_res.latent_betas.at[0].set(
-        np.log(np.expm1(1 - result.model.numeraire_min_abs))
+    beta = result.em_res.betas.at[0].set(-1.0)
+    equal.em_res = result.em_res._replace(
+        betas=beta,
     )
-    equal.em_res = result.em_res._replace(structural_betas=beta, latent_betas=latent)
     equal.flat_params = equal._pack_params()
     base = equal.predict(data=data)
     changed = equal.predict(
@@ -219,7 +214,7 @@ def test_wtp_averages_class_ratios_and_includes_demographic_interactions(known):
     weights = np.arange(1, 13, dtype=float)
     prediction = result.predict(data=data, past_choices=history, panel_weights=weights)
     income = np.arange(12) / 6 - 1
-    betas = np.asarray(result.em_res.structural_betas)
+    betas = np.asarray(result.em_res.betas)
     ratios = (betas[1] + income[:, None] * betas[2]) / -betas[0]
     expected = np.sum(np.asarray(prediction.class_probs_by_panel) * ratios, axis=1)
     rows = prediction.marginal_wtp("quality")
@@ -331,7 +326,6 @@ def test_posterior_wtp_se_matches_independent_parameter_differences(known):
 
     def evaluate(params):
         beta = params[:6].reshape(3, 2).copy()
-        beta[0] = -np.logaddexp(0.0, beta[0]) - result.model.numeraire_min_abs
         theta = params[6:]
         logprior = np.c_[np.zeros(12), theta[0] + theta[1] * income]
         for panel in range(0, 12, 2):
@@ -350,7 +344,7 @@ def test_posterior_wtp_se_matches_independent_parameter_differences(known):
     gradient = np.array(
         [(evaluate(params + s) - evaluate(params - s)) / 2e-5 for s in steps]
     )
-    expected_se = np.sqrt(gradient @ np.asarray(result.latent_cov_matrix) @ gradient)
+    expected_se = np.sqrt(gradient @ np.asarray(result.cov_matrix) @ gradient)
     row = table.filter(pl.col("segment") == "high").row(0, named=True)
     assert row["Mean_Marginal_WTP"] == pytest.approx(evaluate(params), rel=1e-9)
     assert row["Standard_Error"] == pytest.approx(expected_se, rel=1e-8)
@@ -360,10 +354,8 @@ def test_extreme_prior_odds_are_not_replaced_by_a_probability_floor(known):
     data, result = known
     extreme = copy(result)
     beta = jnp.array([[-1.0, -1.0], [900.0, 0.0], [0.0, 0.0]])
-    latent = beta.at[0].set(np.log(np.expm1(1 - result.model.numeraire_min_abs)))
     extreme.em_res = result.em_res._replace(
-        structural_betas=beta,
-        latent_betas=latent,
+        betas=beta,
         thetas=jnp.array([[-1000.0], [0.0]]),
         shares=jnp.array([1.0, 0.0]),
     )

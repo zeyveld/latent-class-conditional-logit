@@ -5,14 +5,13 @@ from equinox import filter_jit
 from jax.ops import segment_sum
 from jaxtyping import Array, Float64
 
-from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS, transform_negative_coefficient
 from lcl._kernels import _diff_logit_components
 from lcl._struct import Data, DiffUnchosenChosen
 
 
 @filter_jit
 def _loglik_gradient(
-    structural_betas: Float64[Array, "alt_vars"],
+    betas: Float64[Array, "alt_vars"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     weights: Float64[Array, "cases"],
 ) -> tuple[
@@ -24,7 +23,7 @@ def _loglik_gradient(
 
     Parameters
     ----------
-    structural_betas : Float64[Array, "alt_vars"]
+    betas : Float64[Array, "alt_vars"]
         Vector of structural taste parameters corresponding to alternative characteristics.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
         Struct containing the differenced design matrix :math:`X_{ij} - X_{iy_i}`.
@@ -40,13 +39,13 @@ def _loglik_gradient(
         * ``grad_n``: ``Float64[Array, "cases alt_vars"]`` matrix of unweighted
           case-level score contributions used for robust sandwich covariance.
     grad : Float64[Array, "alt_vars"]
-        The analytic gradient of the negative log-likelihood with respect to ``structural_betas``.
+        The analytic gradient of the negative log-likelihood with respect to ``betas``.
     hessian : Float64[Array, "alt_vars alt_vars"]
-        Observed Hessian of the negative log-likelihood with respect to ``structural_betas``.
+        Observed Hessian of the negative log-likelihood with respect to ``betas``.
     """
     log_probs, p_unchosen = _diff_logit_components(
         diff_unchosen_chosen.X,
-        structural_betas,
+        betas,
         diff_unchosen_chosen.cases,
         diff_unchosen_chosen.num_cases,
     )
@@ -79,7 +78,7 @@ def _loglik_gradient(
 
 @filter_jit
 def _loglik_value(
-    structural_betas: Float64[Array, "alt_vars"],
+    betas: Float64[Array, "alt_vars"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     weights: Float64[Array, "cases"],
 ) -> Float64[Array, ""]:
@@ -87,7 +86,7 @@ def _loglik_value(
 
     Parameters
     ----------
-    structural_betas : Float64[Array, "alt_vars"]
+    betas : Float64[Array, "alt_vars"]
         Structural taste parameters used in representative utility.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix, with one row for each unchosen alternative.
@@ -101,40 +100,11 @@ def _loglik_value(
     """
     log_probs, _ = _diff_logit_components(
         diff_unchosen_chosen.X,
-        structural_betas,
+        betas,
         diff_unchosen_chosen.cases,
         diff_unchosen_chosen.num_cases,
     )
     return -jnp.sum(log_probs * weights)
-
-
-def _to_structural_betas(
-    latent_betas: Float64[Array, "..."],
-    numeraire_idx: int | None,
-    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
-) -> Float64[Array, "..."]:
-    """Transform unconstrained optimization parameters into structural parameters.
-
-    If a numeraire is specified (e.g., price or cost), its parameter is restricted
-    to be strictly negative via a softplus transformation.
-
-    Parameters
-    ----------
-    latent_betas : Float64[Array, "..."]
-        Unconstrained parameters managed by the Newton solver.
-    numeraire_idx : int | None
-        The column index of the numeraire variable, if applicable.
-    numeraire_min_abs : float, default=1e-5
-        Minimum absolute value imposed on the structural numeraire coefficient.
-
-    Returns
-    -------
-    Float64[Array, "..."]
-        Structural parameters suitable for utility calculation.
-    """
-    return transform_negative_coefficient(
-        latent_betas, numeraire_idx, min_abs=numeraire_min_abs
-    )
 
 
 def _diff_unchosen_chosen(case_data: Data) -> DiffUnchosenChosen:

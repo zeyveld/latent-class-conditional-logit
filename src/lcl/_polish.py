@@ -15,8 +15,9 @@ rather than to one step's progress.
 :func:`polish_observed_data` then takes safeguarded Newton steps directly on the
 observed-data log likelihood, using the exact analytic score and Hessian that
 :mod:`lcl._analytic_derivatives` already assembles for the covariance.  The
-observed information and the sandwich covariance both assume the score vanishes
-at the reported estimate. Polishing can improve stationarity more efficiently
+ordinary information and sandwich covariance assume interior stationarity;
+binding bounds instead require one-sided KKT checks and boundary inference.
+Polishing can improve stationarity more efficiently
 than tightening the EM tolerance; the final score check still determines the
 public convergence flag.
 """
@@ -33,13 +34,15 @@ import jax.numpy as jnp
 from equinox import filter_jit
 from jaxtyping import Array, Float64
 
+from lcl._boundary import projected_score
 from lcl._analytic_derivatives import _panel_scores_and_hessian
 from lcl._em_alg_steps import (
     _compute_em_log_kernels,
     _posterior_and_loglik,
     _compute_panel_logliks,
 )
-from lcl._optimize import exact_newton_minimize
+from lcl._optimize import exact_newton_minimize, newton_kwargs, scaled_objective
+from lcl.options import OptimizationOptions
 from lcl._params import ParamPacking
 from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
@@ -66,12 +69,7 @@ threshold above it.
 @lru_cache(maxsize=16)
 def _compiled_polish(
     packing: ParamPacking,
-    maxiter: int,
-    max_step_norm: float,
-    line_search_maxiter: int,
-    hessian_damping: float = 0.0,
-    initial_trust_radius: float = 1.0,
-    accept_any_decrease: bool = False,
+    optimization_options: OptimizationOptions,
 ) -> Callable[..., Any]:
     """Return a compiled observed-data Newton solve for one static configuration.
 
@@ -82,19 +80,9 @@ def _compiled_polish(
     Parameters
     ----------
     packing : :class:`~lcl._params.ParamPacking`
-        Flat layout and structural transforms; frozen, so it hashes by value.
-    maxiter : int
-        Maximum Newton iterations.
-    max_step_norm : float
-        Trust-radius ceiling.
-    line_search_maxiter : int
-        Armijo backtracking budget.
-    hessian_damping : float, default=0.0
-        Initial fallback diagonal shift.
-    initial_trust_radius : float, default=1.0
-        Initial radius in the curvature metric.
-    accept_any_decrease : bool, default=False
-        Use a strict objective decrease instead of Armijo sufficiency.
+        Flat layout and coefficient bounds; frozen, so it hashes by value.
+    optimization_options : OptimizationOptions
+        Frozen solver settings, including the polish tolerance and budget.
 
     Returns
     -------
@@ -113,18 +101,15 @@ def _compiled_polish(
 
         def total_loglik(params: Float64[Array, "all_params"]) -> Float64[Array, ""]:
             """Sum the observed-data panel log likelihoods."""
-            latent_betas, packed_thetas = packing.unpack(params)
-            structural_betas = packing.to_structural(latent_betas)
+            betas, packed_thetas = packing.unpack(params)
             prior = packing.class_probs(packed_thetas, data.dems, num_panels)
             return jnp.sum(
-                _compute_panel_logliks(
-                    structural_betas, prior, diff_unchosen_chosen, data
-                )
+                _compute_panel_logliks(betas, prior, diff_unchosen_chosen, data)
             )
 
         def value_fn(params: Float64[Array, "all_params"]) -> Float64[Array, ""]:
-            """Per-panel negative observed-data log likelihood."""
-            return -total_loglik(params) / scale
+            """Total negative observed-data log likelihood."""
+            return -total_loglik(params)
 
         def value_grad_hess_fn(
             params: Float64[Array, "all_params"],
@@ -133,27 +118,25 @@ def _compiled_polish(
             Float64[Array, "all_params"],
             Float64[Array, "all_params all_params"],
         ]:
-            """Exact per-panel value, score, and Hessian of the mixture likelihood."""
+            """Exact total value, score, and Hessian of the mixture likelihood."""
             panel_scores, hessian = _panel_scores_and_hessian(
                 params, diff_unchosen_chosen, data, packing
             )
             return (
-                -total_loglik(params) / scale,
-                -jnp.sum(panel_scores, axis=0) / scale,
-                -hessian / scale,
+                -total_loglik(params),
+                -jnp.sum(panel_scores, axis=0),
+                -hessian,
             )
 
+        value, derivatives = scaled_objective(
+            value_fn, value_grad_hess_fn, scale, has_aux=False
+        )
         state = exact_newton_minimize(
-            value_fn,
-            value_grad_hess_fn,
+            value,
+            derivatives,
             flat_params,
-            tol=POLISH_DECREMENT_TOL,
-            maxiter=maxiter,
-            max_step_norm=max_step_norm,
-            line_search_maxiter=line_search_maxiter,
-            damping=hessian_damping,
-            initial_trust_radius=initial_trust_radius,
-            accept_any_decrease=accept_any_decrease,
+            **newton_kwargs(optimization_options),
+            upper_bounds=packing.upper_bounds(),
         )
         return state.params, state.step_num
 
@@ -217,7 +200,7 @@ def _score_max_kernel(
     data: Data,
     packing: ParamPacking,
 ) -> Float64[Array, ""]:
-    """Largest absolute observed-data score component per panel.
+    """Largest absolute KKT-adjusted score component per panel.
 
     Compiling this discards the Hessian the derivative kernel also returns, which
     is the expensive half of that pass and is not needed for a stationarity check.
@@ -225,7 +208,10 @@ def _score_max_kernel(
     panel_scores, _ = _panel_scores_and_hessian(
         flat_params, diff_unchosen_chosen, data, packing
     )
-    return jnp.max(jnp.abs(jnp.sum(panel_scores, axis=0))) / _require_panels(data)
+    score = projected_score(
+        jnp.mean(panel_scores, axis=0), flat_params, packing.upper_bounds()
+    )
+    return jnp.max(jnp.abs(score))
 
 
 @filter_jit
@@ -236,12 +222,9 @@ def _total_loglik_kernel(
     packing: ParamPacking,
 ) -> Float64[Array, ""]:
     """Total observed-data log likelihood at ``flat_params``."""
-    latent_betas, packed_thetas = packing.unpack(flat_params)
-    structural_betas = packing.to_structural(latent_betas)
+    betas, packed_thetas = packing.unpack(flat_params)
     prior = packing.class_probs(packed_thetas, data.dems, _require_panels(data))
-    return jnp.sum(
-        _compute_panel_logliks(structural_betas, prior, diff_unchosen_chosen, data)
-    )
+    return jnp.sum(_compute_panel_logliks(betas, prior, diff_unchosen_chosen, data))
 
 
 def observed_score_max(
@@ -265,14 +248,14 @@ def em_vars_from_flat(
     Parameters
     ----------
     flat_params : Float64[Array, "all_params"]
-        Latent parameters in the canonical :class:`~lcl._params.ParamPacking`
+        Coefficient and membership parameters in the canonical :class:`~lcl._params.ParamPacking`
         layout.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix.
     data : :class:`~lcl._struct.Data`
         Core choice data and metadata.
     packing : :class:`~lcl._params.ParamPacking`
-        Owner of the flat layout and structural transforms.
+        Owner of the flat layout and coefficient bounds.
 
     Returns
     -------
@@ -282,8 +265,7 @@ def em_vars_from_flat(
         ``flat_params``.
     """
     num_panels = _require_panels(data)
-    latent_betas, packed_thetas = packing.unpack(flat_params)
-    structural_betas = packing.to_structural(latent_betas)
+    betas, packed_thetas = packing.unpack(flat_params)
     prior_by_panel = packing.class_probs(packed_thetas, data.dems, num_panels)
     shares = jnp.mean(prior_by_panel, axis=0)
     # Without demographics the packed membership row holds bare log odds, and the
@@ -292,12 +274,11 @@ def em_vars_from_flat(
     # ParamPacking.pack exact.
     thetas = None if data.dems is None else packed_thetas
     posterior, loglik = _posterior_and_loglik(
-        _compute_em_log_kernels(structural_betas, diff_unchosen_chosen, data),
+        _compute_em_log_kernels(betas, diff_unchosen_chosen, data),
         prior_by_panel,
     )
     return EMVars(
-        latent_betas=latent_betas,
-        structural_betas=structural_betas,
+        betas=betas,
         thetas=thetas,
         shares=shares,
         unconditional_loglik=loglik,
@@ -311,38 +292,24 @@ def polish_observed_data(
     data: Data,
     packing: ParamPacking,
     *,
-    maxiter: int = 25,
-    max_step_norm: float = 1000.0,
-    line_search_maxiter: int = 40,
-    hessian_damping: float = 0.0,
-    initial_trust_radius: float = 1.0,
-    accept_any_decrease: bool = False,
+    optimization_options: OptimizationOptions = OptimizationOptions(
+        maxiter=25, newton_decrement_tol=POLISH_DECREMENT_TOL
+    ),
 ) -> tuple[Float64[Array, "all_params"], PolishReport]:
     """Drive the observed-data score to zero with safeguarded Newton steps.
 
     Parameters
     ----------
     flat_params : Float64[Array, "all_params"]
-        Latent parameters from EM, used as the starting point.
+        Coefficient and membership parameters from EM, used as the starting point.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix.
     data : :class:`~lcl._struct.Data`
         Core choice data and metadata.
     packing : :class:`~lcl._params.ParamPacking`
-        Owner of the flat layout and structural transforms.
-    maxiter : int, default=25
-        Maximum number of Newton iterations.  Quadratic convergence from an EM
-        solution normally needs a handful.
-    max_step_norm : float, default=1000.0
-        Trust-radius ceiling passed through to the solver.
-    line_search_maxiter : int, default=40
-        Armijo backtracking budget per iteration.
-    hessian_damping : float, default=0.0
-        Initial fallback diagonal shift passed through to the solver.
-    initial_trust_radius : float, default=1.0
-        Initial radius passed through to the solver.
-    accept_any_decrease : bool, default=False
-        Accept a strict objective decrease instead of requiring Armijo sufficiency.
+        Owner of the flat layout and coefficient bounds.
+    optimization_options : OptimizationOptions, optional
+        Solver controls; defaults to 25 iterations and POLISH_DECREMENT_TOL.
 
     Returns
     -------
@@ -362,7 +329,7 @@ def polish_observed_data(
     loglik_before = total_loglik(flat_params)
     score_before = observed_score_max(flat_params, diff_unchosen_chosen, data, packing)
 
-    if maxiter <= 0:
+    if optimization_options.maxiter <= 0:
         return flat_params, PolishReport(
             performed=False,
             iterations=0,
@@ -373,15 +340,7 @@ def polish_observed_data(
             accepted=False,
         )
 
-    solve = _compiled_polish(
-        packing,
-        int(maxiter),
-        float(max_step_norm),
-        int(line_search_maxiter),
-        float(hessian_damping),
-        float(initial_trust_radius),
-        bool(accept_any_decrease),
-    )
+    solve = _compiled_polish(packing, optimization_options)
     candidate, steps = solve(flat_params, diff_unchosen_chosen, data, scale)
     iterations = int(steps)
     loglik_after = total_loglik(candidate)

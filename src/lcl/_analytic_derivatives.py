@@ -23,9 +23,8 @@ conditional-logit score and Hessian (McFadden, 1974; Train, 2009, *Discrete
 Choice Methods with Simulation*, ch. 3) evaluated on the
 chosen-alternative-differenced design.
 
-Everything is returned in the flat latent parameter layout owned by
-:class:`~lcl._params.ParamPacking`, with the numeraire softplus chain rule
-applied exactly as in :mod:`lcl.constraints`.  The outputs are numerically
+Everything is returned in the flat parameter layout owned by
+:class:`~lcl._params.ParamPacking`. The outputs are numerically
 equal (to machine precision) to ``jax.jacfwd`` of
 :meth:`~lcl._results.LCLResults._panel_loglik_fn` and ``jax.hessian`` of
 :meth:`~lcl._results.LCLResults._full_loglik_fn`, but require one pass over
@@ -44,7 +43,7 @@ ones.  The two schedules differ only in summation order.
 import jax.numpy as jnp
 from equinox import filter_jit
 from jax import lax
-from jax.nn import log_softmax, sigmoid, softmax
+from jax.nn import log_softmax, softmax
 from jax.ops import segment_max, segment_sum
 from jaxtyping import Array, Float64, Int, Integer
 
@@ -168,7 +167,12 @@ def _class_blocks_sequential(
         Posterior-weighted conditional-logit Hessian blocks.
     """
 
-    def per_class(carry: None, class_idx: Int[Array, ""]) -> tuple[None, tuple[Float64[Array, "panels alt_vars"], Float64[Array, "alt_vars alt_vars"]]]:
+    def per_class(
+        carry: None, class_idx: Int[Array, ""]
+    ) -> tuple[
+        None,
+        tuple[Float64[Array, "panels alt_vars"], Float64[Array, "alt_vars alt_vars"]],
+    ]:
         """Compute one class's panel scores and Hessian block."""
         V = Xd @ betas[:, class_idx]
         shift = jnp.maximum(0.0, segment_max(V, cases_d, num_segments=num_cases))
@@ -249,7 +253,9 @@ def _membership_curvature_gram(
         axis=-1,
     ).reshape(-1, 2)
 
-    def one_block(carry: None, pair: Int[Array, "2"]) -> tuple[None, Float64[Array, "dem_vars_plus_one dem_vars_plus_one"]]:
+    def one_block(
+        carry: None, pair: Int[Array, "2"]
+    ) -> tuple[None, Float64[Array, "dem_vars_plus_one dem_vars_plus_one"]]:
         """Contract one (m, l) class pair into a (dem, dem) Gram matrix."""
         row, col = pair[0], pair[1]
         h_m, h_l = posterior_tail[:, row], posterior_tail[:, col]
@@ -282,14 +288,14 @@ def _panel_scores_and_hessian(
     Parameters
     ----------
     flat_params : Float64[Array, "all_params"]
-        Latent parameters in the canonical :class:`~lcl._params.ParamPacking`
+        Coefficient and membership parameters in the canonical :class:`~lcl._params.ParamPacking`
         layout.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix.
     data : :class:`~lcl._struct.Data`
         Core choice data and metadata.
     packing : :class:`~lcl._params.ParamPacking`
-        Owner of the flat parameter layout and structural transforms.
+        Owner of the flat parameter layout and coefficient bounds.
 
     Returns
     -------
@@ -311,8 +317,7 @@ def _panel_scores_and_hessian(
     num_theta_params = theta_rows * theta_cols
     num_panels = data.num_panels
 
-    latent_betas, thetas = packing.unpack(flat_params)
-    betas = packing.to_structural(latent_betas)
+    betas, thetas = packing.unpack(flat_params)
 
     Xd = diff_unchosen_chosen.X
     cases_d = diff_unchosen_chosen.cases
@@ -370,19 +375,9 @@ def _panel_scores_and_hessian(
     posterior_tail = posterior[:, 1:]
     theta_scores = dem_design[:, :, None] * (posterior_tail - pi_tail)[:, None, :]
 
-    # Chain rule to latent space for the numeraire row.
-    numeraire_idx = packing.numeraire_idx
-    if numeraire_idx is not None:
-        d1 = -sigmoid(latent_betas[numeraire_idx, :])
-        weighted_beta_scores_latent = weighted_beta_scores.at[
-            :, numeraire_idx, :
-        ].multiply(d1[None, :])
-    else:
-        weighted_beta_scores_latent = weighted_beta_scores
-
     panel_scores = jnp.concatenate(
         [
-            weighted_beta_scores_latent.reshape(num_panels, num_beta_params),
+            weighted_beta_scores.reshape(num_panels, num_beta_params),
             theta_scores.reshape(num_panels, num_theta_params),
         ],
         axis=1,
@@ -416,14 +411,6 @@ def _panel_scores_and_hessian(
     #                              - (diag(pi) - pi pi')] on non-baseline coords.
     theta_theta = _membership_curvature_gram(dem_design, posterior_tail, pi_tail)
 
-    structural_scores = jnp.concatenate(
-        [
-            weighted_beta_scores.reshape(num_panels, num_beta_params),
-            theta_scores.reshape(num_panels, num_theta_params),
-        ],
-        axis=1,
-    )
-
     num_params = packing.num_params
     hessian = jnp.zeros((num_params, num_params))
     hessian = hessian.at[:num_beta_params, :num_beta_params].set(
@@ -435,19 +422,6 @@ def _panel_scores_and_hessian(
     hessian = hessian.at[num_beta_params:, num_beta_params:].set(
         theta_theta.reshape(num_theta_params, num_theta_params)
     )
-    hessian = hessian - structural_scores.T @ structural_scores
-
-    # Pull the Hessian back to latent space through the numeraire transform.
-    if numeraire_idx is not None:
-        scale = jnp.ones(num_params)
-        constrained = numeraire_idx * num_classes + jnp.arange(num_classes)
-        d1 = -sigmoid(latent_betas[numeraire_idx, :])
-        scale = scale.at[constrained].set(d1)
-        hessian = hessian * scale[:, None] * scale[None, :]
-        structural_grad = jnp.sum(weighted_beta_scores, axis=0)
-        d2 = d1 * (1.0 + d1)
-        hessian = hessian.at[constrained, constrained].add(
-            structural_grad[numeraire_idx, :] * d2
-        )
+    hessian = hessian - panel_scores.T @ panel_scores
 
     return panel_scores, hessian

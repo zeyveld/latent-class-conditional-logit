@@ -1,7 +1,6 @@
 """Boundary diagnostics for negatively constrained LCL utility coefficients."""
 
 from collections.abc import Sequence
-from dataclasses import replace
 
 import jax.numpy as jnp
 import numpy as np
@@ -29,18 +28,14 @@ def boundary_indices(
 
 
 @filter_jit
-def structural_score(
+def mean_score(
     flat_params: Float64[Array, "all_params"],
     diff: DiffUnchosenChosen,
     data: Data,
     packing: ParamPacking,
 ) -> Float64[Array, "all_params"]:
-    """Evaluate the structural score without dividing by a saturated Jacobian."""
-    beta, theta = packing.unpack(flat_params)
-    structural = jnp.concatenate([packing.to_structural(beta).ravel(), theta.ravel()])
-    scores, _ = _panel_scores_and_hessian(
-        structural, diff, data, replace(packing, numeraire_idx=None)
-    )
+    """Evaluate the mean log-likelihood score in coefficient coordinates."""
+    scores, _ = _panel_scores_and_hessian(flat_params, diff, data, packing)
     return jnp.mean(scores, axis=0)
 
 
@@ -51,9 +46,20 @@ def boundary_kkt_violation(
     """Measure feasible ascent at beta <= upper_bound for a maximized likelihood.
 
     A nonnegative score at the upper bound is valid. A negative score means
-    moving into the feasible interior raises likelihood, even if softplus has
-    saturated and the raw optimizer score has rounded to zero.
+    moving into the feasible interior raises likelihood.
     """
     index_array = np.asarray(indices, dtype=int)
     values = np.asarray(score)[index_array]
     return float(np.max(np.maximum(-values, 0.0))) if index_array.size else 0.0
+
+
+def projected_score(
+    score: Float64[Array, "all_params"],
+    params: Float64[Array, "all_params"],
+    upper_bounds: Float64[Array, "all_params"] | None,
+) -> Float64[Array, "all_params"]:
+    """Remove outward ascent at binding upper bounds from a likelihood score."""
+    if upper_bounds is None:
+        return score
+    binding = params >= upper_bounds - BOUNDARY_DISTANCE_TOL
+    return jnp.where(binding & (score > 0), 0.0, score)

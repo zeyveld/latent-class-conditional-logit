@@ -10,13 +10,23 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
-from jax import jacfwd
-from lcl._typing import DemographicsInput, DesignInput, PanelIdsInput, PanelWeightsInput, RowIdsInput
+from lcl._typing import (
+    DemographicsInput,
+    DesignInput,
+    PanelIdsInput,
+    PanelWeightsInput,
+    RowIdsInput,
+)
 from jaxtyping import Array, ArrayLike, Float64, Integer
 
 from lcl._analytic_derivatives import _panel_scores_and_hessian
 from lcl._case_utils import _diff_unchosen_chosen
-from lcl._boundary import boundary_indices, boundary_kkt_violation, structural_score
+from lcl._boundary import (
+    projected_score,
+    boundary_indices,
+    boundary_kkt_violation,
+    mean_score,
+)
 from lcl._boundary_types import BoundarySummaryDiagnostics, BoundarySummaryInputs
 from lcl._delta import apply_delta_method, parametric_bootstrap_se
 from lcl._diagnostics import LCLDiagnostics
@@ -99,11 +109,6 @@ class LCLResults:
         selection threshold, directional-SD variables, Gaussian draw count,
         seed, and simulated dimension, information diagnostics, elapsed time,
         and any conditional-fallback reason.
-    latent_cov_matrix : Float64[Array, "all_params all_params"]
-        Covariance in the unconstrained parameterization the optimizer works in.
-        This is the matrix the delta method consumes: target functions apply the
-        softplus transform internally, so its Jacobian is differentiated rather
-        than applied twice.
     caic : float
         Consistent Akaike Information Criterion (Bozdogan, 1987).
     bic : float
@@ -183,7 +188,9 @@ class LCLResults:
         self.total_recursions = em_recursion
         self.converged = converged
         self.estim_time_sec = estim_time_sec
-        self.inference = replace(inference) if inference is not None else InferenceOptions()
+        self.inference = (
+            replace(inference) if inference is not None else InferenceOptions()
+        )
         self.diagnostics_config = (
             replace(diagnostics_config)
             if diagnostics_config is not None
@@ -191,9 +198,7 @@ class LCLResults:
         )
         self.em_history_ = _history_frame(em_history)
         self.optimization_history_ = _history_frame(optimization_history)
-        if self.em_res.latent_betas is None:
-            raise ValueError("Latent betas are required to construct LCL results.")
-        if self.em_res.structural_betas is None:
+        if self.em_res.betas is None:
             raise ValueError("Structural betas are required to construct LCL results.")
         if self.em_res.shares is None:
             raise ValueError("Class shares are required to construct LCL results.")
@@ -221,8 +226,7 @@ class LCLResults:
         self.information_weak_directions: list[WeakInformationDirection] = []
         self.observed_score_max = float(observed_score_max)
         self.boundary_parameter_indices = tuple(
-            int(i)
-            for i in boundary_indices(self.em_res.structural_betas, self._param_packing)
+            int(i) for i in boundary_indices(self.em_res.betas, self._param_packing)
         )
         self.boundary_kkt_violation = 0.0
         self.inference_status = "skipped" if self.inference.skip else "regular"
@@ -237,7 +241,7 @@ class LCLResults:
             cpu = cpu_device()
             with jax.default_device(cpu):
                 boundary_data = device_put_array_leaves(self.data, cpu)
-                score = structural_score(
+                score = mean_score(
                     device_put_array_leaves(self.flat_params, cpu),
                     _diff_unchosen_chosen(boundary_data),
                     boundary_data,
@@ -246,8 +250,14 @@ class LCLResults:
             self.boundary_kkt_violation = boundary_kkt_violation(
                 score, list(self.boundary_parameter_indices)
             )
-            self.observed_score_max = max(
-                self.observed_score_max, self.boundary_kkt_violation
+            self.observed_score_max = float(
+                jnp.max(
+                    jnp.abs(
+                        projected_score(
+                            score, self.flat_params, self._param_packing.upper_bounds()
+                        )
+                    )
+                )
             )
             self.converged = bool(self.observed_score_max <= self.score_tol)
             if not self.converged:
@@ -256,8 +266,7 @@ class LCLResults:
                     self.boundary_kkt_violation,
                     self.score_tol,
                 )
-        self.latent_cov_matrix = self._compute_covariance()
-        self.cov_matrix = self._structural_covariance(self.latent_cov_matrix)
+        self.cov_matrix = self._compute_covariance()
         if not self.inference.skip and not self.covariance_available:
             self.inference_status = "unavailable"
         self.boundary_summary_diagnostics["method"] = self.inference_status
@@ -354,12 +363,12 @@ class LCLResults:
         return self.adjusted_bic
 
     def _pack_params(self) -> Float64[Array, "all_params"]:
-        """Flatten latent parameters and class memberships for inference."""
-        latent_betas = self.em_res.latent_betas
-        if latent_betas is None:
-            raise ValueError("Latent betas are required to pack parameters.")
+        """Flatten taste coefficients and membership logits for inference."""
+        betas = self.em_res.betas
+        if betas is None:
+            raise ValueError("Betas are required to pack parameters.")
         return self._param_packing.pack(
-            latent_betas,
+            betas,
             self.em_res.thetas,
             self.em_res.shares,
         )
@@ -401,7 +410,7 @@ class LCLResults:
         Returns
         -------
         Float64[Array, "all_params all_params"]
-            Covariance in the latent (unconstrained) parameterization.
+            Covariance in the coefficient and membership parameterization.
         """
         cpu = cpu_device()
         if self.inference.skip:
@@ -431,13 +440,28 @@ class LCLResults:
             ):
                 from lcl._boundary_inference import boundary_covariance
 
-                return boundary_covariance(self, flat_params, diff_unchosen_chosen, data)
+                return boundary_covariance(
+                    self, flat_params, diff_unchosen_chosen, data
+                )
+            if self.boundary_parameter_indices:
+                logger.warning(
+                    "Ordinary covariance is unavailable at a binding coefficient "
+                    "bound; select conditional or projected boundary inference."
+                )
+                return jnp.full((self.num_params, self.num_params), jnp.nan)
             J, H = _panel_scores_and_hessian(
                 flat_params, diff_unchosen_chosen, data, self._param_packing
             )
-            self.observed_score_max = max(
-                float(jnp.max(jnp.abs(jnp.mean(J, axis=0)))),
-                self.boundary_kkt_violation,
+            self.observed_score_max = float(
+                jnp.max(
+                    jnp.abs(
+                        projected_score(
+                            jnp.mean(J, axis=0),
+                            flat_params,
+                            self._param_packing.upper_bounds(),
+                        )
+                    )
+                )
             )
             self.converged = bool(self.observed_score_max <= self.score_tol)
             H_inv, diagnostics = _invert_information(
@@ -478,32 +502,6 @@ class LCLResults:
             correction = G / (G - 1) if self.inference.finite_sample_correction else 1.0
             return _symmetrize((H_inv @ B @ H_inv) * correction)
 
-    def _structural_from_latent(
-        self, flat_params: Float64[Array, "all_params"]
-    ) -> Float64[Array, "all_params"]:
-        """Map latent parameters to the scale the results tables report."""
-        latent_betas, thetas = self._param_packing.unpack(flat_params)
-        structural_betas = self._param_packing.to_structural(latent_betas)
-        return jnp.concatenate([structural_betas.ravel(), thetas.ravel()])
-
-    def _structural_covariance(
-        self, latent_cov: Float64[Array, "all_params all_params"]
-    ) -> Float64[Array, "all_params all_params"]:
-        """Push the latent covariance through to the reported parameter scale.
-
-        Without this the public covariance would sit in a different
-        parameterization from the coefficients whose names label its rows, and
-        from :attr:`~lcl.conditional_logit.CLResults.cov_matrix`, which the shared
-        results protocol advertises as the same object.
-        """
-        if self._param_packing.numeraire_idx is None:
-            return latent_cov
-        cpu = cpu_device()
-        with jax.default_device(cpu):
-            flat_params = device_put_array_leaves(self.flat_params, cpu)
-            jacobian = jacfwd(self._structural_from_latent)(flat_params)
-            return _symmetrize(jacobian @ device_put_array_leaves(latent_cov, cpu) @ jacobian.T)
-
     @property
     def covariance_available(self) -> bool:
         """Report a finite covariance; inspect inference_status for conditional scope."""
@@ -516,14 +514,11 @@ class LCLResults:
         data: Data,
     ) -> Float64[Array, "panels"]:
         """Compute the log-likelihood for each panel (used to build the Jacobian)."""
-        latent_betas, thetas = self._unpack_params(flat_params)
-        structural_betas = self._param_packing.to_structural(latent_betas)
+        betas, thetas = self._unpack_params(flat_params)
         if data.num_panels is None:
             raise ValueError("Panel identifiers are required for LCL log-likelihoods.")
         class_probs = self._get_class_probs(thetas, data.dems, data.num_panels)
-        return _compute_panel_logliks(
-            structural_betas, class_probs, diff_unchosen_chosen, data
-        )
+        return _compute_panel_logliks(betas, class_probs, diff_unchosen_chosen, data)
 
     def _full_loglik_fn(
         self,
@@ -590,7 +585,7 @@ class LCLResults:
         flat_params: Float64[Array, "all_params"],
         **kwargs: Any,
     ) -> tuple[Float64[Array, "..."], Float64[Array, "..."]]:
-        """Apply the delta method to a function of the latent parameters.
+        """Apply the delta method to a function of the coefficients and membership parameters.
 
         Extras are keyword-only: the parameter vector is the sole positional
         argument, so nothing can displace it at a call site.
@@ -598,9 +593,9 @@ class LCLResults:
         Parameters
         ----------
         func : Callable
-            Target taking the flat latent parameter vector.
+            Target taking the flat parameter vector.
         flat_params : Float64[Array, "all_params"]
-            Latent parameters.
+            Coefficient and membership parameters.
         **kwargs
             Extra keyword arguments bound into ``func``.
 
@@ -609,9 +604,7 @@ class LCLResults:
         tuple[Array, Array]
             Value and delta-method standard errors.
         """
-        return apply_delta_method(
-            func, flat_params, self.latent_cov_matrix, **kwargs
-        )
+        return apply_delta_method(func, flat_params, self.cov_matrix, **kwargs)
 
     def _parametric_bootstrap_se(
         self,
@@ -620,15 +613,21 @@ class LCLResults:
         *,
         draws: int = 500,
         seed: int = 0,
+        requires_negative_numeraire: bool = False,
         **kwargs: Any,
     ) -> Float64[Array, "..."]:
         """Estimate nonlinear standard errors from asymptotic parameter draws."""
         return parametric_bootstrap_se(
             func,
             flat_params,
-            self.latent_cov_matrix,
+            self.cov_matrix,
             draws=draws,
             seed=seed,
+            upper_bounds=(
+                self._param_packing.upper_bounds()
+                if requires_negative_numeraire
+                else None
+            ),
             **kwargs,
         )
 
@@ -639,13 +638,12 @@ class LCLResults:
         num_panels: int,
     ) -> Float64[Array, "alt_vars"]:
         """Compute the expectation of the structural taste parameters across the population."""
-        latent_betas, thetas = self._unpack_params(flat_params)
+        betas, thetas = self._unpack_params(flat_params)
 
         class_probs = self._get_class_probs(thetas, dems, num_panels)
         avg_shares = jnp.mean(class_probs, axis=0)
 
-        structural_betas = self._param_packing.to_structural(latent_betas)
-        return structural_betas @ avg_shares
+        return betas @ avg_shares
 
     def _calc_population_var_betas(
         self,
@@ -663,15 +661,13 @@ class LCLResults:
         so it can report ``NaN`` at the degenerate point instead of a spurious
         zero.
         """
-        latent_betas, thetas = self._unpack_params(flat_params)
+        betas, thetas = self._unpack_params(flat_params)
 
         class_probs = self._get_class_probs(thetas, dems, num_panels)
         avg_shares = jnp.mean(class_probs, axis=0)
 
-        structural_betas = self._param_packing.to_structural(latent_betas)
-
-        mean_betas = structural_betas @ avg_shares
-        diff_sq = (structural_betas - mean_betas[:, None]) ** 2
+        mean_betas = betas @ avg_shares
+        diff_sq = (betas - mean_betas[:, None]) ** 2
         return diff_sq @ avg_shares
 
     def _calc_population_std_betas(
@@ -688,14 +684,12 @@ class LCLResults:
             )
         )
 
-    def _structural_betas_and_class_probs(
+    def _betas_and_class_probs(
         self,
         flat_params: Float64[Array, "all_params"],
         dems: Float64[Array, "panels dem_vars"] | None,
         num_panels: int,
-    ) -> tuple[
-        Float64[Array, "alt_vars classes"], Float64[Array, "panels classes"]
-    ]:
+    ) -> tuple[Float64[Array, "alt_vars classes"], Float64[Array, "panels classes"]]:
         """Return structural class betas and prior class probabilities.
 
         The one hook the differentiable counterfactual quantities in
@@ -703,25 +697,11 @@ class LCLResults:
         logit implements it with a single class, so those quantities are written
         once and serve both estimators.
         """
-        latent_betas, thetas = self._unpack_params(flat_params)
+        betas, thetas = self._unpack_params(flat_params)
         return (
-            self._param_packing.to_structural(latent_betas),
+            betas,
             self._get_class_probs(thetas, dems, num_panels),
         )
-
-    def _calc_structural_betas(
-        self, flat_params: Float64[Array, "all_params"]
-    ) -> Float64[Array, "alt_vars classes"]:
-        """Transform packed utility coefficients to their reported scale."""
-        latent_betas, _ = self._unpack_params(flat_params)
-        return self._param_packing.to_structural(latent_betas)
-
-    def _calc_membership_coefficients(
-        self, flat_params: Float64[Array, "all_params"]
-    ) -> Float64[Array, "dem_vars_plus_one classes_minus_one"]:
-        """Extract nonbaseline membership logits from packed parameters."""
-        _, thetas = self._unpack_params(flat_params)
-        return thetas
 
     def _calc_class_shares(
         self,
@@ -743,11 +723,10 @@ class LCLResults:
             ``variable`` column preserves raw model names; ``label`` contains
             human-readable presentation labels.
         """
-        structural_betas, standard_errors = self._apply_delta_method(
-            self._calc_structural_betas, self.flat_params
-        )
+        betas, _ = self._unpack_params(self.flat_params)
+        standard_errors, _ = self._unpack_params(jnp.sqrt(jnp.diag(self.cov_matrix)))
         rows = []
-        beta_array = onp.asarray(structural_betas)
+        beta_array = onp.asarray(betas)
         se_array = onp.asarray(standard_errors)
         for var_idx, variable in enumerate(self.model.case_varnames):
             for class_idx in range(self.model.num_classes):
@@ -757,12 +736,17 @@ class LCLResults:
                         "label": _model_variable_label(self.model, variable),
                         "class": class_idx,
                         "coefficient": float(beta_array[var_idx, class_idx]),
-                        "std_error": (float("nan") if var_idx * self.model.num_classes + class_idx
-                                      in getattr(self, "boundary_parameter_indices", ())
-                                      else float(se_array[var_idx, class_idx])),
+                        "std_error": (
+                            float("nan")
+                            if var_idx * self.model.num_classes + class_idx
+                            in getattr(self, "boundary_parameter_indices", ())
+                            else float(se_array[var_idx, class_idx])
+                        ),
                         "boundary": var_idx * self.model.num_classes + class_idx
-                                      in getattr(self, "boundary_parameter_indices", ()),
-                        "inference_status": getattr(self, "inference_status", "regular"),
+                        in getattr(self, "boundary_parameter_indices", ()),
+                        "inference_status": getattr(
+                            self, "inference_status", "regular"
+                        ),
                         "constrained": variable == self.model.numeraire,
                     }
                 )
@@ -774,9 +758,8 @@ class LCLResults:
         Class 0 is the reference category and therefore has no separately
         estimated membership coefficients.
         """
-        coefficients, standard_errors = self._apply_delta_method(
-            self._calc_membership_coefficients, self.flat_params
-        )
+        _, coefficients = self._unpack_params(self.flat_params)
+        _, standard_errors = self._unpack_params(jnp.sqrt(jnp.diag(self.cov_matrix)))
         coefficient_array = onp.asarray(coefficients)
         se_array = onp.asarray(standard_errors)
         variables = ["Intercept", *(self.model.dem_varnames or [])]
@@ -874,9 +857,7 @@ class LCLResults:
                         "variable": variable,
                         "label": _model_variable_label(self.model, variable),
                         "class": class_idx,
-                        "marginal_effect": float(
-                            effect_array[variable_idx, class_idx]
-                        ),
+                        "marginal_effect": float(effect_array[variable_idx, class_idx]),
                         "std_error": float(se_array[variable_idx, class_idx]),
                     }
                 )
@@ -976,6 +957,7 @@ class LCLResults:
             raise ValueError("Panel identifiers are required to summarize LCL results.")
         if getattr(self, "_boundary_summary_inputs", None) is not None:
             from lcl._boundary_inference import projected_beta_summary
+
             return projected_beta_summary(self)
 
         means, se_means = self._apply_delta_method(
@@ -990,7 +972,7 @@ class LCLResults:
             dems=self.data.dems,
             num_panels=self.data.num_panels,
         )
-        structural = onp.asarray(self.em_res.structural_betas)
+        structural = onp.asarray(self.em_res.betas)
 
         # sd = sqrt(var), so se(sd) = se(var) / (2 sd) -- but only where the
         # variance is separated from zero.  A variable whose coefficient is
@@ -1003,9 +985,7 @@ class LCLResults:
         identified = variance_array > DEGENERATE_VARIANCE_RTOL * scale
         stds = onp.sqrt(onp.maximum(variance_array, 0.0))
         with onp.errstate(divide="ignore", invalid="ignore"):
-            se_stds = onp.where(
-                identified, se_variance_array / (2.0 * stds), onp.nan
-            )
+            se_stds = onp.where(identified, se_variance_array / (2.0 * stds), onp.nan)
         if not bool(onp.all(identified)):
             degenerate = [
                 variable
@@ -1025,10 +1005,15 @@ class LCLResults:
                     "variable": variable,
                     "label": _model_variable_label(self.model, variable),
                     "mean": float(means[idx]),
-                    "mean_se": (float("nan") if all(
-                        idx * self.model.num_classes + cls in getattr(self, "boundary_parameter_indices", ())
-                        for cls in range(self.model.num_classes)
-                    ) else float(se_means[idx])),
+                    "mean_se": (
+                        float("nan")
+                        if all(
+                            idx * self.model.num_classes + cls
+                            in getattr(self, "boundary_parameter_indices", ())
+                            for cls in range(self.model.num_classes)
+                        )
+                        else float(se_means[idx])
+                    ),
                     "inference_status": getattr(self, "inference_status", "regular"),
                     "sd": float(stds[idx]),
                     "sd_se": float(se_stds[idx]),
@@ -1189,9 +1174,7 @@ class LCLResults:
             )
         table = self.membership_coefficients()
         if show:
-            shares = (
-                self.class_shares()["share"].to_list() if include_shares else None
-            )
+            shares = self.class_shares()["share"].to_list() if include_shares else None
             log_or_print(
                 logger,
                 "%s",
@@ -1311,16 +1294,28 @@ class LCLResults:
             },
         ]
 
-        rows.extend([
-            {"section": "fit", "check": "boundary_kkt_violation",
-             "value": getattr(self, "boundary_kkt_violation", 0.),
-             "status": "ok" if getattr(self, "boundary_kkt_violation", 0.) <= self.score_tol else "warning",
-             "message": "Feasible structural ascent at binding negative coefficients; valid boundaries satisfy KKT."},
-            {"section": "inference", "check": "boundary_inference",
-             "value": getattr(self, "inference_status", "regular"),
-             "status": "warning" if getattr(self, "boundary_parameter_indices", ()) else "ok",
-             "message": "Conditional covariance holds binding prices fixed; it is not full boundary uncertainty."},
-        ])
+        rows.extend(
+            [
+                {
+                    "section": "fit",
+                    "check": "boundary_kkt_violation",
+                    "value": getattr(self, "boundary_kkt_violation", 0.0),
+                    "status": "ok"
+                    if getattr(self, "boundary_kkt_violation", 0.0) <= self.score_tol
+                    else "warning",
+                    "message": "Feasible structural ascent at binding negative coefficients; valid boundaries satisfy KKT.",
+                },
+                {
+                    "section": "inference",
+                    "check": "boundary_inference",
+                    "value": getattr(self, "inference_status", "regular"),
+                    "status": "warning"
+                    if getattr(self, "boundary_parameter_indices", ())
+                    else "ok",
+                    "message": "Conditional covariance holds binding prices fixed; it is not full boundary uncertainty.",
+                },
+            ]
+        )
         if self.polish_report is not None:
             report = self.polish_report
             rows.append(
@@ -1441,12 +1436,21 @@ class LCLResults:
                 }
             )
 
-        for index, direction in enumerate(getattr(self, "information_weak_directions", [])):
-            rows.append({"section": "inference", "check": f"weak_parameter_direction_{index + 1}",
-                         "value": direction["normalized_eigenvalue"], "status": "warning",
-                         "message": "Inspect this scaled parameter combination: " + str(direction["loadings"])
-                                    + ". Check redundant attributes, sparse classes, or separated membership; "
-                                    "more iterations cannot restore missing identification."})
+        for index, direction in enumerate(
+            getattr(self, "information_weak_directions", [])
+        ):
+            rows.append(
+                {
+                    "section": "inference",
+                    "check": f"weak_parameter_direction_{index + 1}",
+                    "value": direction["normalized_eigenvalue"],
+                    "status": "warning",
+                    "message": "Inspect this scaled parameter combination: "
+                    + str(direction["loadings"])
+                    + ". Check redundant attributes, sparse classes, or separated membership; "
+                    "more iterations cannot restore missing identification.",
+                }
+            )
         if self.em_res.class_probs_by_panel is not None:
             posterior = onp.asarray(self.em_res.class_probs_by_panel)
             entropy = -onp.sum(
@@ -1484,7 +1488,7 @@ class LCLResults:
                 }
             )
 
-        structural = onp.asarray(self.em_res.structural_betas)
+        structural = onp.asarray(self.em_res.betas)
         max_abs_beta = float(onp.max(onp.abs(structural)))
         rows.append(
             {
@@ -1564,7 +1568,7 @@ class LCLResults:
             f"Final log likelihood: {float(self.em_res.unconditional_loglik):.6g}",
             f"Max observed-data score: {self.observed_score_max:.3e} "
             f"(tolerance {self.score_tol:.3g})",
-            f"Boundary KKT violation: {getattr(self, 'boundary_kkt_violation', 0.):.3e}",
+            f"Boundary KKT violation: {getattr(self, 'boundary_kkt_violation', 0.0):.3e}",
             f"Inference: {getattr(self, 'inference_status', 'regular')}",
             f"Warnings: {warnings.height}",
         ]
@@ -1682,7 +1686,9 @@ class LCLResults:
         ):
             raise ValueError("Pass either tabular data or prediction arrays, not both.")
         if data is None and dems_data is not None:
-            raise ValueError("dems_data requires tabular data; use dems for array prediction.")
+            raise ValueError(
+                "dems_data requires tabular data; use dems for array prediction."
+            )
         if past_choices is None and past_choices_dems_data is not None:
             raise ValueError(
                 "past_choices_dems_data can only be used when past_choices is provided."
@@ -1719,8 +1725,8 @@ class LCLResults:
             raise ValueError(
                 "Panel identifiers are required for latent-class prediction."
             )
-        structural_betas = self.em_res.structural_betas
-        if structural_betas is None:
+        betas = self.em_res.betas
+        if betas is None:
             raise ValueError("Structural betas are required for prediction.")
         shares = self.em_res.shares
         if shares is None:
@@ -1762,7 +1768,7 @@ class LCLResults:
             )
             diff_unchosen_chosen_past = _diff_unchosen_chosen(data_past)
             class_probs_by_panel, _ = _compute_conditional_class_probs(
-                structural_betas=structural_betas,
+                betas=betas,
                 thetas=self.em_res.thetas,
                 shares=shares,
                 diff_unchosen_chosen=diff_unchosen_chosen_past,
@@ -1782,7 +1788,7 @@ class LCLResults:
 
         choice_probs_by_class, log_sum_exp_utility = _choice_probabilities_and_logsum(
             predict_data.X,
-            structural_betas,
+            betas,
             predict_data.cases,
             predict_data.num_cases,
         )
@@ -1792,12 +1798,12 @@ class LCLResults:
         if numeraire_idx is None:
             marginal_utility_income = jnp.ones(self.model.num_classes)
         else:
-            marginal_utility_income = -structural_betas[numeraire_idx, :]
+            marginal_utility_income = -betas[numeraire_idx, :]
 
         surplus_by_class = log_sum_exp_utility / marginal_utility_income[None, :]
 
         if numeraire_idx is not None:
-            betas_sans_numeraire = jnp.delete(structural_betas, numeraire_idx, axis=0)
+            betas_sans_numeraire = jnp.delete(betas, numeraire_idx, axis=0)
             wtp_alt_vars_by_class = betas_sans_numeraire / marginal_utility_income
             wtp_alt_vars_by_panel = class_probs_by_panel @ wtp_alt_vars_by_class.T
             schema = [

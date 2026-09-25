@@ -11,21 +11,18 @@ import jax.numpy as jnp
 import numpy as onp
 from jaxtyping import Float64, Int
 
+from lcl._boundary import projected_score
 from lcl.constraints import (
     DEFAULT_NEGATIVE_MIN_ABS,
     NegativeCoefficient,
-    pullback_negative_derivatives,
 )
-from lcl._case_utils import (
-    _diff_unchosen_chosen,
-    _loglik_gradient,
-    _to_structural_betas,
-)
+from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient
 from lcl._choice_model import ChoiceModel
 from lcl._em_alg_startup import _get_starting_vals
 from lcl._em_alg_steps import _em_step, place_em_vars
 from lcl._params import ParamPacking
 from lcl._polish import (
+    POLISH_DECREMENT_TOL,
     PolishReport,
     aitken_extrapolated_gap,
     em_vars_from_flat,
@@ -61,14 +58,10 @@ class _EMRun(NamedTuple):
 
 def _canonicalize_classes(em_vars: EMVars) -> tuple[EMVars, tuple[int, ...]]:
     """Return an observationally equivalent EM state in deterministic class order."""
-    if (
-        em_vars.latent_betas is None
-        or em_vars.structural_betas is None
-        or em_vars.shares is None
-    ):
+    if em_vars.betas is None or em_vars.shares is None:
         return em_vars, ()
 
-    structural = onp.asarray(em_vars.structural_betas)
+    structural = onp.asarray(em_vars.betas)
     shares = onp.asarray(em_vars.shares)
     num_classes = structural.shape[1]
     permutation = tuple(
@@ -97,8 +90,7 @@ def _canonicalize_classes(em_vars: EMVars) -> tuple[EMVars, tuple[int, ...]]:
 
     return (
         EMVars(
-            latent_betas=em_vars.latent_betas[:, perm],
-            structural_betas=em_vars.structural_betas[:, perm],
+            betas=em_vars.betas[:, perm],
             thetas=thetas,
             shares=em_vars.shares[perm],
             unconditional_loglik=em_vars.unconditional_loglik,
@@ -142,8 +134,8 @@ class LatentClassConditionalLogit(ChoiceModel):
     numeraire : str | None, default=None
         The name of the variable to be used as the numeraire (e.g., price or cost).
         If specified, its taste parameter is mathematically constrained to be
-        strictly negative across all latent classes via a softplus transformation
-        to ensure theoretically consistent willingness-to-pay calculations.
+        at most ``-numeraire_min_abs`` across all classes, with the bound enforced
+        directly during optimization.
     spec : LCLSpec | None, optional
         Base specification. Explicit constructor values override its class count
         and numeraire floor. A conflicting numeraire name raises an error.
@@ -488,9 +480,9 @@ class LatentClassConditionalLogit(ChoiceModel):
 
         # EM's likelihood stopping rule need not imply stationarity. A final
         # observed-data solve improves the score before covariance estimation.
-        if em_vars.latent_betas is None or em_vars.shares is None:
+        if em_vars.betas is None or em_vars.shares is None:
             raise RuntimeError("The EM run returned an incomplete parameter state.")
-        flat_params = packing.pack(em_vars.latent_betas, em_vars.thetas, em_vars.shares)
+        flat_params = packing.pack(em_vars.betas, em_vars.thetas, em_vars.shares)
         polish_report: PolishReport | None = None
         if fit_options.polish:
             if progress_callback is not None:
@@ -500,12 +492,11 @@ class LatentClassConditionalLogit(ChoiceModel):
                 diff_unchosen_chosen,
                 data_struct,
                 packing,
-                maxiter=fit_options.polish_maxiter,
-                max_step_norm=optimization_options.max_step_norm,
-                line_search_maxiter=optimization_options.line_search_maxiter,
-                hessian_damping=optimization_options.hessian_damping,
-                initial_trust_radius=optimization_options.initial_trust_radius,
-                accept_any_decrease=optimization_options.accept_any_decrease,
+                optimization_options=replace(
+                    optimization_options,
+                    maxiter=fit_options.polish_maxiter,
+                    newton_decrement_tol=POLISH_DECREMENT_TOL,
+                ),
             )
             if polish_report.accepted:
                 em_vars = em_vars_from_flat(
@@ -530,12 +521,12 @@ class LatentClassConditionalLogit(ChoiceModel):
         if class_permutation != tuple(range(self.num_classes)):
             # Changing the baseline membership class changes the coordinates of
             # its score. Check stationarity in the final reported coordinates.
-            if em_vars.latent_betas is None:
+            if em_vars.betas is None:
                 raise RuntimeError(
                     "Canonicalization returned an incomplete parameter state."
                 )
             score_max = observed_score_max(
-                packing.pack(em_vars.latent_betas, em_vars.thetas, em_vars.shares),
+                packing.pack(em_vars.betas, em_vars.thetas, em_vars.shares),
                 diff_unchosen_chosen,
                 data_struct,
                 packing,
@@ -631,8 +622,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             self.num_classes,
             fit_options,
             optimization_options,
-            self.numeraire_idx,
-            self.numeraire_min_abs,
+            self._negative_bound,
         )
         # Match the placement the compiled step returns, so iteration one and
         # every later iteration share a single executable.
@@ -653,8 +643,7 @@ class LatentClassConditionalLogit(ChoiceModel):
                 self.num_classes,
                 optimization_options,
                 fit_options,
-                self.numeraire_idx,
-                self.numeraire_min_abs,
+                self._negative_bound,
             )
 
             # One host transfer per iteration carries every scalar the loop
@@ -813,8 +802,7 @@ class LatentClassConditionalLogit(ChoiceModel):
             One row per latent class containing first-order and scale diagnostics.
         """
         if (
-            em_vars.latent_betas is None
-            or em_vars.structural_betas is None
+            em_vars.betas is None
             or em_vars.class_probs_by_panel is None
             or data_struct.num_cases_per_panel is None
         ):
@@ -828,21 +816,15 @@ class LatentClassConditionalLogit(ChoiceModel):
         )
         rows: list[dict[str, Any]] = []
         for class_idx in range(self.num_classes):
-            raw_beta = em_vars.latent_betas[:, class_idx]
-            structural_beta = _to_structural_betas(
-                raw_beta, self.numeraire_idx, self.numeraire_min_abs
-            )
+            beta = em_vars.betas[:, class_idx]
             weights = class_probs_by_choice[:, class_idx]
             (neg_loglik, score_rows), grad, hessian = _loglik_gradient(
-                structural_beta, diff_unchosen_chosen, weights
+                beta, diff_unchosen_chosen, weights
             )
-            grad_raw, _, _ = pullback_negative_derivatives(
-                raw_beta,
-                self.numeraire_idx,
-                grad,
-                score_rows,
-                hessian,
-                self.numeraire_min_abs,
+            grad = projected_score(
+                -grad,
+                beta,
+                self._negative_bound.upper_bounds(beta),
             )
             gradient_scale = jnp.maximum(jnp.sum(weights), 1.0)
             rows.append(
@@ -850,8 +832,8 @@ class LatentClassConditionalLogit(ChoiceModel):
                     "em_iter": em_iter,
                     "class": class_idx,
                     "neg_loglik": float(neg_loglik),
-                    "grad_norm": float(jnp.max(jnp.abs(grad_raw)) / gradient_scale),
-                    "max_abs_beta": float(jnp.max(jnp.abs(structural_beta))),
+                    "grad_norm": float(jnp.max(jnp.abs(grad)) / gradient_scale),
+                    "max_abs_beta": float(jnp.max(jnp.abs(beta))),
                     "effective_panels": float(
                         onp.asarray(em_vars.class_probs_by_panel[:, class_idx]).sum()
                     ),

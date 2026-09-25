@@ -13,15 +13,16 @@ from jax.nn import softmax
 from jax.ops import segment_sum
 from jaxtyping import Array, Float64, Integer
 
-from lcl.constraints import (
-    DEFAULT_NEGATIVE_MIN_ABS,
-    pullback_negative_derivatives,
-)
-from lcl._case_utils import _loglik_gradient, _loglik_value, _to_structural_betas
+from lcl.constraints import NegativeCoefficientBound
+from lcl._case_utils import _loglik_gradient, _loglik_value
 from lcl._demographics import _update_thetas
 from lcl._jax_compat import Mesh, NamedSharding, P, shard_map
-from lcl._kernels import _class_membership_log_probs, _diff_log_kernels, _diff_logit_components
-from lcl._optimize import exact_newton_minimize, newton_kwargs
+from lcl._kernels import (
+    _class_membership_log_probs,
+    _diff_log_kernels,
+    _diff_logit_components,
+)
+from lcl._optimize import exact_newton_minimize, newton_kwargs, scaled_objective
 from lcl.options import FitOptions, OptimizationOptions
 from lcl._struct import Data, DiffUnchosenChosen, EMStepDiagnostics, EMVars
 
@@ -65,8 +66,7 @@ def _compiled_em_step(
     num_classes: int,
     optimization_options: OptimizationOptions,
     num_devices: int,
-    numeraire_idx: int | None,
-    numeraire_min_abs: float,
+    negative_bound: NegativeCoefficientBound,
 ) -> Callable[[EMVars, DiffUnchosenChosen, Data], tuple[EMVars, EMStepDiagnostics]]:
     """Return a compiled EM recursion for one static configuration.
 
@@ -87,10 +87,8 @@ def _compiled_em_step(
         :class:`~lcl.options.FitOptions` because everything else on that object --
         the seed above all -- leaves the compiled graph identical, and keying on it
         would recompile once per multi-start seed.
-    numeraire_idx : int | None
-        Row constrained through the softplus transform.
-    numeraire_min_abs : float
-        Minimum absolute magnitude of the constrained coefficient.
+    negative_bound : NegativeCoefficientBound
+        Resolved negative coefficient constraint, or an unconstrained record.
 
     Returns
     -------
@@ -111,8 +109,7 @@ def _compiled_em_step(
             num_classes,
             optimization_options,
             num_devices,
-            numeraire_idx,
-            numeraire_min_abs,
+            negative_bound,
         )
 
     return filter_jit(step)
@@ -125,8 +122,7 @@ def _em_step(
     num_classes: int,
     optimization_options: OptimizationOptions,
     fit_options: FitOptions,
-    numeraire_idx: int | None = None,
-    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
+    negative_bound: NegativeCoefficientBound = NegativeCoefficientBound(),
 ) -> tuple[EMVars, EMStepDiagnostics]:
     """Execute one compiled EM recursion.
 
@@ -134,10 +130,8 @@ def _em_step(
     incoming state and dispatches to the executable cached by
     :func:`_compiled_em_step`.
     """
-    if em_vars.structural_betas is None:
+    if em_vars.betas is None:
         raise ValueError("Structural betas are required before running an EM step.")
-    if em_vars.latent_betas is None:
-        raise ValueError("Latent betas are required before running an EM step.")
     if em_vars.shares is None:
         raise ValueError("Class shares are required before running an EM step.")
     if em_vars.class_probs_by_panel is None:
@@ -153,8 +147,7 @@ def _em_step(
         num_classes,
         optimization_options,
         fit_options.num_devices,
-        numeraire_idx,
-        float(numeraire_min_abs),
+        negative_bound,
     )
     return step(em_vars, diff_unchosen_chosen, data)
 
@@ -166,8 +159,7 @@ def _em_step_impl(
     num_classes: int,
     optimization_options: OptimizationOptions,
     num_devices: int,
-    numeraire_idx: int | None = None,
-    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
+    negative_bound: NegativeCoefficientBound = NegativeCoefficientBound(),
 ) -> tuple[EMVars, EMStepDiagnostics]:
     """Execute a single step of the Expectation-Maximization (EM) algorithm.
 
@@ -188,10 +180,8 @@ def _em_step_impl(
         Optimization settings for the exact-Newton MLE solver.
     num_devices : int
         Devices the class axis is sharded across.
-    numeraire_idx : int | None, optional
-        Column index of the numeraire variable.
-    numeraire_min_abs : float, default=1e-5
-        Minimum absolute value imposed on the numeraire coefficient.
+    negative_bound : NegativeCoefficientBound
+        Resolved negative coefficient constraint, or an unconstrained record.
 
     Returns
     -------
@@ -200,10 +190,9 @@ def _em_step_impl(
     diagnostics : :class:`~lcl._struct.EMStepDiagnostics`
         Device-resident M-step convergence scalars.
     """
-    structural_betas = em_vars.structural_betas
-    latent_betas = em_vars.latent_betas
+    betas = em_vars.betas
     shares = em_vars.shares
-    if structural_betas is None or latent_betas is None or shares is None:
+    if betas is None or shares is None:
         raise ValueError("The EM state is incomplete; see _em_step for the checks.")
 
     # The preceding likelihood evaluation also produces this E-step. Reuse the
@@ -214,14 +203,13 @@ def _em_step_impl(
         raise ValueError("Panel posteriors and case-to-panel identifiers are required.")
 
     # Update class-specific taste coefficients using posterior case weights.
-    updated_latent_betas, beta_newton_error = _update_betas(
-        latent_betas,
+    updated_betas, beta_newton_error = _update_betas(
+        betas,
         updated_class_probs_by_panel,
         diff_unchosen_chosen,
         optimization_options,
         num_devices,
-        numeraire_idx,
-        numeraire_min_abs,
+        negative_bound,
         panels_of_cases=data.panels_of_cases,
     )
 
@@ -257,18 +245,14 @@ def _em_step_impl(
         updated_shares = unconditional_class_probs_by_panel.mean(axis=0)
 
     # Evaluate the observed-data likelihood at the completed EM update.
-    updated_structural_betas = _to_structural_betas(
-        updated_latent_betas, numeraire_idx, numeraire_min_abs
-    )
     next_class_probs_by_panel, unconditional_loglik = _posterior_and_loglik(
-        _compute_em_log_kernels(updated_structural_betas, diff_unchosen_chosen, data),
+        _compute_em_log_kernels(updated_betas, diff_unchosen_chosen, data),
         unconditional_class_probs_by_panel,
     )
 
     return (
         EMVars(
-            latent_betas=updated_latent_betas,
-            structural_betas=updated_structural_betas,
+            betas=updated_betas,
             thetas=updated_thetas,
             shares=updated_shares,
             unconditional_loglik=unconditional_loglik,
@@ -282,7 +266,7 @@ def _em_step_impl(
 
 
 def _compute_conditional_class_probs(
-    structural_betas: Float64[Array, "alt_vars classes"],
+    betas: Float64[Array, "alt_vars classes"],
     thetas: Float64[Array, "dem_vars_plus_one classes_minus_one"] | None,
     shares: Float64[Array, "classes"],
     diff_unchosen_chosen: DiffUnchosenChosen,
@@ -296,7 +280,7 @@ def _compute_conditional_class_probs(
 
     Parameters
     ----------
-    structural_betas : Float64[Array, "alt_vars classes"]
+    betas : Float64[Array, "alt_vars classes"]
         Taste parameters for each latent class.
     thetas : Float64[Array, "dem_vars_plus_one classes_minus_one"] | None
         Coefficients for the fractional response regression on demographics.
@@ -320,9 +304,11 @@ def _compute_conditional_class_probs(
     else:
         if data.num_panels is None:
             raise ValueError("Panel identifiers are required for class membership.")
-        log_class_probs = _class_membership_log_probs(thetas, data.dems, data.num_panels)
+        log_class_probs = _class_membership_log_probs(
+            thetas, data.dems, data.num_panels
+        )
 
-    log_kernels = _compute_log_kernels(structural_betas, diff_unchosen_chosen, data)
+    log_kernels = _compute_log_kernels(betas, diff_unchosen_chosen, data)
     conditional_class_probs = softmax(log_class_probs + log_kernels, axis=1)
 
     if data.panels_of_cases is None:
@@ -350,8 +336,7 @@ def _update_betas(
     diff_unchosen_chosen: DiffUnchosenChosen,
     optimization_options: OptimizationOptions,
     num_devices: int,
-    numeraire_idx: int | None,
-    numeraire_min_abs: float = DEFAULT_NEGATIVE_MIN_ABS,
+    negative_bound: NegativeCoefficientBound = NegativeCoefficientBound(),
     panels_of_cases: Integer[Array, "cases"] | None = None,
 ) -> tuple[Float64[Array, "alt_vars classes"], Float64[Array, "classes"]]:
     """Optimize taste parameters using strict SPMD multi-GPU parallelism.
@@ -359,7 +344,7 @@ def _update_betas(
     Parameters
     ----------
     betas : Float64[Array, "alt_vars classes"]
-        Current unconstrained taste parameters.
+        Current taste coefficients.
     class_probs_by_choice : Float64[Array, "weight_rows classes"]
         Posterior weights by case, or by panel when ``panels_of_cases`` is given.
     diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
@@ -368,10 +353,8 @@ def _update_betas(
         MLE solver configurations.
     num_devices : int
         Number of devices to shard the class axis across.
-    numeraire_idx : int | None
-        Column index of the numeraire variable.
-    numeraire_min_abs : float, default=1e-5
-        Minimum absolute value imposed on the numeraire coefficient.
+    negative_bound : NegativeCoefficientBound
+        Resolved negative coefficient constraint, or an unconstrained record.
     panels_of_cases : Array | None, optional
         Expand panel weights one class at a time inside the solver. This avoids
         a live ``(cases, classes)`` matrix and shards only the smaller panel matrix.
@@ -420,8 +403,7 @@ def _update_betas(
                     device_betas,
                     device_weights,
                     combine(dynamic_diff, static_diff),
-                    numeraire_idx,
-                    numeraire_min_abs,
+                    negative_bound,
                     optimization_options,
                     case_panels,
                 )
@@ -450,8 +432,7 @@ def _distributed_update(
     device_betas: Float64[Array, "... classes_per_device alt_vars"],
     device_weights: Float64[Array, "... classes_per_device weight_rows"],
     diff: DiffUnchosenChosen,
-    numeraire_idx: int | None,
-    numeraire_min_abs: float,
+    negative_bound: NegativeCoefficientBound,
     optimization_options: OptimizationOptions,
     panels_of_cases: Integer[Array, "cases"] | None = None,
 ) -> tuple[
@@ -463,16 +444,14 @@ def _distributed_update(
     Parameters
     ----------
     device_betas : Float64[Array, "... classes_per_device alt_vars"]
-        Current latent beta vectors assigned to this shard. Some JAX execution
+        Current beta vectors assigned to this shard. Some JAX execution
         paths include a leading singleton shard axis, which is preserved on return.
     device_weights : Float64[Array, "... classes_per_device weight_rows"]
         Case weights assigned to each class on this shard.
     diff : :class:`~lcl._struct.DiffUnchosenChosen`
         Differenced design matrix shared by all class updates.
-    numeraire_idx : int | None
-        Optional column index constrained through the softplus transform.
-    numeraire_min_abs : float
-        Minimum absolute value imposed on the numeraire coefficient.
+    negative_bound : NegativeCoefficientBound
+        Resolved negative coefficient constraint, or an unconstrained record.
     optimization_options : :class:`~lcl.options.OptimizationOptions`
         Newton optimization settings.
     panels_of_cases : Array | None, optional
@@ -481,7 +460,7 @@ def _distributed_update(
     Returns
     -------
     updated : Float64[Array, "... classes_per_device alt_vars"]
-        Optimized latent beta vectors for the shard, with any leading singleton
+        Optimized beta vectors for the shard, with any leading singleton
         shard axis restored.
     newton_error : Float64[Array, "... classes_per_device"]
         Final Newton decrement for each class on the shard.
@@ -504,46 +483,17 @@ def _distributed_update(
         if panels_of_cases is not None:
             w = w[panels_of_cases]
 
-        def _value_fn_closure(
-            p: Float64[Array, "alt_vars"],
-            d_diff: object,
-            w_inner: Float64[Array, "cases"],
-        ) -> Float64[Array, ""]:
-            """Evaluate the objective using the dynamic/static diff PyTree split."""
-            full_diff = combine(d_diff, static_diff)
-            p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-            scale = jnp.maximum(jnp.sum(w_inner), 1.0)
-            return _loglik_value(p_struct, full_diff, w_inner) / scale
-
-        def _loglik_fn_closure(
-            p: Float64[Array, "alt_vars"],
-            d_diff: object,
-            w_inner: Float64[Array, "cases"],
-        ) -> tuple[
-            Float64[Array, ""],
-            Float64[Array, "alt_vars"],
-            Float64[Array, "alt_vars alt_vars"],
-        ]:
-            """Evaluate objective, gradient, and Hessian with numeraire chain rule."""
-            full_diff = combine(d_diff, static_diff)
-            p_struct = _to_structural_betas(p, numeraire_idx, numeraire_min_abs)
-
-            (val, aux), grad, hessian = _loglik_gradient(p_struct, full_diff, w_inner)
-
-            grad, aux, hessian = pullback_negative_derivatives(
-                p, numeraire_idx, grad, aux, hessian, numeraire_min_abs
-            )
-
-            scale = jnp.maximum(jnp.sum(w_inner), 1.0)
-            return val / scale, grad / scale, hessian / scale
-
+        value, derivatives = scaled_objective(
+            _loglik_value, _loglik_gradient, jnp.sum(w)
+        )
         optim_res = exact_newton_minimize(
-            _value_fn_closure,
-            _loglik_fn_closure,
+            value,
+            derivatives,
             b,
-            dyn_diff,
+            combine(dyn_diff, static_diff),
             w,
             **newton_kwargs(optimization_options),
+            upper_bounds=negative_bound.upper_bounds(b),
         )
         return optim_res.params, optim_res.error
 
@@ -590,14 +540,14 @@ def _compute_panel_logliks(
 
 @filter_jit
 def _compute_unconditional_loglik(
-    structural_betas: Float64[Array, "alt_vars classes"],
+    betas: Float64[Array, "alt_vars classes"],
     class_probs_by_panel: Float64[Array, "panels classes"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
 ) -> Float64[Array, ""]:
     """Aggregate panel log likelihoods to a scalar for convergence checking."""
     panel_logliks = _compute_panel_logliks(
-        structural_betas, class_probs_by_panel, diff_unchosen_chosen, data
+        betas, class_probs_by_panel, diff_unchosen_chosen, data
     )
     return jnp.sum(panel_logliks)
 

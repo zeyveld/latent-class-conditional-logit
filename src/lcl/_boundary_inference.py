@@ -6,7 +6,6 @@ for assumptions, active-set selection, and fallback interpretation.
 """
 
 from collections.abc import Sequence
-from dataclasses import replace
 import logging
 from time import perf_counter
 
@@ -16,10 +15,9 @@ import polars as pl
 from jaxtyping import Array, ArrayLike, Bool, Float64, Integer
 from scipy.linalg import solve_triangular
 from scipy.optimize import nnls
-from scipy.special import expit
 
 from lcl._analytic_derivatives import _panel_scores_and_hessian
-from lcl._boundary import boundary_kkt_violation
+from lcl._boundary import boundary_kkt_violation, projected_score
 from lcl._boundary_types import BoundarySummaryDiagnostics, CoefficientMoments
 from lcl._inference import (
     _aggregate_scores,
@@ -45,21 +43,18 @@ def boundary_covariance(
         raise ValueError(
             "Boundary covariance requires a constrained coefficient and panel data."
         )
-    beta, theta = packing.unpack(flat)
-    structural = jnp.concatenate([packing.to_structural(beta).ravel(), theta.ravel()])
-    J, H = _panel_scores_and_hessian(
-        structural, diff, data, replace(packing, numeraire_idx=None)
-    )
+    beta, _ = packing.unpack(flat)
+    J, H = _panel_scores_and_hessian(flat, diff, data, packing)
     score = np.asarray(jnp.mean(J, axis=0))
     active = np.asarray(result.boundary_parameter_indices, dtype=int)
-    jac = np.ones(result.num_params)
     price_indices = packing.numeraire_idx * packing.num_classes + np.arange(
         packing.num_classes
     )
-    jac[price_indices] = -expit(np.asarray(beta)[packing.numeraire_idx])
     result.boundary_kkt_violation = boundary_kkt_violation(score, active)
-    result.observed_score_max = max(
-        float(np.max(abs(score * jac))), result.boundary_kkt_violation
+    result.observed_score_max = float(
+        jnp.max(
+            jnp.abs(projected_score(jnp.asarray(score), flat, packing.upper_bounds()))
+        )
     )
     result.converged = bool(result.observed_score_max <= result.score_tol)
     if not result.converged:
@@ -91,8 +86,8 @@ def boundary_covariance(
     covariance = _sandwich_covariance(
         inverse, meat[np.ix_(free, free)], result.inference.covariance
     )
-    latent = np.zeros((result.num_params, result.num_params))
-    latent[np.ix_(free, free)] = covariance / np.outer(jac[free], jac[free])
+    full_covariance = np.zeros((result.num_params, result.num_params))
+    full_covariance[np.ix_(free, free)] = covariance
     result.inference_status = "conditional_on_boundary" if active.size else "regular"
     result.boundary_summary_diagnostics = {"method": result.inference_status}
     threshold = _selection_threshold(groups)
@@ -112,10 +107,7 @@ def boundary_covariance(
     near_boundary = bool(active.size)
     if not active.size:
         price_sd = np.sqrt(np.maximum(np.diag(covariance)[price_indices], 0))
-        distances = (
-            -np.asarray(packing.to_structural(beta))[packing.numeraire_idx]
-            - packing.numeraire_min_abs
-        )
+        distances = -np.asarray(beta)[packing.numeraire_idx] - packing.numeraire_min_abs
         near_boundary = bool(np.any(distances <= threshold * price_sd))
     if result.inference.boundary == "projected" and near_boundary:
         result._boundary_summary_inputs = dict(
@@ -131,7 +123,7 @@ def boundary_covariance(
             "Inspect beta_summary().inference_status for summary uncertainty.",
             len(active),
         )
-    return jnp.asarray((latent + latent.T) / 2)
+    return jnp.asarray((full_covariance + full_covariance.T) / 2)
 
 
 def _selection_threshold(groups: int) -> float:
@@ -260,7 +252,7 @@ def _summary_jacobian(result: LCLResults) -> CoefficientMoments:
     Memory never contains draws by households by classes.
     """
     packing = result._param_packing
-    beta = _structural_betas(result)
+    beta = _betas(result)
     _, theta = packing.unpack(result.flat_params)
     if result.data.num_panels is None:
         raise ValueError("Panel identifiers are required for coefficient summaries.")
@@ -327,7 +319,7 @@ def projected_beta_summary(result: LCLResults) -> pl.DataFrame:
     simulated_dimension = 0
     moments = _summary_jacobian(result)
     stds = np.sqrt(np.maximum(moments.variances, 0))
-    beta = _structural_betas(result)
+    beta = _betas(result)
     identified = moments.variances > 1e-12 * np.maximum(np.max(beta**2, axis=1), 1.0)
     if info.positive_definite:
         inverse = np.asarray(inverse_array)
@@ -414,11 +406,11 @@ def projected_beta_summary(result: LCLResults) -> pl.DataFrame:
     return result._boundary_summary_cache.clone()
 
 
-def _structural_betas(result: LCLResults) -> Float64[np.ndarray, "alt_vars classes"]:
-    """Read the reported coefficients without a latent-coordinate transformation."""
-    if result.em_res.structural_betas is None:
+def _betas(result: LCLResults) -> Float64[np.ndarray, "alt_vars classes"]:
+    """Read the fitted taste coefficients."""
+    if result.em_res.betas is None:
         raise ValueError("Structural coefficients are required for boundary inference.")
-    return np.asarray(result.em_res.structural_betas)
+    return np.asarray(result.em_res.betas)
 
 
 def _centered_score_meat(

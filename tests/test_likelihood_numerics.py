@@ -7,11 +7,7 @@ from jax.nn import softmax
 
 import lcl
 from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient, _loglik_value
-from lcl.constraints import (
-    NegativeCoefficient,
-    pullback_negative_derivatives,
-    transform_negative_coefficient,
-)
+from lcl.constraints import NegativeCoefficient
 from lcl._demographics import _compute_grouped_data_loglik_grad_hess
 from lcl._em_alg_steps import _compute_panel_logliks
 from lcl._jax_compat import device_put_array_leaves
@@ -104,29 +100,6 @@ def test_scalar_and_derivative_loglik_paths_match_at_extreme_utilities() -> None
 
     assert jnp.isfinite(scalar_value)
     assert jnp.allclose(scalar_value, derivative_value)
-
-
-def test_negative_constraint_pullback_matches_autodiff() -> None:
-    raw = jnp.array([0.4, -0.2])
-    numeraire_idx = 0
-
-    def raw_objective(params):
-        structural = transform_negative_coefficient(params, numeraire_idx, min_abs=1e-3)
-        return 0.5 * structural @ jnp.array([[2.0, 0.3], [0.3, 1.5]]) @ structural
-
-    structural = transform_negative_coefficient(raw, numeraire_idx, min_abs=1e-3)
-    grad_struct = jnp.array([[2.0, 0.3], [0.3, 1.5]]) @ structural
-    hess_struct = jnp.array([[2.0, 0.3], [0.3, 1.5]])
-    score_rows = jnp.stack([grad_struct, grad_struct * 0.5])
-
-    grad_raw, score_raw, hess_raw = pullback_negative_derivatives(
-        raw, numeraire_idx, grad_struct, score_rows, hess_struct
-    )
-
-    assert jnp.allclose(grad_raw, jax.grad(raw_objective)(raw))
-    assert jnp.allclose(hess_raw, jax.hessian(raw_objective)(raw))
-    assert score_raw.shape == score_rows.shape
-    assert score_raw[0, 0] != score_rows[0, 0]
 
 
 def _demographic_data_from_dems(dems) -> Data:
@@ -376,8 +349,7 @@ def test_prediction_uses_demographics_when_no_past_choices() -> None:
         inference=InferenceOptions(skip=True),
     )
     results.em_res = results.em_res._replace(
-        structural_betas=jnp.array([[0.0, 0.0]]),
-        latent_betas=jnp.array([[0.0, 0.0]]),
+        betas=jnp.array([[0.0, 0.0]]),
         thetas=jnp.array([[0.0], [2.0]]),
         shares=jnp.array([0.5, 0.5]),
     )
@@ -411,8 +383,8 @@ def test_lcl_spec_api_custom_negative_constraint_floor() -> None:
 
     assert model.numeraire == "cost"
     assert model.numeraire_min_abs == 1e-3
-    assert results.em_res.structural_betas is not None
-    assert jnp.all(results.em_res.structural_betas[model.numeraire_idx, :] <= -1e-3)
+    assert results.em_res.betas is not None
+    assert jnp.all(results.em_res.betas[model.numeraire_idx, :] <= -1e-3)
     assert "cost [negative, min_abs=0.001]" in results.spec_summary()
     assert results.em_history_.height >= 1
     assert set(results.optimization_history_.columns) >= {
@@ -540,8 +512,7 @@ def test_prediction_accepts_tabular_past_choices() -> None:
         inference=InferenceOptions(skip=True),
     )
     results.em_res = results.em_res._replace(
-        structural_betas=jnp.array([[1.0, -1.0]]),
-        latent_betas=jnp.array([[1.0, -1.0]]),
+        betas=jnp.array([[1.0, -1.0]]),
         thetas=jnp.array([[0.0], [0.5]]),
         shares=jnp.array([0.5, 0.5]),
     )
@@ -787,8 +758,8 @@ def _posterior_wtp_df(seed: int = 5, num_panels: int = 120) -> pl.DataFrame:
     return pl.DataFrame(rows)
 
 
-def test_posterior_wtp_has_finite_delta_and_bootstrap_standard_errors() -> None:
-    """Differentiating through the Bayes update yields usable WTP uncertainty."""
+def test_posterior_wtp_inference_checks_gaussian_boundary_probability() -> None:
+    """Posterior targets propagate uncertainty and screen denominator boundary risk."""
     df = _posterior_wtp_df()
     results = LatentClassConditionalLogit(num_classes=2, numeraire="cost").fit(
         data=df,
@@ -808,6 +779,14 @@ def test_posterior_wtp_has_finite_delta_and_bootstrap_standard_errors() -> None:
         demographic_var="income_quintile",
         partition_type=PartitionType.CATEGORICAL,
     )
+    delta = next(iter(prediction.compute_wtp(request, show=False).values()))
+    assert onp.all(onp.isfinite(delta["Standard_Error"].to_numpy()))
+    assert onp.all(delta["Standard_Error"].to_numpy() > 0.0)
+    with pytest.raises(ValueError, match="bound-crossing probability exceeds"):
+        prediction.compute_wtp(request, se="bootstrap", bootstrap_draws=200, show=False)
+    # A deliberately local covariance isolates the posterior simulation formula
+    # from this sample's weakly identified price denominator.
+    results.cov_matrix = results.cov_matrix * 1e-4
     delta = next(iter(prediction.compute_wtp(request, show=False).values()))
     bootstrap = next(
         iter(
@@ -842,8 +821,7 @@ def test_wtp_uses_stored_posterior_class_probs_with_past_choices() -> None:
         inference=InferenceOptions(skip=True),
     )
     results.em_res = results.em_res._replace(
-        structural_betas=jnp.array([[-1.0, -1.0], [2.0, 10.0]]),
-        latent_betas=jnp.array([[0.0, 0.0], [2.0, 10.0]]),
+        betas=jnp.array([[-1.0, -1.0], [2.0, 10.0]]),
         thetas=None,
         shares=jnp.array([0.5, 0.5]),
     )
@@ -1234,7 +1212,7 @@ def test_cl_hessian_covariance_uses_exact_hessian_not_opg_inverse() -> None:
     def objective(params):
         return _loglik_gradient(params, diff, weights)[0][0]
 
-    expected_cov = jnp.linalg.pinv(jax.hessian(objective)(results.latent_coeff_))
+    expected_cov = jnp.linalg.pinv(jax.hessian(objective)(results.coeff_))
 
     assert onp.allclose(onp.array(results.cov_matrix), onp.array(expected_cov))
 

@@ -10,7 +10,7 @@ import polars as pl
 from jax.ops import segment_sum
 from jaxtyping import Array, Bool, Float64, Int, Integer, Shaped
 
-from lcl._case_utils import _to_structural_betas
+from lcl._delta import GAUSSIAN_BOUND_PROBABILITY_LIMIT, gaussian_upper_tail_probability
 from lcl._elasticities import compute_elasticities, elasticity_design_derivative
 from lcl._logging import log_or_print
 from lcl._labels import numeraire_enters_linearly
@@ -145,7 +145,11 @@ class _PredictionBase:
         self.wtp_alt_vars_by_panel = wtp_alt_vars_by_panel_df
         if not self._money_metric_valid:
             self.wtp_alt_vars_by_panel = self.wtp_alt_vars_by_panel.with_columns(
-                [pl.lit(float("nan")).alias(c) for c in self.wtp_alt_vars_by_panel.columns if c != "panels"]
+                [
+                    pl.lit(float("nan")).alias(c)
+                    for c in self.wtp_alt_vars_by_panel.columns
+                    if c != "panels"
+                ]
             )
         self.predict_data = predict_data
         self.results = results
@@ -289,6 +293,30 @@ class _PredictionBase:
             raise ValueError("Panel identifiers are required for prediction inference.")
         return jnp.asarray(self.panel_weights)[data.panels_of_cases]
 
+    def _denominator_uncertainty(self) -> dict[str, Any]:
+        """Report marginal Gaussian uncertainty without changing fitted covariance."""
+        count = getattr(self.results.model, "num_classes", 1)
+        index = self.results.model.numeraire_idx
+        indices = index * count + onp.arange(count)
+        means = onp.asarray(self.results.flat_params)[indices]
+        variances = onp.diag(onp.asarray(self.results.cov_matrix))[indices]
+        floor = self.results.model.numeraire_min_abs
+        return {
+            "denominator_std_error": onp.sqrt(
+                onp.where(
+                    onp.isfinite(variances) & (variances >= 0), variances, onp.nan
+                )
+            ),
+            "gaussian_bound_crossing_probability": gaussian_upper_tail_probability(
+                means, variances, -floor
+            ),
+            "gaussian_zero_crossing_probability": gaussian_upper_tail_probability(
+                means, variances, 0.0
+            ),
+            "bootstrap_bound_probability_limit": [GAUSSIAN_BOUND_PROBABILITY_LIMIT]
+            * count,
+        }
+
     def _quantity_se(
         self,
         func: Any,
@@ -296,16 +324,15 @@ class _PredictionBase:
         *,
         bootstrap_draws: int = 500,
         bootstrap_seed: int = 0,
+        requires_negative_numeraire: bool = False,
         **kwargs: Any,
     ) -> tuple[Float64[onp.ndarray, "*output"], Float64[onp.ndarray, "*output"]]:
         """Evaluate a counterfactual quantity with the requested uncertainty.
 
-        The delta method linearizes, which is exact for a mildly nonlinear
-        aggregate and optimistic for a sharply curved one.  Market shares and
-        consumer surplus can be sharply curved when a class's numeraire
-        coefficient is weakly identified, so the parametric bootstrap -- drawing
-        in the unconstrained parameterization, then transforming -- is offered
-        alongside it.
+        The delta method linearizes the target. Parameter simulation also
+        captures curvature but requires a reliable Gaussian approximation.
+        Monetary ratios use a deterministic marginal bound-probability screen;
+        shares and elasticities retain all unmodified Gaussian draws.
         """
         if se not in {"delta", "bootstrap", "none"}:
             raise ValueError("se must be 'delta', 'bootstrap', or 'none'.")
@@ -323,6 +350,7 @@ class _PredictionBase:
             flat_params,
             draws=bootstrap_draws,
             seed=bootstrap_seed,
+            requires_negative_numeraire=requires_negative_numeraire,
             **kwargs,
         )
         return value, onp.asarray(standard_error)
@@ -529,6 +557,7 @@ class _PredictionBase:
         value, standard_error = self._quantity_se(
             _mean_surplus_fn,
             se,
+            requires_negative_numeraire=True,
             bootstrap_draws=bootstrap_draws,
             bootstrap_seed=bootstrap_seed,
             case_weights=self._case_panel_weights(),
@@ -594,6 +623,7 @@ class _PredictionBase:
         value, standard_error = self._quantity_se(
             _mean_surplus_change_fn,
             se,
+            requires_negative_numeraire=True,
             bootstrap_draws=bootstrap_draws,
             bootstrap_seed=bootstrap_seed,
             baseline=baseline_kwargs,
@@ -806,7 +836,7 @@ class LCLPrediction(_PredictionBase):
         """
         data = self.predict_data
         assert data.num_panels is not None and self.class_probs_by_panel is not None
-        _, prior = self.results._structural_betas_and_class_probs(
+        _, prior = self.results._betas_and_class_probs(
             self.results.flat_params, data.dems, data.num_panels
         )
         history_counts = (
@@ -1097,6 +1127,7 @@ class LCLPrediction(_PredictionBase):
                         panel_derivatives=panel_derivatives,
                         draws=bootstrap_draws,
                         seed=bootstrap_seed,
+                        requires_negative_numeraire=True,
                         **posterior_kwargs,
                     )
                     se_float = float(se_val)
@@ -1184,11 +1215,11 @@ class LCLPrediction(_PredictionBase):
         numeraire_idx = getattr(self.results.model, "numeraire_idx", None)
         if numeraire_idx is None:
             raise ValueError("A numeraire must be defined to compute WTP.")
-        structural_betas = self.results.em_res.structural_betas
-        if structural_betas is None:
+        betas = self.results.em_res.betas
+        if betas is None:
             raise ValueError("Structural betas are required.")
 
-        denominator = -structural_betas[numeraire_idx, :]
+        denominator = -betas[numeraire_idx, :]
         if target is not None and (
             target not in self.results.model.case_varnames
             or target == self.results.model.numeraire
@@ -1202,7 +1233,7 @@ class LCLPrediction(_PredictionBase):
                 continue
             if target is not None and variable != target:
                 continue
-            ratios = structural_betas[var_idx, :] / denominator
+            ratios = betas[var_idx, :] / denominator
             for class_idx in range(self.results.model.num_classes):
                 rows.append(
                     {
@@ -1220,14 +1251,20 @@ class LCLPrediction(_PredictionBase):
         return pl.DataFrame(rows)
 
     def denominator_diagnostics(self) -> pl.DataFrame:
-        """Return denominator diagnostics for WTP/tradeoff ratios."""
+        """Return denominator levels, SEs, and marginal Gaussian crossing probabilities.
+
+        Probabilities above the configured bound drive the deterministic 0.001
+        bootstrap screen; probabilities above zero describe denominator sign
+        uncertainty. These are diagnostics, not joint coverage guarantees.
+        Unavailable covariance produces NaN uncertainty diagnostics.
+        """
         numeraire_idx = getattr(self.results.model, "numeraire_idx", None)
         if numeraire_idx is None:
             raise ValueError("A numeraire must be defined to compute diagnostics.")
-        structural_betas = self.results.em_res.structural_betas
-        if structural_betas is None:
+        betas = self.results.em_res.betas
+        if betas is None:
             raise ValueError("Structural betas are required.")
-        denominator = -structural_betas[numeraire_idx, :]
+        denominator = -betas[numeraire_idx, :]
         return pl.DataFrame(
             {
                 "class": list(range(self.results.model.num_classes)),
@@ -1239,6 +1276,7 @@ class LCLPrediction(_PredictionBase):
                 * self.results.model.num_classes,
                 "denominator_value": onp.asarray(denominator),
                 "abs_denominator": onp.asarray(jnp.abs(denominator)),
+                **self._denominator_uncertainty(),
                 "min_abs_floor": [self.results._param_packing.numeraire_min_abs]
                 * self.results.model.num_classes,
             }
@@ -1280,13 +1318,11 @@ class LCLPrediction(_PredictionBase):
         panel_derivatives: Float64[Array, "panels alt_vars"] | None = None,
     ) -> Float64[Array, ""]:
         """Compute a subset mean WTP using fixed class probabilities."""
-        structural_betas = self.results.em_res.structural_betas
-        if structural_betas is None:
+        betas = self.results.em_res.betas
+        if betas is None:
             raise ValueError("Structural betas are required.")
         if panel_derivatives is not None:
-            ratios = (panel_derivatives @ structural_betas) / -structural_betas[
-                cost_idx
-            ]
+            ratios = (panel_derivatives @ betas) / -betas[cost_idx]
             panel_wtp = jnp.sum(class_probs * ratios, axis=1)
             return jnp.sum(
                 panel_wtp[subset_panel_indices] * subset_panel_weights
@@ -1295,9 +1331,7 @@ class LCLPrediction(_PredictionBase):
         subset_shares = jnp.sum(
             class_probs[subset_panel_indices] * weights[:, None], axis=0
         )
-        wtp_by_class = structural_betas[target_idx, :] / (
-            -structural_betas[cost_idx, :]
-        )
+        wtp_by_class = betas[target_idx, :] / (-betas[cost_idx, :])
         return jnp.sum(subset_shares * wtp_by_class)
 
     def _compute_subset_mean_wtp(
@@ -1319,7 +1353,7 @@ class LCLPrediction(_PredictionBase):
         Bayesian posterior implied by ``flat_params``, so differentiating this
         function propagates uncertainty through the update itself.
         """
-        structural_betas, class_probs = _betas_and_class_probs(
+        betas, class_probs = _betas_and_class_probs(
             self.results,
             flat_params,
             dems,
@@ -1328,9 +1362,7 @@ class LCLPrediction(_PredictionBase):
             past_diff_unchosen_chosen,
         )
         if panel_derivatives is not None:
-            ratios = (panel_derivatives @ structural_betas) / -structural_betas[
-                cost_idx
-            ]
+            ratios = (panel_derivatives @ betas) / -betas[cost_idx]
             panel_wtp = jnp.sum(class_probs * ratios, axis=1)
             return jnp.sum(
                 panel_wtp[subset_panel_indices] * subset_panel_weights
@@ -1339,9 +1371,7 @@ class LCLPrediction(_PredictionBase):
         subset_shares = jnp.sum(
             class_probs[subset_panel_indices] * weights[:, None], axis=0
         )
-        wtp_by_class = structural_betas[target_idx, :] / (
-            -structural_betas[cost_idx, :]
-        )
+        wtp_by_class = betas[target_idx, :] / (-betas[cost_idx, :])
         return jnp.sum(subset_shares * wtp_by_class)
 
 
@@ -1358,11 +1388,10 @@ class CLPrediction(_PredictionBase):
     ) -> pl.DataFrame:
         """Return mean marginal WTP with delta or parametric-bootstrap SEs.
 
-        Both methods work in the unconstrained parameterization and apply the
-        softplus transform inside the target function.  Drawing structural
-        coefficients directly would put mass on a positive numeraire coefficient
-        -- a region the constraint excludes -- and the resulting ratios have no
-        finite variance to summarize.
+        Both methods use the coefficient vector and its covariance directly.
+        Gaussian simulation screens the fitted probability above the numeraire
+        bound at 0.001, independently of seed and draw count. Passing this screen
+        does not guarantee finite ratio moments or boundary-aware inference.
 
         Parameters
         ----------
@@ -1421,26 +1450,27 @@ class CLPrediction(_PredictionBase):
             ]
         )
 
-        def ratio_function(latent: Float64[Array, "alt_vars"]) -> Float64[Array, "targets"]:
-            """Map latent coefficients to structural WTP ratios."""
-            structural = _to_structural_betas(
-                latent,
-                self.results.model.numeraire_idx,
-                self.results.model.numeraire_min_abs,
-            )
-            return (derivatives @ structural) / (-structural[cost_idx])
+        def ratio_function(
+            coefficients: Float64[Array, "alt_vars"],
+        ) -> Float64[Array, "targets"]:
+            """Compute WTP ratios from economic coefficients."""
+            return (derivatives @ coefficients) / (-coefficients[cost_idx])
 
-        latent = jnp.asarray(self.results.flat_params)
-        ratios = ratio_function(latent)
+        coefficients = jnp.asarray(self.results.flat_params)
+        ratios = ratio_function(coefficients)
         if se == "none":
             standard_errors = jnp.full_like(ratios, jnp.nan)
         elif se == "delta":
             _, standard_errors = self.results._apply_delta_method(
-                ratio_function, latent
+                ratio_function, coefficients
             )
         else:
             standard_errors = self.results._parametric_bootstrap_se(
-                ratio_function, latent, draws=bootstrap_draws, seed=bootstrap_seed
+                ratio_function,
+                coefficients,
+                draws=bootstrap_draws,
+                seed=bootstrap_seed,
+                requires_negative_numeraire=True,
             )
 
         rows = []
@@ -1470,7 +1500,12 @@ class CLPrediction(_PredictionBase):
         return self.wtp(target, se="none").with_columns(pl.lit(0).alias("class"))
 
     def denominator_diagnostics(self) -> pl.DataFrame:
-        """Report the homogeneous WTP denominator and configured floor."""
+        """Report the WTP denominator, floor, SE, and Gaussian crossing probabilities.
+
+        The probability above the coefficient bound drives the 0.001 bootstrap
+        screen; the probability above zero describes sign uncertainty. Neither
+        establishes finite ratio moments. Unavailable covariance gives NaNs.
+        """
         cost_idx = getattr(self.results.model, "numeraire_idx", None)
         if cost_idx is None:
             raise ValueError("A numeraire must be defined to compute diagnostics.")
@@ -1481,6 +1516,7 @@ class CLPrediction(_PredictionBase):
                 "denominator": [self.results.model.numeraire],
                 "denominator_value": [denominator],
                 "abs_denominator": [abs(denominator)],
+                **self._denominator_uncertainty(),
                 "min_abs_floor": [self.results.model.numeraire_min_abs],
             }
         )

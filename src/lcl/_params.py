@@ -1,4 +1,4 @@
-"""Canonical latent-class parameter packing and structural transformations."""
+"""Canonical latent-class parameter packing and coefficient bounds."""
 
 from __future__ import annotations
 
@@ -7,8 +7,7 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 from jaxtyping import Array, Float64
 
-from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS
-from lcl._case_utils import _to_structural_betas
+from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS, NegativeCoefficientBound
 from lcl._kernels import _class_membership_probs
 
 
@@ -58,18 +57,28 @@ class ParamPacking:
         theta_rows, theta_cols = self.theta_shape
         return self.num_beta_params + theta_rows * theta_cols
 
+    @property
+    def negative_bound(self) -> NegativeCoefficientBound:
+        """Return the resolved bound shared with the class-specific solvers."""
+        return NegativeCoefficientBound(self.numeraire_idx, self.numeraire_min_abs)
+
+    def upper_bounds(self) -> Float64[Array, "all_params"] | None:
+        """Return coefficient bounds in the same layout as the flat parameters."""
+        return self.negative_bound.upper_bounds(
+            jnp.zeros(self.num_params), width=self.num_classes
+        )
+
     def pack(
         self,
-        latent_betas: Float64[Array, "alt_vars classes"],
+        betas: Float64[Array, "alt_vars classes"],
         thetas: Float64[Array, "dem_vars_plus_one classes_minus_one"] | None,
         shares: Float64[Array, "classes"] | None,
     ) -> Float64[Array, "all_params"]:
         """Flatten utility and membership parameters into the canonical layout."""
         expected_beta_shape = (self.num_alt_vars, self.num_classes)
-        if latent_betas.shape != expected_beta_shape:
+        if betas.shape != expected_beta_shape:
             raise ValueError(
-                "latent_betas has shape "
-                f"{latent_betas.shape}; expected {expected_beta_shape}."
+                f"betas has shape {betas.shape}; expected {expected_beta_shape}."
             )
 
         if thetas is None:
@@ -96,7 +105,7 @@ class ParamPacking:
                 )
             membership_params = thetas
 
-        return jnp.concatenate([latent_betas.ravel(), membership_params.ravel()])
+        return jnp.concatenate([betas.ravel(), membership_params.ravel()])
 
     def unpack(
         self,
@@ -111,22 +120,11 @@ class ParamPacking:
                 f"flat_params has shape {flat_params.shape}; "
                 f"expected {(self.num_params,)}."
             )
-        latent_betas = flat_params[: self.num_beta_params].reshape(
+        betas = flat_params[: self.num_beta_params].reshape(
             self.num_alt_vars, self.num_classes
         )
         thetas = flat_params[self.num_beta_params :].reshape(self.theta_shape)
-        return latent_betas, thetas
-
-    def to_structural(
-        self,
-        latent_betas: Float64[Array, "alt_vars classes"],
-    ) -> Float64[Array, "alt_vars classes"]:
-        """Apply all structural coefficient constraints."""
-        return _to_structural_betas(
-            latent_betas,
-            self.numeraire_idx,
-            self.numeraire_min_abs,
-        )
+        return betas, thetas
 
     def class_probs(
         self,

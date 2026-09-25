@@ -52,7 +52,9 @@ def elasticity_design_derivative(
             pl.Series(variable, raw_values - step, dtype=pl.Float64)
         )
 
-        def utility_matrix(frame: pl.DataFrame) -> Float64[onp.ndarray, "rows alt_vars"]:
+        def utility_matrix(
+            frame: pl.DataFrame,
+        ) -> Float64[onp.ndarray, "rows alt_vars"]:
             if encoder is not None and encoder.x_model_spec is not None:
                 matrix = _drop_formula_intercepts(
                     _get_model_matrix(
@@ -102,7 +104,7 @@ def compute_elasticities(
         raise ValueError("At least one elasticity variable is required.")
     data = prediction.predict_data
     if hasattr(prediction.results, "em_res"):
-        betas = prediction.results.em_res.structural_betas
+        betas = prediction.results.em_res.betas
         if prediction.class_probs_by_panel is None:
             raise ValueError(
                 "class_probs_by_panel must be available to compute LC elasticities."
@@ -175,7 +177,8 @@ def compute_elasticities(
         cross = cross.with_columns(
             pl.when(pl.col("P_j") > 0.0)
             .then(pl.col("D_jk") * pl.col("X_k") / pl.col("P_j"))
-            .otherwise(float("nan")).alias(name)
+            .otherwise(float("nan"))
+            .alias(name)
         )
         ids = ["_cases"]
         if "panels" in cross.columns:
