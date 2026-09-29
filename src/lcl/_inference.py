@@ -122,7 +122,11 @@ def _robust_covariance(
 
 
 class InformationDiagnostics(NamedTuple):
-    """Rank and conditioning summary for an observed information matrix."""
+    """Rank and conditioning after diagonal equilibration of the information.
+
+    Eigenvalues and the condition number are dimensionless. The inverse and
+    reported covariance remain in the original coefficient coordinates.
+    """
 
     num_params: int
     rank: int
@@ -139,7 +143,12 @@ def _invert_information(
     matrix = onp.asarray(information, dtype=onp.float64)
     num_params = matrix.shape[0]
     symmetric = 0.5 * (matrix + matrix.T)
-    eigenvalues = onp.linalg.eigvalsh(symmetric)
+    # Congruence scaling preserves rank and inertia while removing coefficient
+    # units from the numerical rank threshold. Undo it after the solve.
+    diagonal = onp.abs(onp.diag(symmetric))
+    scale = onp.sqrt(onp.where(diagonal > 0.0, diagonal, 1.0))
+    equilibrated = (symmetric / scale[:, None]) / scale[None, :]
+    eigenvalues = onp.linalg.eigvalsh(equilibrated)
     largest = float(onp.max(onp.abs(eigenvalues))) if num_params else 0.0
     cutoff = num_params * onp.finfo(onp.float64).eps * largest
     keep = onp.abs(eigenvalues) > cutoff
@@ -175,7 +184,7 @@ def _invert_information(
     elif diagnostics.condition_number > 1e12:
         logger.warning(
             "The %s is severely ill conditioned (condition number %.3e). Standard "
-            "errors may be unreliable; consider rescaling covariates or reducing "
+            "errors may be unreliable; consider simplifying the design or reducing "
             "the number of latent classes.",
             label,
             diagnostics.condition_number,
@@ -188,10 +197,11 @@ def _invert_information(
         # solve is both faster than a pseudo-inverse and free of its silent
         # truncation of small singular values.
         try:
-            factor = cho_factor(symmetric, lower=True)
+            factor = cho_factor(equilibrated, lower=True)
             inverse = cho_solve(factor, onp.eye(num_params, dtype=onp.float64))
         except onp.linalg.LinAlgError:  # pragma: no cover - guarded by the check
-            inverse = onp.linalg.pinv(symmetric, hermitian=True)
+            inverse = onp.linalg.inv(equilibrated)
+        inverse = (inverse / scale[:, None]) / scale[None, :]
         inverse = 0.5 * (inverse + inverse.T)
     return jnp.asarray(inverse), diagnostics
 

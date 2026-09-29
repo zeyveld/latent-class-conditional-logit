@@ -11,6 +11,7 @@ import numpy as onp
 import polars as pl
 from jaxtyping import Shaped
 
+from lcl._precision import use_float64
 from lcl.options import (
     DiagnosticsOptions,
     FitOptions,
@@ -25,6 +26,7 @@ from lcl.spec import LCLSpec, resolve_lcl_spec
 logger = logging.getLogger(__name__)
 
 
+@use_float64
 def cv_optimal_classes(
     data: Any,
     alts_col: str | None = None,

@@ -8,6 +8,7 @@ the package one stable import site for those sharding primitives.
 from __future__ import annotations
 
 import inspect
+import logging
 from collections.abc import Callable
 from typing import Any, TypeAlias, TypeVar, cast
 
@@ -78,14 +79,20 @@ def shard_map(
 
 
 def cpu_device() -> Device:
-    """Return the first available CPU device for host-side inference work."""
+    """Prefer CPU inference, falling back when the CPU backend is disabled."""
     try:
-        return jax.devices("cpu")[0]
-    except IndexError as exc:
-        raise RuntimeError("JAX did not report an addressable CPU device.") from exc
+        return jax.local_devices(backend="cpu")[0]
+    except (IndexError, RuntimeError):
+        device = jax.local_devices()[0]
+        logging.getLogger(__name__).warning(
+            "JAX's CPU backend is unavailable; inference and stored results use %s. "
+            "Enable the CPU backend to keep inference off the accelerator.",
+            device,
+        )
+        return device
 
 
-def device_put_array_leaves(tree: T, device: Device) -> T:
+def device_put_array_leaves(tree: T, device: Device | NamedSharding) -> T:
     """Move JAX array leaves in a PyTree to ``device`` while preserving metadata.
 
     ``jax.device_put`` accepts whole Python containers, but it also converts

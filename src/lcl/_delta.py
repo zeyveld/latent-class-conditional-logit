@@ -13,6 +13,7 @@ from typing import Any
 import jax
 import jax.numpy as jnp
 import numpy as onp
+from equinox import filter_closure_convert, filter_jit
 from jax import jacfwd, jacrev
 from jax.tree_util import Partial
 from jaxtyping import Array, Float64
@@ -208,16 +209,62 @@ def parametric_bootstrap_se(
     rng = onp.random.default_rng(seed)
     standard_normal = rng.standard_normal((draws, parameters.size))
     parameter_draws = parameters + standard_normal @ root.T
-    target = Partial(func, **kwargs)
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore")
-        values = jax.vmap(target)(jnp.asarray(parameter_draws))
-    if not bool(jnp.all(jnp.isfinite(values))):
-        raise ValueError(
-            "Non-finite quantities occurred in parameter simulation. Inspect "
-            "the design, covariance, and denominator before interpreting SEs."
+    cpu = cpu_device()
+    with jax.default_device(cpu):
+        kwargs_cpu = device_put_array_leaves(kwargs, cpu)
+        # Bound methods and closures may own entire prediction datasets. Hoist
+        # their captured arrays into a callable PyTree so the JIT cache cannot
+        # retain the owner as a static argument. Partial also covers functions
+        # whose arrays come from defaults or module globals.
+        target = filter_closure_convert(
+            Partial(func), jnp.asarray(parameters), **kwargs_cpu
         )
-    return jnp.std(values, axis=0, ddof=1)
+        target = device_put_array_leaves(target, cpu)
+        count = 0
+        mean: Float64[Array, "..."] | None = None
+        sum_squares: Float64[Array, "..."] | None = None
+        for start in range(0, draws, 32):
+            batch = parameter_draws[start : start + 32]
+            size = len(batch)
+            # Repeat a valid draw to give the last call the same compilation key.
+            batch = onp.pad(batch, ((0, 32 - size), (0, 0)), mode="edge")
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                values = _bootstrap_values(target, jnp.asarray(batch), kwargs_cpu)[
+                    :size
+                ]
+            if not bool(jnp.all(jnp.isfinite(values))):
+                raise ValueError(
+                    "Non-finite quantities occurred in parameter simulation. Inspect "
+                    "the design, covariance, and denominator before interpreting SEs."
+                )
+            batch_mean = jnp.mean(values, axis=0)
+            batch_squares = jnp.sum((values - batch_mean) ** 2, axis=0)
+            if mean is None or sum_squares is None:
+                mean, sum_squares = batch_mean, batch_squares
+            else:
+                difference = batch_mean - mean
+                sum_squares = (
+                    sum_squares
+                    + batch_squares
+                    + difference**2 * (count * size / (count + size))
+                )
+                mean = mean + difference * (size / (count + size))
+            count += size
+            # Bound live batches even when asynchronous dispatch is enabled.
+            jax.block_until_ready((mean, sum_squares))
+        assert sum_squares is not None
+        return jnp.sqrt(sum_squares / (draws - 1))
+
+
+@filter_jit
+def _bootstrap_values(
+    func: Callable[..., Float64[Array, "..."]],
+    parameters: Float64[Array, "draws all_params"],
+    kwargs: dict[str, Any],
+) -> Float64[Array, "draws ..."]:
+    """Evaluate one draw batch with prediction arrays passed dynamically."""
+    return jax.vmap(Partial(func, **kwargs))(parameters)
 
 
 __all__ = [

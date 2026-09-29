@@ -33,6 +33,9 @@ from lcl import OptimizationOptions, PartitionType, WTPRequest
 TRUE_BETA = np.array([[-1.8, -0.5], [0.4, 1.6]])
 
 
+# These audit scripts also call private kernels outside the public API.
+jax.config.update("jax_enable_x64", True)
+
 def synthetic(seed=20260907, panels=800, occasions=12):
     """Generate choices from a two-class DGP with demographic membership."""
     rng = np.random.default_rng(seed)

@@ -14,7 +14,6 @@ import numpy as onp
 import polars as pl
 import pytest
 
-import lcl  # noqa: F401  (enables x64)
 from lcl.options import FitOptions, InferenceOptions
 from lcl.conditional_logit import ConditionalLogit
 from lcl._inference import _invert_information, _robust_covariance
@@ -60,7 +59,7 @@ def test_invert_information_reports_full_rank_and_conditioning() -> None:
     assert diagnostics.rank == 3
     assert not diagnostics.rank_deficient
     assert diagnostics.positive_definite
-    assert diagnostics.condition_number == pytest.approx(4.0)
+    assert diagnostics.condition_number == pytest.approx(1.0)
     assert diagnostics.smallest_eigenvalue == pytest.approx(1.0)
 
 

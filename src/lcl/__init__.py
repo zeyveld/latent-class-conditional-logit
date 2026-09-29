@@ -15,13 +15,7 @@ from __future__ import annotations
 from collections.abc import Callable as _Callable
 from collections.abc import Mapping as _Mapping
 
-from jax import config as _jax_config
 from jaxtyping import install_import_hook as _install_import_hook
-
-# Adopt 64-bit precision before any JAX arrays are created.
-# Discrete choice models are highly sensitive to vanishing gradients
-# in the denominator of the logit probability.
-_jax_config.update("jax_enable_x64", True)
 
 # Ensure array arguments have mutually compatible shapes throughout the package.
 with _install_import_hook("lcl", "beartype.beartype"):

@@ -23,7 +23,7 @@ conditional-logit score and Hessian (McFadden, 1974; Train, 2009, *Discrete
 Choice Methods with Simulation*, ch. 3) evaluated on the
 chosen-alternative-differenced design.
 
-Everything is returned in the flat parameter layout owned by
+All derivatives use the flat parameter layout owned by
 :class:`~lcl._params.ParamPacking`. The outputs are numerically
 equal (to machine precision) to ``jax.jacfwd`` of
 :meth:`~lcl._results.LCLResults._panel_loglik_fn` and ``jax.hessian`` of
@@ -37,15 +37,20 @@ The class-conditional blocks and the class-membership curvature are each
 assembled under whichever contraction schedule
 :mod:`~lcl._scheduling` selects for the problem size: a batched contraction for
 small problems, or a :func:`jax.lax.scan` that bounds peak memory for large
-ones.  The two schedules differ only in summation order.
+ones. The two schedules differ only in summation order. Production inference
+and polishing use :func:`summed_derivatives`, which accumulates complete-panel
+chunks without retaining the full panel-by-parameter score matrix.
 """
 
+from typing import NamedTuple
+
 import jax.numpy as jnp
+import numpy as np
 from equinox import filter_jit
 from jax import lax
 from jax.nn import log_softmax, softmax
 from jax.ops import segment_max, segment_sum
-from jaxtyping import Array, Float64, Int, Integer
+from jaxtyping import Array, Bool, Float64, Int, Integer, UInt
 
 from lcl._params import ParamPacking
 from lcl._scheduling import use_sequential
@@ -273,14 +278,15 @@ def _membership_curvature_gram(
     )
 
 
-@filter_jit
-def _panel_scores_and_hessian(
+def _panel_derivatives(
     flat_params: Float64[Array, "all_params"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
     packing: ParamPacking,
+    panel_mask: Bool[Array, "panels"] | None = None,
 ) -> tuple[
     Float64[Array, "panels all_params"],
+    Float64[Array, "all_params all_params"],
     Float64[Array, "all_params all_params"],
 ]:
     """Compute panel-level scores and the observed-information Hessian.
@@ -296,6 +302,8 @@ def _panel_scores_and_hessian(
         Core choice data and metadata.
     packing : :class:`~lcl._params.ParamPacking`
         Owner of the flat parameter layout and coefficient bounds.
+    panel_mask : Array | None, optional
+        Valid panels in a padded block; omitted for an unpadded sample.
 
     Returns
     -------
@@ -306,6 +314,8 @@ def _panel_scores_and_hessian(
     hessian : Float64[Array, "all_params all_params"]
         Hessian of the total observed-data log likelihood, equal to
         ``jax.hessian`` of :meth:`~lcl._results.LCLResults._full_loglik_fn`.
+    meat : Float64[Array, "all_params all_params"]
+        Uncentered panel score cross-product, also used in the Hessian.
     """
     if data.panels_of_cases is None or data.num_panels is None:
         raise ValueError("Panel identifiers are required for LCL derivatives.")
@@ -350,6 +360,9 @@ def _panel_scores_and_hessian(
     logits = jnp.concatenate([jnp.zeros((num_panels, 1)), dem_design @ thetas], axis=1)
     pi = softmax(logits, axis=1)
     posterior = softmax(log_softmax(logits, axis=1) + kappa, axis=1)
+    if panel_mask is not None:
+        posterior = jnp.where(panel_mask[:, None], posterior, 0.0)
+        pi = jnp.where(panel_mask[:, None], pi, 0.0)
 
     # Class-conditional score and curvature blocks.  The batched schedule holds
     # a (diff rows, alt_vars, classes) intermediate; the sequential one holds
@@ -422,6 +435,211 @@ def _panel_scores_and_hessian(
     hessian = hessian.at[num_beta_params:, num_beta_params:].set(
         theta_theta.reshape(num_theta_params, num_theta_params)
     )
-    hessian = hessian - panel_scores.T @ panel_scores
+    meat = panel_scores.T @ panel_scores
+    return panel_scores, hessian - meat, meat
 
-    return panel_scores, hessian
+
+@filter_jit
+def _panel_scores_and_hessian(
+    flat_params: Float64[Array, "all_params"],
+    diff_unchosen_chosen: DiffUnchosenChosen,
+    data: Data,
+    packing: ParamPacking,
+) -> tuple[
+    Float64[Array, "panels all_params"], Float64[Array, "all_params all_params"]
+]:
+    """Return individual scores and total curvature for callers needing rows."""
+    scores, hessian, _ = _panel_derivatives(
+        flat_params, diff_unchosen_chosen, data, packing
+    )
+    return scores, hessian
+
+
+class PanelChunks(NamedTuple):
+    """One ordered design with tail padding and complete-panel slice offsets.
+
+    Only the final tail is padded; the design is never duplicated per chunk.
+    Counts and slice widths are static, while all dataset arrays stay dynamic.
+    """
+
+    X: Float64[Array, "padded_rows alt_vars"]
+    cases: UInt[Array, "padded_rows"]
+    panels_of_cases: UInt[Array, "padded_cases"]
+    dems: Float64[Array, "padded_panels dem_vars"] | None
+    starts: Integer[Array, "chunks three"]
+    sizes: Integer[Array, "chunks three"]
+    cluster_ids: Integer[Array, "padded_panels"] | None
+    num_clusters: int
+    max_rows: int
+    max_cases: int
+    max_panels: int
+
+
+def prepare_panel_chunks(
+    diff: DiffUnchosenChosen,
+    data: Data,
+    *,
+    chunk_size: int = 256,
+    cluster_ids: Integer[Array, "panels"] | None = None,
+    num_clusters: int | None = None,
+) -> PanelChunks:
+    """Group complete panels for bounded score and curvature accumulation."""
+    if data.num_panels is None or data.panels_of_cases is None:
+        raise ValueError("Panel identifiers are required for LCL derivatives.")
+    if chunk_size < 1:
+        raise ValueError("chunk_size must be positive.")
+    if cluster_ids is not None and num_clusters is None:
+        raise ValueError("num_clusters is required with cluster_ids.")
+    width = min(chunk_size, data.num_panels)
+    panel_of_case = np.asarray(data.panels_of_cases)
+    case_order = np.argsort(panel_of_case, kind="stable")
+    case_rank = np.empty(data.num_cases, dtype=np.uint32)
+    case_rank[case_order] = np.arange(data.num_cases, dtype=np.uint32)
+    row_cases = case_rank[np.asarray(diff.cases)]
+    row_order = np.argsort(row_cases, kind="stable")
+    row_cases = row_cases[row_order]
+    case_panels = panel_of_case[case_order]
+    case_offsets = np.r_[
+        0, np.cumsum(np.bincount(case_panels, minlength=data.num_panels))
+    ]
+    row_offsets = np.r_[
+        0, np.cumsum(np.bincount(case_panels[row_cases], minlength=data.num_panels))
+    ]
+    panels = np.arange(0, data.num_panels, width)
+    ends = np.minimum(panels + width, data.num_panels)
+    starts = np.column_stack((row_offsets[panels], case_offsets[panels], panels))
+    sizes = np.column_stack((row_offsets[ends], case_offsets[ends], ends)) - starts
+    max_rows, max_cases, _ = map(int, sizes.max(axis=0))
+    return PanelChunks(
+        X=jnp.asarray(np.pad(np.asarray(diff.X)[row_order], ((0, max_rows), (0, 0)))),
+        cases=jnp.asarray(np.pad(row_cases, (0, max_rows)), dtype=jnp.uint32),
+        panels_of_cases=jnp.asarray(
+            np.pad(case_panels, (0, max_cases)), dtype=jnp.uint32
+        ),
+        dems=None
+        if data.dems is None
+        else jnp.asarray(np.pad(np.asarray(data.dems), ((0, width), (0, 0)))),
+        starts=jnp.asarray(starts, dtype=jnp.int32),
+        sizes=jnp.asarray(sizes, dtype=jnp.int32),
+        cluster_ids=None
+        if cluster_ids is None
+        else jnp.asarray(np.pad(np.asarray(cluster_ids), (0, width)), dtype=jnp.int32),
+        num_clusters=num_clusters
+        if cluster_ids is not None and num_clusters is not None
+        else 0,
+        max_rows=max_rows,
+        max_cases=max_cases,
+        max_panels=width,
+    )
+
+
+class DerivativeSummary(NamedTuple):
+    """Total score, total Hessian, and uncentered cluster score cross-product."""
+
+    score: Float64[Array, "all_params"]
+    hessian: Float64[Array, "all_params all_params"]
+    meat: Float64[Array, "all_params all_params"]
+
+
+@filter_jit
+def summed_derivatives(
+    flat_params: Float64[Array, "all_params"],
+    chunks: PanelChunks,
+    packing: ParamPacking,
+    *,
+    center: bool = False,
+) -> DerivativeSummary:
+    """Accumulate exact mixture derivatives without retaining all panel scores.
+
+    A panel is never split: its posterior uses its entire choice sequence.
+    Padding contributes zero score and curvature. Coarser clusters accumulate
+    their scores across chunks before taking the outer product.
+    """
+    num_params = packing.num_params
+    initial = DerivativeSummary(
+        jnp.zeros(num_params),
+        jnp.zeros((num_params, num_params)),
+        jnp.zeros((num_params, num_params)),
+    )
+    group_scores = jnp.zeros((chunks.num_clusters, num_params))
+
+    def accumulate(
+        carry: tuple[DerivativeSummary, Float64[Array, "groups all_params"]],
+        offsets: tuple[Integer[Array, "three"], Integer[Array, "three"]],
+    ) -> tuple[tuple[DerivativeSummary, Float64[Array, "groups all_params"]], None]:
+        """Reduce one complete-panel block into fixed-size accumulators."""
+        total, groups = carry
+        start, size = offsets
+        X = lax.dynamic_slice_in_dim(chunks.X, start[0], chunks.max_rows)
+        valid_rows = jnp.arange(chunks.max_rows) < size[0]
+        X = jnp.where(valid_rows[:, None], X, 0.0)
+        cases = lax.dynamic_slice_in_dim(chunks.cases, start[0], chunks.max_rows)
+        # Out-of-range segment IDs discard padding in case/panel reductions.
+        # Zero design rows also remove it from the weighted Gram matrices.
+        cases = jnp.where(valid_rows, cases - start[1], chunks.max_cases).astype(
+            jnp.uint32
+        )
+        case_panels = lax.dynamic_slice_in_dim(
+            chunks.panels_of_cases, start[1], chunks.max_cases
+        )
+        case_panels = jnp.where(
+            jnp.arange(chunks.max_cases) < size[1],
+            case_panels - start[2],
+            chunks.max_panels,
+        ).astype(jnp.uint32)
+        dems = (
+            None
+            if chunks.dems is None
+            else lax.dynamic_slice_in_dim(chunks.dems, start[2], chunks.max_panels)
+        )
+        valid_panels = jnp.arange(chunks.max_panels) < size[2]
+        alts = jnp.zeros(chunks.max_rows, dtype=jnp.uint32)
+        diff = DiffUnchosenChosen(
+            X=X, alts=alts, cases=cases, panels=None, num_cases=chunks.max_cases
+        )
+        data = Data(
+            X=X,
+            dems=dems,
+            y=None,
+            alts=alts,
+            cases=cases,
+            panels=None,
+            panels_of_cases=case_panels,
+            num_cases_per_panel=None,
+            num_cases=chunks.max_cases,
+            num_alt_vars=X.shape[1],
+            num_panels=chunks.max_panels,
+            num_dem_vars=packing.num_dem_vars,
+        )
+        scores, hessian, meat = _panel_derivatives(
+            flat_params, diff, data, packing, valid_panels
+        )
+        if chunks.cluster_ids is not None:
+            ids = lax.dynamic_slice_in_dim(
+                chunks.cluster_ids, start[2], chunks.max_panels
+            )
+            groups = groups.at[ids].add(scores)
+        total = DerivativeSummary(
+            total.score + scores.sum(axis=0), total.hessian + hessian, total.meat + meat
+        )
+        return (total, groups), None
+
+    (total, group_scores), _ = lax.scan(
+        accumulate, (initial, group_scores), (chunks.starts, chunks.sizes)
+    )
+    num_panels = jnp.sum(chunks.sizes[:, 2])
+    if chunks.cluster_ids is not None:
+        if center:
+            valid = jnp.arange(chunks.cluster_ids.size) < num_panels
+            counts = segment_sum(
+                valid.astype(flat_params.dtype),
+                chunks.cluster_ids,
+                num_segments=chunks.num_clusters,
+            )
+            group_scores = group_scores - counts[:, None] * (total.score / num_panels)
+        total = total._replace(meat=group_scores.T @ group_scores)
+    elif center:
+        total = total._replace(
+            meat=total.meat - jnp.outer(total.score, total.score) / num_panels
+        )
+    return total

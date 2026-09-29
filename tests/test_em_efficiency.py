@@ -11,7 +11,12 @@ import pytest
 
 from lcl._case_utils import _diff_unchosen_chosen
 from lcl._demographics import _update_thetas
-from lcl._em_alg_startup import _fit_starting_beta, _get_starting_vals
+from lcl._em_alg_startup import (
+    _fit_starting_betas,
+    _get_starting_vals,
+    _random_class_weights,
+)
+from lcl._analytic_derivatives import prepare_panel_chunks
 from lcl._em_alg_steps import (
     _compiled_em_step,
     _compute_conditional_class_probs,
@@ -106,9 +111,12 @@ def test_startup_and_em_reuse_compilations(caplog, numeraire):
     caplog.set_level(logging.WARNING, logger="jax._src.interpreters.pxla")
     with jax.log_compiles(True):
         for offset in (0.0, 0.1, 0.2):
-            beta = _fit_starting_beta(
+            beta = _fit_starting_betas(
+                _random_class_weights(data.num_panels, 2, 9),
                 diff._replace(X=diff.X + offset),
+                data,
                 opt,
+                1,
                 NegativeCoefficientBound(numeraire),
             )
             jax.block_until_ready(beta)
@@ -125,7 +133,7 @@ def test_startup_and_em_reuse_compilations(caplog, numeraire):
                 )
                 jax.block_until_ready((state, diagnostics))
     messages = [record.getMessage() for record in caplog.records]
-    for name in ("_fit_starting_beta", "step"):
+    for name in ("_fit_starting_betas", "step"):
         # Older supported JAX versions omit the "jit(...)" wrapper in this log.
         assert (
             sum(
@@ -250,7 +258,13 @@ def test_polish_honors_solver_controls(monkeypatch):
             accept_any_decrease=True,
         ),
     )
-    params, _ = solve(jnp.zeros(packing.num_params), diff, data, jnp.array(9.0))
+    params, _ = solve(
+        jnp.zeros(packing.num_params),
+        diff,
+        data,
+        jnp.array(9.0),
+        prepare_panel_chunks(diff, data),
+    )
     jax.block_until_ready(params)
     assert len(captured) == 1
     assert captured[0] == dict(

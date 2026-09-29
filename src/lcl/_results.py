@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
+from lcl._precision import use_float64
 from lcl._typing import (
     DemographicsInput,
     DesignInput,
@@ -19,7 +20,7 @@ from lcl._typing import (
 )
 from jaxtyping import Array, ArrayLike, Float64, Integer
 
-from lcl._analytic_derivatives import _panel_scores_and_hessian
+from lcl._analytic_derivatives import prepare_panel_chunks, summed_derivatives
 from lcl._case_utils import _diff_unchosen_chosen
 from lcl._boundary import (
     projected_score,
@@ -38,7 +39,6 @@ from lcl._jax_compat import cpu_device, device_put_array_leaves
 from lcl._inference import (
     InformationDiagnostics,
     WeakInformationDirection,
-    _aggregate_scores,
     _invert_information,
     _symmetrize,
     information_weak_directions,
@@ -117,6 +117,7 @@ class LCLResults:
         Sample-size adjusted BIC (Sclove, 1987).
     """
 
+    @use_float64
     def __init__(
         self,
         model_spec: Any,
@@ -254,7 +255,9 @@ class LCLResults:
                     jnp.max(
                         jnp.abs(
                             projected_score(
-                                score, boundary_params, self._param_packing.upper_bounds()
+                                score,
+                                boundary_params,
+                                self._param_packing.upper_bounds(),
                             )
                         )
                     )
@@ -316,6 +319,7 @@ class LCLResults:
             parts.append("Covariance unavailable")
         return " | ".join(parts) + ">"
 
+    @use_float64
     def parameter_names(self) -> list[str]:
         """Return names aligned with rows and columns of ``cov_matrix``."""
         names = [
@@ -406,19 +410,18 @@ class LCLResults:
         observed information), which match ``jax.hessian``/``jax.jacfwd`` of the
         panel log likelihood to machine precision while touching the data once
         instead of once per parameter.  The analytic path is much leaner than
-        autodiff but still holds all-class case statistics and the panel-by-
-        parameter score matrix at once, so its peak memory remains above the
-        class-local EM and M-step kernels; CPU placement is therefore intentional.
+        autodiff and accumulates scores, curvature, and cluster cross-products
+        in complete-panel chunks. CPU placement also avoids competing with the
+        fitting data for accelerator memory.
 
         Returns
         -------
         Float64[Array, "all_params all_params"]
             Covariance in the coefficient and membership parameterization.
         """
-        cpu = cpu_device()
         if self.inference.skip:
-            with jax.default_device(cpu):
-                return jnp.full((self.num_params, self.num_params), jnp.nan)
+            return jnp.full((self.num_params, self.num_params), jnp.nan)
+        cpu = cpu_device()
         if self.inference.covariance == "robust":
             raise ValueError(
                 "Case-level robust covariance is not valid for an LCL likelihood "
@@ -452,14 +455,21 @@ class LCLResults:
                     "bound; select conditional or projected boundary inference."
                 )
                 return jnp.full((self.num_params, self.num_params), jnp.nan)
-            J, H = _panel_scores_and_hessian(
-                flat_params, diff_unchosen_chosen, data, self._param_packing
+            if data.num_panels is None:
+                raise ValueError("Panel identifiers are required for LCL derivatives.")
+            chunks = prepare_panel_chunks(
+                diff_unchosen_chosen,
+                data,
+                cluster_ids=self._cluster_ids,
+                num_clusters=self._num_clusters,
             )
+            derivatives = summed_derivatives(flat_params, chunks, self._param_packing)
+            H = derivatives.hessian
             self.observed_score_max = float(
                 jnp.max(
                     jnp.abs(
                         projected_score(
-                            jnp.mean(J, axis=0),
+                            derivatives.score / data.num_panels,
                             flat_params,
                             self._param_packing.upper_bounds(),
                         )
@@ -487,21 +497,14 @@ class LCLResults:
             # Each panel contributes exactly one score row to the mixture
             # likelihood, so panel clustering aggregates nothing further.  A
             # coarser grouping sums those rows first and counts its own groups.
-            if self._cluster_ids is None:
-                cluster_scores = J
-                G = data.num_panels
-            else:
-                if self._num_clusters is None:
-                    raise ValueError("num_clusters is required with cluster_ids.")
-                cluster_scores = _aggregate_scores(
-                    J, self._cluster_ids, self._num_clusters
-                )
-                G = self._num_clusters
+            G = data.num_panels if self._cluster_ids is None else self._num_clusters
+            if G is None:
+                raise ValueError("num_clusters is required with cluster_ids.")
             if G < 2:
                 raise ValueError(
                     "Cluster-robust covariance requires at least two clusters."
                 )
-            B = cluster_scores.T @ cluster_scores
+            B = derivatives.meat
             correction = G / (G - 1) if self.inference.finite_sample_correction else 1.0
             return _symmetrize((H_inv @ B @ H_inv) * correction)
 
@@ -520,8 +523,12 @@ class LCLResults:
         betas, thetas = self._unpack_params(flat_params)
         if data.num_panels is None:
             raise ValueError("Panel identifiers are required for LCL log-likelihoods.")
-        class_probs = self._get_class_probs(thetas, data.dems, data.num_panels)
-        return _compute_panel_logliks(betas, class_probs, diff_unchosen_chosen, data)
+        log_prior = self._param_packing.class_log_probs(
+            thetas, data.dems, data.num_panels
+        )
+        return _compute_panel_logliks(
+            betas, log_prior, diff_unchosen_chosen, data, prior_is_log=True
+        )
 
     def _full_loglik_fn(
         self,
@@ -532,6 +539,7 @@ class LCLResults:
         """Re-sums the panel log-likelihoods to a scalar for the Hessian."""
         return jnp.sum(self._panel_loglik_fn(flat_params, diff_unchosen_chosen, data))
 
+    @use_float64
     def loglik(
         self,
         data: object,
@@ -716,6 +724,7 @@ class LCLResults:
         _, thetas = self._unpack_params(flat_params)
         return jnp.mean(self._get_class_probs(thetas, dems, num_panels), axis=0)
 
+    @use_float64
     def class_coefficients(self) -> pl.DataFrame:
         """Return class-specific structural coefficients.
 
@@ -755,6 +764,7 @@ class LCLResults:
                 )
         return pl.DataFrame(rows)
 
+    @use_float64
     def membership_coefficients(self) -> pl.DataFrame:
         """Return nonbaseline class-membership coefficients with standard errors.
 
@@ -811,6 +821,7 @@ class LCLResults:
         )
         return jnp.mean(derivative, axis=0)
 
+    @use_float64
     def membership_marginal_effects(self) -> pl.DataFrame:
         """Return average marginal effects of demographics on class membership.
 
@@ -866,6 +877,7 @@ class LCLResults:
                 )
         return pl.DataFrame(rows)
 
+    @use_float64
     def class_shares(self) -> pl.DataFrame:
         """Return aggregate latent-class shares.
 
@@ -899,6 +911,7 @@ class LCLResults:
             rows.append(row)
         return pl.DataFrame(rows)
 
+    @use_float64
     def classification_diagnostics(self) -> pl.DataFrame:
         """Summarize posterior separation and modal classification by class."""
         posterior = self.em_res.class_probs_by_panel
@@ -939,6 +952,7 @@ class LCLResults:
             )
         return pl.DataFrame(rows)
 
+    @use_float64
     def beta_summary(self) -> pl.DataFrame:
         """Return population coefficient moments and explicitly labelled uncertainty.
 
@@ -1026,6 +1040,7 @@ class LCLResults:
             )
         return pl.DataFrame(rows)
 
+    @use_float64
     def summarize_betas(
         self,
         header: tuple[str, str, str] = (
@@ -1064,10 +1079,12 @@ class LCLResults:
             )
         return summary_df
 
+    @use_float64
     def summarize(self, num_decimals: int = 3, *, show: bool = True) -> pl.DataFrame:
         """Alias for :meth:`summarize_betas`."""
         return self.summarize_betas(num_decimals=num_decimals, show=show)
 
+    @use_float64
     def summarize_class_betas(
         self,
         num_decimals: int = 3,
@@ -1126,6 +1143,7 @@ class LCLResults:
             )
         return table
 
+    @use_float64
     def summarize_membership(
         self,
         num_decimals: int = 3,
@@ -1202,6 +1220,7 @@ class LCLResults:
                 )
         return table
 
+    @use_float64
     def spec_summary(self) -> str:
         """Return a human-readable model specification summary."""
         spec = getattr(self.model, "spec", None)
@@ -1234,6 +1253,7 @@ class LCLResults:
             lines.append("  none")
         return "\n".join(lines)
 
+    @use_float64
     def diagnostics(self) -> LCLDiagnostics:
         """Return structured model diagnostics."""
         rows: list[dict[str, object]] = [
@@ -1556,10 +1576,12 @@ class LCLResults:
 
         return LCLDiagnostics(pl.DataFrame(rows))
 
+    @use_float64
     def diagnose(self) -> LCLDiagnostics:
         """Alias for :meth:`diagnostics`."""
         return self.diagnostics()
 
+    @use_float64
     def convergence_report(self) -> str:
         """Return a compact convergence and diagnostic report."""
         diagnostics = self.diagnostics().to_frame()
@@ -1588,6 +1610,7 @@ class LCLResults:
             lines.append(f"Last EM history row: {last}")
         return "\n".join(lines)
 
+    @use_float64
     def audit_report(self) -> str:
         """Return a text audit report for replication materials."""
         diagnostics_table = self.diagnostics().to_frame()
@@ -1609,6 +1632,7 @@ class LCLResults:
             ]
         )
 
+    @use_float64
     def predict(
         self,
         data: object | None = None,

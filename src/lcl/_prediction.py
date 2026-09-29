@@ -10,6 +10,7 @@ import polars as pl
 from jax.ops import segment_sum
 from jaxtyping import Array, Bool, Float64, Int, Integer, Shaped
 
+from lcl._precision import use_float64
 from lcl._delta import GAUSSIAN_BOUND_PROBABILITY_LIMIT, gaussian_upper_tail_probability
 from lcl._elasticities import compute_elasticities, elasticity_design_derivative
 from lcl._logging import log_or_print
@@ -88,6 +89,7 @@ class _PredictionBase:
         and can be used for WTP partitions.
     """
 
+    @use_float64
     def __init__(
         self,
         predicted_probs_df: pl.DataFrame,
@@ -378,6 +380,7 @@ class _PredictionBase:
             / panel_counts[:, None]
         )
 
+    @use_float64
     def marginal_wtp(self, target: str) -> pl.DataFrame:
         """Return marginal WTP at every offered profile, including formula interactions.
 
@@ -426,6 +429,7 @@ class _PredictionBase:
             pl.Series("class_sd", onp.asarray(spread)),
         )
 
+    @use_float64
     def elasticities(self, vars: str | Iterable[str]) -> pl.DataFrame:
         """Compute full matrices of own- and cross-elasticities for continuous features.
 
@@ -457,6 +461,7 @@ class _PredictionBase:
         """
         return compute_elasticities(self, vars)
 
+    @use_float64
     def market_shares(
         self,
         *,
@@ -522,6 +527,7 @@ class _PredictionBase:
         ).sort("alts")
         return frame
 
+    @use_float64
     def mean_surplus(
         self,
         *,
@@ -572,6 +578,7 @@ class _PredictionBase:
             }
         )
 
+    @use_float64
     def mean_surplus_change(
         self,
         counterfactual: "_PredictionBase",
@@ -681,6 +688,7 @@ class _PredictionBase:
             EULER_MASCHERONI * sensitivity,
         )
 
+    @use_float64
     def surplus_change(self, counterfactual: "_PredictionBase") -> pl.DataFrame:
         """Return counterfactual-minus-baseline surplus changes and identification flags.
 
@@ -727,6 +735,7 @@ class _PredictionBase:
             pl.Series("change_identified", identified),
         )
 
+    @use_float64
     def aggregate_elasticities(
         self,
         vars: str | Iterable[str],
@@ -828,6 +837,7 @@ class _PredictionBase:
 class LCLPrediction(_PredictionBase):
     """Latent-class prediction with partitioned WTP inference."""
 
+    @use_float64
     def class_membership(self) -> pl.DataFrame:
         """Return prior and prediction probabilities, with history counts by consumer.
 
@@ -860,6 +870,7 @@ class LCLPrediction(_PredictionBase):
             }
         )
 
+    @use_float64
     def compute_wtp(
         self,
         *wtp_requests: WTPRequest | Iterable[WTPRequest],
@@ -1188,6 +1199,7 @@ class LCLPrediction(_PredictionBase):
 
         return summary_tables
 
+    @use_float64
     def tradeoff(
         self,
         *wtp_requests: WTPRequest | Iterable[WTPRequest],
@@ -1196,6 +1208,7 @@ class LCLPrediction(_PredictionBase):
         """Alias for :meth:`compute_wtp` with more neutral terminology."""
         return self.compute_wtp(*wtp_requests, **kwargs)
 
+    @use_float64
     def wtp_by_class(self, target: str | None = None) -> pl.DataFrame:
         """Return class-specific WTP/tradeoff ratios.
 
@@ -1250,6 +1263,7 @@ class LCLPrediction(_PredictionBase):
                 )
         return pl.DataFrame(rows)
 
+    @use_float64
     def denominator_diagnostics(self) -> pl.DataFrame:
         """Return denominator levels, SEs, and marginal Gaussian crossing probabilities.
 
@@ -1378,6 +1392,7 @@ class LCLPrediction(_PredictionBase):
 class CLPrediction(_PredictionBase):
     """Conditional-logit prediction with WTP and elasticity diagnostics."""
 
+    @use_float64
     def wtp(
         self,
         target: str | None = None,
@@ -1487,18 +1502,22 @@ class CLPrediction(_PredictionBase):
             )
         return pl.DataFrame(rows)
 
+    @use_float64
     def compute_wtp(self, target: str | None = None, **kwargs: Any) -> pl.DataFrame:
         """Alias for :meth:`wtp`."""
         return self.wtp(target, **kwargs)
 
+    @use_float64
     def tradeoff(self, target: str | None = None, **kwargs: Any) -> pl.DataFrame:
         """Alias for :meth:`wtp`, with the same conditional-logit arguments."""
         return self.wtp(target, **kwargs)
 
+    @use_float64
     def wtp_by_class(self, target: str | None = None) -> pl.DataFrame:
         """Return WTP with a single homogeneous class label."""
         return self.wtp(target, se="none").with_columns(pl.lit(0).alias("class"))
 
+    @use_float64
     def denominator_diagnostics(self) -> pl.DataFrame:
         """Report the WTP denominator, floor, SE, and Gaussian crossing probabilities.
 

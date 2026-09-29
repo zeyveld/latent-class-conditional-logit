@@ -30,6 +30,7 @@ jobs:
         run: >-
           uv run --no-sync pytest -q
           tests/test_em_efficiency.py tests/test_results_device_placement.py
+          tests/test_runtime_regressions.py
       - if: matrix.python == '3.14'
         run: uv run --no-sync ruff check src/lcl tests
       - if: matrix.python == '3.14'
@@ -63,3 +64,4 @@ jobs:
       - run: >-
           uv run --no-sync pytest -q
           tests/test_em_efficiency.py tests/test_results_device_placement.py
+          tests/test_runtime_regressions.py

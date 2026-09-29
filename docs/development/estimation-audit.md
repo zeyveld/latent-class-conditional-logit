@@ -1,5 +1,10 @@
 # Latent-class estimation audit — September 2026
 
+The later [runtime audit](runtime-audit.md) replaces this report's subset-shaped
+initializer with full-data panel weights and records the resulting compilation
+counts. It also covers chunked derivatives, device placement, and scoped precision.
+The measurements below describe the earlier implementation.
+
 The retained changes speed up estimation, reduce measured peak memory, and preserve fitted coefficients, likelihoods, and covariance matrices. The default EM tolerance remains unchanged. This audit also corrects convergence reporting and several ineffective settings.
 
 Baseline: `f93f41cdcb524f5fa4a3ed8aa08f4412e169b0c9`. Measurements use JAX 0.9.2, double precision, and one Apple CPU device. Two logical CPU devices exercise sharding; physical GPU performance and memory were not measured. Timings describe these workloads, not a guarantee across hardware or all model dimensions.

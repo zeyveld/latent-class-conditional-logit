@@ -35,7 +35,11 @@ from equinox import filter_jit
 from jaxtyping import Array, Float64
 
 from lcl._boundary import projected_score
-from lcl._analytic_derivatives import _panel_scores_and_hessian
+from lcl._analytic_derivatives import (
+    PanelChunks,
+    prepare_panel_chunks,
+    summed_derivatives,
+)
 from lcl._em_alg_steps import (
     _compute_em_log_kernels,
     _posterior_and_loglik,
@@ -87,7 +91,7 @@ def _compiled_polish(
     Returns
     -------
     Callable
-        A compiled ``(flat_params, diff_unchosen_chosen, data, scale) -> (params, steps)``.
+        A compiled ``(flat_params, diff, data, scale, chunks) -> (params, steps)``.
     """
 
     def run(
@@ -95,6 +99,7 @@ def _compiled_polish(
         diff_unchosen_chosen: DiffUnchosenChosen,
         data: Data,
         scale: Float64[Array, ""],
+        chunks: PanelChunks,
     ) -> tuple[Float64[Array, "all_params"], Any]:
         """Solve the observed-data score equations from ``flat_params``."""
         num_panels = _require_panels(data)
@@ -102,9 +107,11 @@ def _compiled_polish(
         def total_loglik(params: Float64[Array, "all_params"]) -> Float64[Array, ""]:
             """Sum the observed-data panel log likelihoods."""
             betas, packed_thetas = packing.unpack(params)
-            prior = packing.class_probs(packed_thetas, data.dems, num_panels)
+            log_prior = packing.class_log_probs(packed_thetas, data.dems, num_panels)
             return jnp.sum(
-                _compute_panel_logliks(betas, prior, diff_unchosen_chosen, data)
+                _compute_panel_logliks(
+                    betas, log_prior, diff_unchosen_chosen, data, prior_is_log=True
+                )
             )
 
         def value_fn(params: Float64[Array, "all_params"]) -> Float64[Array, ""]:
@@ -119,13 +126,11 @@ def _compiled_polish(
             Float64[Array, "all_params all_params"],
         ]:
             """Exact total value, score, and Hessian of the mixture likelihood."""
-            panel_scores, hessian = _panel_scores_and_hessian(
-                params, diff_unchosen_chosen, data, packing
-            )
+            derivatives = summed_derivatives(params, chunks, packing)
             return (
                 -total_loglik(params),
-                -jnp.sum(panel_scores, axis=0),
-                -hessian,
+                -derivatives.score,
+                -derivatives.hessian,
             )
 
         value, derivatives = scaled_objective(
@@ -199,17 +204,16 @@ def _score_max_kernel(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
     packing: ParamPacking,
+    chunks: PanelChunks,
 ) -> Float64[Array, ""]:
     """Largest absolute KKT-adjusted score component per panel.
 
     Compiling this discards the Hessian the derivative kernel also returns, which
     is the expensive half of that pass and is not needed for a stationarity check.
     """
-    panel_scores, _ = _panel_scores_and_hessian(
-        flat_params, diff_unchosen_chosen, data, packing
-    )
+    derivatives = summed_derivatives(flat_params, chunks, packing)
     score = projected_score(
-        jnp.mean(panel_scores, axis=0), flat_params, packing.upper_bounds()
+        derivatives.score / _require_panels(data), flat_params, packing.upper_bounds()
     )
     return jnp.max(jnp.abs(score))
 
@@ -223,8 +227,12 @@ def _total_loglik_kernel(
 ) -> Float64[Array, ""]:
     """Total observed-data log likelihood at ``flat_params``."""
     betas, packed_thetas = packing.unpack(flat_params)
-    prior = packing.class_probs(packed_thetas, data.dems, _require_panels(data))
-    return jnp.sum(_compute_panel_logliks(betas, prior, diff_unchosen_chosen, data))
+    log_prior = packing.class_log_probs(packed_thetas, data.dems, _require_panels(data))
+    return jnp.sum(
+        _compute_panel_logliks(
+            betas, log_prior, diff_unchosen_chosen, data, prior_is_log=True
+        )
+    )
 
 
 def observed_score_max(
@@ -232,9 +240,14 @@ def observed_score_max(
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
     packing: ParamPacking,
+    chunks: PanelChunks | None = None,
 ) -> float:
     """Return the largest absolute observed-data score component per panel."""
-    return float(_score_max_kernel(flat_params, diff_unchosen_chosen, data, packing))
+    if chunks is None:
+        chunks = prepare_panel_chunks(diff_unchosen_chosen, data)
+    return float(
+        _score_max_kernel(flat_params, diff_unchosen_chosen, data, packing, chunks)
+    )
 
 
 def em_vars_from_flat(
@@ -266,8 +279,8 @@ def em_vars_from_flat(
     """
     num_panels = _require_panels(data)
     betas, packed_thetas = packing.unpack(flat_params)
-    prior_by_panel = packing.class_probs(packed_thetas, data.dems, num_panels)
-    shares = jnp.mean(prior_by_panel, axis=0)
+    log_prior = packing.class_log_probs(packed_thetas, data.dems, num_panels)
+    shares = jnp.mean(jnp.exp(log_prior), axis=0)
     # Without demographics the packed membership row holds bare log odds, and the
     # rest of the package carries that information in ``shares`` with
     # ``thetas=None``.  Preserving that convention keeps the round trip through
@@ -275,7 +288,8 @@ def em_vars_from_flat(
     thetas = None if data.dems is None else packed_thetas
     posterior, loglik = _posterior_and_loglik(
         _compute_em_log_kernels(betas, diff_unchosen_chosen, data),
-        prior_by_panel,
+        log_prior,
+        prior_is_log=True,
     )
     return EMVars(
         betas=betas,
@@ -320,6 +334,7 @@ def polish_observed_data(
         Before-and-after log likelihood and score, and whether the result was
         kept.
     """
+    chunks = prepare_panel_chunks(diff_unchosen_chosen, data)
     scale = jnp.asarray(float(max(_require_panels(data), 1)))
 
     def total_loglik(params: Float64[Array, "all_params"]) -> float:
@@ -327,7 +342,9 @@ def polish_observed_data(
         return float(_total_loglik_kernel(params, diff_unchosen_chosen, data, packing))
 
     loglik_before = total_loglik(flat_params)
-    score_before = observed_score_max(flat_params, diff_unchosen_chosen, data, packing)
+    score_before = observed_score_max(
+        flat_params, diff_unchosen_chosen, data, packing, chunks
+    )
 
     if optimization_options.maxiter <= 0:
         return flat_params, PolishReport(
@@ -341,7 +358,7 @@ def polish_observed_data(
         )
 
     solve = _compiled_polish(packing, optimization_options)
-    candidate, steps = solve(flat_params, diff_unchosen_chosen, data, scale)
+    candidate, steps = solve(flat_params, diff_unchosen_chosen, data, scale, chunks)
     iterations = int(steps)
     loglik_after = total_loglik(candidate)
 
@@ -366,7 +383,9 @@ def polish_observed_data(
             accepted=False,
         )
 
-    score_after = observed_score_max(candidate, diff_unchosen_chosen, data, packing)
+    score_after = observed_score_max(
+        candidate, diff_unchosen_chosen, data, packing, chunks
+    )
     logger.info(
         "Observed-data polish: %d Newton steps, log likelihood %.10g -> %.10g, "
         "max score %.3e -> %.3e.",

@@ -10,6 +10,7 @@ import pytest
 from scipy.optimize import minimize
 
 from lcl._case_utils import _loglik_gradient, _loglik_value
+from lcl._analytic_derivatives import prepare_panel_chunks
 from lcl._delta import parametric_bootstrap_se
 from lcl._em_alg_steps import _distributed_update
 from lcl._optimize import _minimize, _minimize_kernel, exact_newton_minimize
@@ -185,7 +186,11 @@ def test_polish_leaves_boundary_without_recompiling(caplog):
     with jax.log_compiles(True):
         for start in (-1e-5, -1e-5 - 1e-12, 0.0):
             result, steps = solve(
-                jnp.array([start, start, 0.0]), diff, data, jnp.array(5.0)
+                jnp.array([start, start, 0.0]),
+                diff,
+                data,
+                jnp.array(5.0),
+                prepare_panel_chunks(diff, data),
             )
             jax.block_until_ready(result)
             beta, theta = packing.unpack(result)

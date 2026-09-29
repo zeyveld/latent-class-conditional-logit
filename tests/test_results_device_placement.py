@@ -177,3 +177,7 @@ def test_real_skipped_inference_fit(device_count):
     assert np.isfinite(result.observed_score_max)
     assert result.converged == (result.observed_score_max <= result.score_tol)
     assert result.inference_status == "skipped"
+    inference_device = jax.local_devices(backend="cpu")[0]
+    for array in jax.tree.leaves((result.data, result.em_res, result.flat_params)):
+        if isinstance(array, jax.Array):
+            assert array.devices() == {inference_device}

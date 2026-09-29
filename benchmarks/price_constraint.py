@@ -40,6 +40,9 @@ from lcl._em_alg_steps import _distributed_update  # noqa: E402
 from lcl._struct import DiffUnchosenChosen  # noqa: E402
 from lcl.options import OptimizationOptions  # noqa: E402
 
+# The benchmark calls private float64 kernels directly.
+jax.config.update("jax_enable_x64", True)
+
 rng = np.random.default_rng(728)
 x = rng.normal(size=(args.cases, 4, args.variables))
 truth = rng.normal(scale=0.3, size=args.variables)

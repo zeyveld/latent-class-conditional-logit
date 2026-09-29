@@ -54,6 +54,10 @@ pip install lcl-choice
 
 If you plan to use a GPU, install the CUDA-matched JAX build first; see the [JAX installation notes](https://github.com/jax-ml/jax#installation).
 
+The [runtime guide](docs/runtime.md) explains compilation caching, local-device
+parallelism, CPU inference, and scoped float64 precision. Importing LCL leaves
+your process-wide JAX precision setting unchanged.
+
 ## Quickstart
 
 A two-class model on a small synthetic panel. The [estimation tutorial](https://zeyveld.github.io/latent-class-conditional-logit/tutorials/estimation/) provides a full example, including counterfactual fares and value-of-time partitions.

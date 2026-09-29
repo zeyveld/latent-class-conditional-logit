@@ -10,6 +10,7 @@ from typing import Any
 import jax.numpy as jnp
 import numpy as onp
 import polars as pl
+from lcl._precision import use_float64
 from lcl._typing import CaseWeightsInput, InitialCoefficientsInput, PanelWeightsInput
 from jaxtyping import Array, ArrayLike, Float64, Integer, install_import_hook
 from scipy.stats import norm
@@ -78,6 +79,7 @@ class ConditionalLogit(ChoiceModel):
         self.numeraire_min_abs = numeraire_min_abs
         self.numeraire_idx: int | None = None
 
+    @use_float64
     def fit(
         self,
         data: Any,
@@ -294,6 +296,7 @@ class CLResults:
     Ordinary covariance is unavailable when a coefficient bound is binding.
     """
 
+    @use_float64
     def __init__(
         self,
         model_spec: ConditionalLogit,
@@ -550,6 +553,7 @@ class CLResults:
         betas = flat_params
         return betas[:, None], jnp.ones((num_panels, 1), dtype=betas.dtype)
 
+    @use_float64
     def coefficient_table(self) -> pl.DataFrame:
         """Return conditional-logit coefficients with presentation labels.
 
@@ -573,6 +577,7 @@ class CLResults:
             )
         return pl.DataFrame(rows)
 
+    @use_float64
     def parameter_names(self) -> list[str]:
         """Return names aligned with covariance rows and columns."""
         return list(self.model.case_varnames)
@@ -607,6 +612,7 @@ class CLResults:
         )
         return self.adjusted_bic
 
+    @use_float64
     def summarize_betas(
         self,
         header: tuple[str, str, str] = ("Variable", "Estimate", "Std. Error"),
@@ -641,10 +647,12 @@ class CLResults:
             )
         return table_df
 
+    @use_float64
     def summarize(self, num_decimals: int = 3, *, show: bool = True) -> pl.DataFrame:
         """Alias for :meth:`summarize_betas`."""
         return self.summarize_betas(num_decimals=num_decimals, show=show)
 
+    @use_float64
     def loglik(
         self,
         data: Any,
@@ -707,6 +715,7 @@ class CLResults:
             }
         )
 
+    @use_float64
     def diagnostics(self) -> LCLDiagnostics:
         """Return convergence, fit, score, and information diagnostics."""
         rows: list[dict[str, object]] = [
@@ -762,6 +771,7 @@ class CLResults:
             )
         return LCLDiagnostics(pl.DataFrame(rows))
 
+    @use_float64
     def predict(
         self,
         data: Any,

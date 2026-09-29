@@ -16,7 +16,7 @@ from jaxtyping import Array, ArrayLike, Bool, Float64, Integer
 from scipy.linalg import solve_triangular
 from scipy.optimize import nnls
 
-from lcl._analytic_derivatives import _panel_scores_and_hessian
+from lcl._analytic_derivatives import prepare_panel_chunks, summed_derivatives
 from lcl._boundary import boundary_kkt_violation, projected_score
 from lcl._boundary_types import BoundarySummaryDiagnostics, CoefficientMoments
 from lcl._inference import (
@@ -44,8 +44,12 @@ def boundary_covariance(
             "Boundary covariance requires a constrained coefficient and panel data."
         )
     beta, _ = packing.unpack(flat)
-    J, H = _panel_scores_and_hessian(flat, diff, data, packing)
-    score = np.asarray(jnp.mean(J, axis=0))
+    chunks = prepare_panel_chunks(
+        diff, data, cluster_ids=result._cluster_ids, num_clusters=result._num_clusters
+    )
+    derivatives = summed_derivatives(flat, chunks, packing, center=True)
+    H = derivatives.hessian
+    score = np.asarray(derivatives.score) / data.num_panels
     active = np.asarray(result.boundary_parameter_indices, dtype=int)
     price_indices = packing.numeraire_idx * packing.num_classes + np.arange(
         packing.num_classes
@@ -62,12 +66,14 @@ def boundary_covariance(
             "Boundary inference requires stationarity and the structural KKT condition."
         )
 
-    meat, groups = _centered_score_meat(
-        J,
-        result._cluster_ids,
-        result._num_clusters,
-        finite_sample_correction=result.inference.finite_sample_correction,
-    )
+    groups = data.num_panels if result._cluster_ids is None else result._num_clusters
+    if groups is None or groups < 2:
+        raise ValueError(
+            "Boundary inference requires at least two independent clusters."
+        )
+    meat = np.asarray(derivatives.meat)
+    if result.inference.finite_sample_correction:
+        meat = meat * (groups / (groups - 1))
     information = -np.asarray(H)
     free = np.setdiff1d(np.arange(result.num_params), active)
     inverse_array, diagnostics = _invert_information(

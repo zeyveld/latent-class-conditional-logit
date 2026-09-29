@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from jaxtyping import Array, Float64
 
 from lcl.constraints import DEFAULT_NEGATIVE_MIN_ABS, NegativeCoefficientBound
-from lcl._kernels import _class_membership_probs
+from lcl._kernels import _class_membership_log_probs
 
 
 @dataclass(frozen=True)
@@ -133,6 +133,15 @@ class ParamPacking:
         num_panels: int,
     ) -> Float64[Array, "panels classes"]:
         """Compute prior class probabilities with explicit shape validation."""
+        return jnp.exp(self.class_log_probs(thetas, dems, num_panels))
+
+    def class_log_probs(
+        self,
+        thetas: Float64[Array, "dem_vars_plus_one classes_minus_one"],
+        dems: Float64[Array, "panels dem_vars"] | None,
+        num_panels: int,
+    ) -> Float64[Array, "panels classes"]:
+        """Compute stable log priors without a probability-space clamp."""
         if dems is None and thetas.shape[0] != 1:
             raise ValueError(
                 "Demographics are required because the fitted membership model "
@@ -144,4 +153,4 @@ class ParamPacking:
                     f"dems has shape {dems.shape}; expected "
                     f"{(num_panels, self.num_dem_vars)}."
                 )
-        return _class_membership_probs(thetas, dems, num_panels)
+        return _class_membership_log_probs(thetas, dems, num_panels)

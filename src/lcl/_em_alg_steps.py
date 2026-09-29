@@ -49,7 +49,7 @@ def class_mesh_sharding(num_devices: int) -> NamedSharding:
     NamedSharding
         Replicated placement on the class mesh.
     """
-    devices = onp.asarray(jax.devices()[:num_devices])
+    devices = onp.asarray(jax.local_devices()[:num_devices])
     return NamedSharding(Mesh(devices, ("class_device",)), P())
 
 
@@ -272,10 +272,19 @@ def _em_step_impl(
         )
         updated_shares = unconditional_class_probs_by_panel.mean(axis=0)
 
-    # Evaluate the observed-data likelihood at the completed EM update.
+    if data.num_panels is None:
+        raise ValueError("Panel identifiers are required for latent-class models.")
+    log_prior = (
+        jnp.log(jnp.maximum(unconditional_class_probs_by_panel, 1e-300))
+        if updated_thetas is None
+        else _class_membership_log_probs(updated_thetas, data.dems, data.num_panels)
+    )
+    log_prior = lax.with_sharding_constraint(log_prior, replicated)
+    # Keep membership logits in log space, including underflowed probabilities.
     next_class_probs_by_panel, unconditional_loglik = _posterior_and_loglik(
         _compute_em_log_kernels(updated_betas, diff_unchosen_chosen, data),
-        unconditional_class_probs_by_panel,
+        log_prior,
+        prior_is_log=True,
     )
 
     # Match place_em_vars to reuse one executable for fixed inputs and options,
@@ -355,9 +364,12 @@ def _compute_conditional_class_probs(
 def _posterior_and_loglik(
     log_kernels: Float64[Array, "panels classes"],
     prior: Float64[Array, "panels classes"],
+    *,
+    prior_is_log: bool = False,
 ) -> tuple[Float64[Array, "panels classes"], Float64[Array, ""]]:
     """Normalize one set of weighted kernels for both E-step and likelihood."""
-    weighted = jnp.log(jnp.maximum(prior, 1e-300)) + log_kernels
+    log_prior = prior if prior_is_log else jnp.log(jnp.maximum(prior, 1e-300))
+    weighted = log_prior + log_kernels
     shift = lax.stop_gradient(jnp.max(weighted, axis=1, keepdims=True))
     exp_weighted = jnp.exp(weighted - shift)
     denominator = jnp.sum(exp_weighted, axis=1, keepdims=True)
@@ -422,7 +434,7 @@ def _update_betas(
     betas_reshaped = betas_padded.T.reshape(num_devices, classes_per_device, -1)
     weights_reshaped = weights_padded.T.reshape(num_devices, classes_per_device, -1)
 
-    devices = onp.asarray(jax.devices()[:num_devices])
+    devices = onp.asarray(jax.local_devices()[:num_devices])
     mesh = Mesh(devices, ("class_device",))
     sharding = NamedSharding(mesh, P("class_device", None, None))
     betas_sharded = jax.device_put(betas_reshaped, sharding)
@@ -430,36 +442,40 @@ def _update_betas(
     dyn_diff, static_diff = partition(diff_unchosen_chosen, is_array)
     diff_specs = jax.tree_util.tree_map(lambda _: P(), dyn_diff)
 
-    with mesh:
-        mapped_update = shard_map(
-            lambda device_betas, device_weights, dynamic_diff, case_panels: (
-                _distributed_update(
-                    device_betas,
-                    device_weights,
-                    combine(dynamic_diff, static_diff),
-                    negative_bound,
-                    optimization_options,
-                    case_panels,
-                )
-            ),
-            mesh=mesh,
-            in_specs=(
-                P("class_device", None, None),
-                P("class_device", None, None),
-                diff_specs,
-                P(),
-            ),
-            out_specs=(P("class_device", None, None), P("class_device", None)),
-            check_vma=False,
-        )
-        out_betas, out_errors = mapped_update(
-            betas_sharded, weights_sharded, dyn_diff, panels_of_cases
-        )
+    mapped_update = shard_map(
+        lambda device_betas, device_weights, dynamic_diff, case_panels: (
+            _distributed_update(
+                device_betas,
+                device_weights,
+                combine(dynamic_diff, static_diff),
+                negative_bound,
+                optimization_options,
+                case_panels,
+            )
+        ),
+        mesh=mesh,
+        in_specs=(
+            P("class_device", None, None),
+            P("class_device", None, None),
+            diff_specs,
+            P(),
+        ),
+        out_specs=(P("class_device", None, None), P("class_device", None)),
+        check_vma=False,
+    )
+    out_betas, out_errors = mapped_update(
+        betas_sharded, weights_sharded, dyn_diff, panels_of_cases
+    )
 
     # Flatten the result back to standard shape and slice off the dummy padding.
     out_betas = out_betas.reshape(padded_num_classes, -1).T
     out_errors = out_errors.reshape(padded_num_classes)
-    return out_betas[:, :num_classes], out_errors[:num_classes]
+    # Startup also calls this kernel directly. Keep its output layout stable
+    # even when slicing padding would otherwise produce a partial mesh axis.
+    return lax.with_sharding_constraint(
+        (out_betas[:, :num_classes], out_errors[:num_classes]),
+        class_mesh_sharding(num_devices),
+    )
 
 
 def _distributed_update(
@@ -543,6 +559,8 @@ def _compute_panel_logliks(
     unconditional_class_probs_by_panel: Float64[Array, "panels classes"],
     diff_unchosen_chosen: DiffUnchosenChosen,
     data: Data,
+    *,
+    prior_is_log: bool = False,
 ) -> Float64[Array, "panels"]:
     """Compute the unconditional log-likelihood contribution of each decision-maker.
 
@@ -556,6 +574,9 @@ def _compute_panel_logliks(
         Differenced design matrix.
     data : :class:`~lcl._struct.Data`
         Core choice data and metadata.
+    prior_is_log : bool, default=False
+        Interpret the prior argument as log probabilities, preserving extreme
+        membership logits without exponentiation and clamping.
 
     Returns
     -------
@@ -563,9 +584,12 @@ def _compute_panel_logliks(
         Vector of log-likelihood contributions per decision-maker.
     """
     log_kernels = _compute_log_kernels(betas, diff_unchosen_chosen, data)
-    weighted_log_kernels = (
-        jnp.log(jnp.maximum(unconditional_class_probs_by_panel, 1e-300)) + log_kernels
+    log_prior = (
+        unconditional_class_probs_by_panel
+        if prior_is_log
+        else jnp.log(jnp.maximum(unconditional_class_probs_by_panel, 1e-300))
     )
+    weighted_log_kernels = log_prior + log_kernels
     row_max = jnp.max(weighted_log_kernels, axis=1, keepdims=True)
     return row_max[:, 0] + jnp.log(
         jnp.sum(jnp.exp(weighted_log_kernels - row_max), axis=1)

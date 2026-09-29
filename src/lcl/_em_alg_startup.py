@@ -1,7 +1,5 @@
 """Expectation-Maximization (EM) algorithm initialization routines."""
 
-from collections.abc import Iterator
-
 import jax.numpy as jnp
 import numpy as onp
 from equinox import filter_jit
@@ -9,45 +7,44 @@ from jax.nn import softmax
 from jaxtyping import Array, Float64
 
 from lcl.constraints import NegativeCoefficientBound
-from lcl._case_utils import _loglik_gradient, _loglik_value
-from lcl._demographics import _predict_class_membership_probs
+from lcl._kernels import _class_membership_log_probs
 from lcl._em_alg_steps import (
     _compute_em_log_kernels,
+    _update_betas,
+    class_mesh_sharding,
     _posterior_and_loglik,
 )
-from lcl._optimize import exact_newton_minimize, newton_kwargs, scaled_objective
+from lcl._jax_compat import device_put_array_leaves
 from lcl.options import FitOptions, OptimizationOptions
 from lcl._struct import Data, DiffUnchosenChosen, EMVars
 
 
 @filter_jit
-def _fit_starting_beta(
+def _fit_starting_betas(
+    weights: Float64[Array, "panels classes"],
     diff: DiffUnchosenChosen,
+    data: Data,
     optimization_options: OptimizationOptions,
+    num_devices: int,
     negative_bound: NegativeCoefficientBound,
-) -> Float64[Array, "alt_vars"]:
-    """Fit one starting subset, reusing the executable across equal shapes.
+) -> Float64[Array, "alt_vars classes"]:
+    """Fit random panel partitions on one fixed full-data shape.
 
-    Subset arrays are dynamic arguments, never dataset-sized closure constants.
-    Unequal subset shapes still specialize normally; changing a seed or array
-    values alone does not require another compilation.
+    Zero weights remove the other partitions from each class's objective,
+    gradient, and Hessian. Each solve starts at zero and is normalized by its
+    own number of cases, just as a physically sliced conditional-logit fit is.
     """
-    weights = jnp.ones(diff.num_cases)
-    scale = max(diff.num_cases, 1)
-
-    value, derivatives = scaled_objective(_loglik_value, _loglik_gradient, scale)
-
-    initial = jnp.zeros(diff.X.shape[1])
-    state = exact_newton_minimize(
-        value,
-        derivatives,
+    initial = jnp.zeros((diff.X.shape[1], weights.shape[1]))
+    betas, _ = _update_betas(
         initial,
-        diff,
         weights,
-        **newton_kwargs(optimization_options),
-        upper_bounds=negative_bound.upper_bounds(initial),
+        diff,
+        optimization_options,
+        num_devices,
+        negative_bound,
+        panels_of_cases=data.panels_of_cases,
     )
-    return state.params
+    return betas
 
 
 def _get_starting_vals(
@@ -63,7 +60,7 @@ def _get_starting_vals(
     Because the EM objective function is highly non-convex for latent class models,
     careful initialization is required to avoid local optima. This function randomly
     partitions decision-makers into `num_classes` subsets and estimates a standard
-    conditional logit model on each subset to derive distinct starting taste parameters.
+    conditional logit objective for each subset using full-data 0/1 panel weights.
 
     Parameters
     ----------
@@ -89,23 +86,18 @@ def _get_starting_vals(
     """
     if data.num_panels is None:
         raise ValueError("Panel identifiers are required for latent-class models.")
-    diff_unchosen_chosen_by_class = _random_class_partition(
-        diff_unchosen_chosen, data, num_classes, fit_options
+    weights = _random_class_weights(data.num_panels, num_classes, fit_options.seed)
+    weights = device_put_array_leaves(
+        weights, class_mesh_sharding(fit_options.num_devices)
     )
-
-    betas_list = []
-
-    for class_diff_unchosen_chosen in diff_unchosen_chosen_by_class:
-        betas_list.append(
-            _fit_starting_beta(
-                class_diff_unchosen_chosen,
-                optimization_options,
-                negative_bound,
-            )
-        )
-
-    # Stack the independently estimated parameter vectors into a (K, C) matrix
-    betas = jnp.column_stack(betas_list)
+    betas = _fit_starting_betas(
+        weights,
+        diff_unchosen_chosen,
+        data,
+        optimization_options,
+        fit_options.num_devices,
+        negative_bound,
+    )
 
     log_kernels = _compute_em_log_kernels(betas, diff_unchosen_chosen, data)
     starting_class_probs_by_panel = softmax(log_kernels, axis=1)
@@ -128,11 +120,14 @@ def _get_starting_vals(
         )
 
     if thetas is None:
-        prior_by_panel = jnp.repeat(starting_shares[None, :], data.num_panels, axis=0)
+        log_prior = jnp.broadcast_to(
+            jnp.log(jnp.maximum(starting_shares, 1e-300)),
+            (data.num_panels, num_classes),
+        )
     else:
-        prior_by_panel = _predict_class_membership_probs(thetas, data)
+        log_prior = _class_membership_log_probs(thetas, data.dems, data.num_panels)
     starting_class_probs_by_panel, starting_loglik = _posterior_and_loglik(
-        log_kernels, prior_by_panel
+        log_kernels, log_prior, prior_is_log=True
     )
 
     return EMVars(
@@ -144,79 +139,14 @@ def _get_starting_vals(
     )
 
 
-def _random_class_partition(
-    diff_unchosen_chosen: DiffUnchosenChosen,
-    data: Data,
-    num_classes: int,
-    fit_options: FitOptions,
-) -> Iterator[DiffUnchosenChosen]:
-    """Randomly partition decision-makers to initialize class-specific parameters.
-
-    Ensures that all choice situations belonging to a specific decision-maker (panel)
-    are kept together within the same random subset. Natively squashes IDs to remain
-    strictly contiguous and zero-indexed to satisfy downstream JAX requirements.
-
-    Parameters
-    ----------
-    diff_unchosen_chosen : :class:`~lcl._struct.DiffUnchosenChosen`
-        The complete differenced design matrix.
-    data : :class:`~lcl._struct.Data`
-        The core estimation data and metadata.
-    num_classes : int
-        The number of mutually exclusive subsets to generate.
-    fit_options : :class:`~lcl.options.FitOptions`
-        EM settings containing the reproducible partition seed.
-
-    Yields
-    ------
-    :class:`~lcl._struct.DiffUnchosenChosen`
-        One independent differenced subset at a time, so startup does not retain
-        a second copy of the entire differenced design split across classes.
-    """
-    if diff_unchosen_chosen.panels is None or data.num_panels is None:
-        raise ValueError(
-            "Panel identifiers are required for latent-class initialization."
-        )
-    if num_classes > data.num_panels:
+def _random_class_weights(
+    num_panels: int, num_classes: int, seed: int
+) -> Float64[Array, "panels classes"]:
+    """Assign each panel to one class, preserving the seeded partition order."""
+    if num_classes > num_panels:
         raise ValueError("num_classes cannot exceed the number of panels.")
-
-    # Randomly assign each panel to one initial class.
-    rng = onp.random.default_rng(fit_options.seed)
-    shuffled_panels = rng.permutation(data.num_panels)
-    panels_per_class = onp.array_split(shuffled_panels, num_classes)
-    if any(len(panels_in_class) == 0 for panels_in_class in panels_per_class):
-        raise ValueError("Initialization produced an empty latent class.")
-
-    panel_to_class = onp.empty(data.num_panels, dtype=onp.int32)
-    for class_idx, panels_in_class in enumerate(panels_per_class):
-        panel_to_class[panels_in_class] = class_idx
-
-    # Map panel assignments to long-format observations.
-    row_classes = panel_to_class[onp.array(diff_unchosen_chosen.panels)]
-
-    for class_idx in range(num_classes):
-        # Select the observations assigned to the current class.
-        mask = row_classes == class_idx
-
-        # Filter each aligned array with the class mask.
-        class_X = diff_unchosen_chosen.X[mask]
-        class_alts = diff_unchosen_chosen.alts[mask]
-        raw_cases = diff_unchosen_chosen.cases[mask]
-        raw_panels = diff_unchosen_chosen.panels[mask]
-
-        # Re-index cases and panels to contiguous, zero-based identifiers.
-        # The return_inverse array provides the perfect remapped IDs for JAX segment_sum.
-        _, contiguous_cases = onp.unique(raw_cases, return_inverse=True)
-        _, contiguous_panels = onp.unique(raw_panels, return_inverse=True)
-
-        num_cases = (
-            int(onp.max(contiguous_cases) + 1) if len(contiguous_cases) > 0 else 0
-        )
-
-        yield DiffUnchosenChosen(
-            X=jnp.array(class_X),
-            alts=jnp.array(class_alts),
-            cases=jnp.array(contiguous_cases, dtype="uint32"),
-            panels=jnp.array(contiguous_panels, dtype="uint32"),
-            num_cases=num_cases,
-        )
+    shuffled = onp.random.default_rng(seed).permutation(num_panels)
+    weights = onp.zeros((num_panels, num_classes))
+    for class_idx, panels in enumerate(onp.array_split(shuffled, num_classes)):
+        weights[panels, class_idx] = 1.0
+    return jnp.asarray(weights)

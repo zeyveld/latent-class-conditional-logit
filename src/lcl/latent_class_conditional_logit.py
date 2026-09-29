@@ -7,10 +7,12 @@ from dataclasses import replace
 from time import time
 from typing import Any, NamedTuple
 
+import jax
 import jax.numpy as jnp
 import numpy as onp
 from jaxtyping import Float64, Int
 
+from lcl._precision import use_float64
 from lcl._boundary import projected_score
 from lcl.constraints import (
     DEFAULT_NEGATIVE_MIN_ABS,
@@ -19,7 +21,8 @@ from lcl.constraints import (
 from lcl._case_utils import _diff_unchosen_chosen, _loglik_gradient
 from lcl._choice_model import ChoiceModel
 from lcl._em_alg_startup import _get_starting_vals
-from lcl._em_alg_steps import _em_step, place_em_vars
+from lcl._em_alg_steps import _em_step, place_em_vars, class_mesh_sharding
+from lcl._jax_compat import cpu_device, device_put_array_leaves
 from lcl._params import ParamPacking
 from lcl._polish import (
     POLISH_DECREMENT_TOL,
@@ -199,6 +202,7 @@ class LatentClassConditionalLogit(ChoiceModel):
         self.numeraire_min_abs = numeraire_min_abs
         self.numeraire_idx: int | None = None
 
+    @use_float64
     def fit(
         self,
         data: Any,
@@ -474,112 +478,120 @@ class LatentClassConditionalLogit(ChoiceModel):
                 best_run.loglik,
             )
 
-        em_vars = best_run.em_vars
-        em_history_rows = best_run.history
-        em_recursion = best_run.recursions
-
-        # EM's likelihood stopping rule need not imply stationarity. A final
-        # observed-data solve improves the score before covariance estimation.
-        if em_vars.betas is None or em_vars.shares is None:
-            raise RuntimeError("The EM run returned an incomplete parameter state.")
-        flat_params = packing.pack(em_vars.betas, em_vars.thetas, em_vars.shares)
-        polish_report: PolishReport | None = None
-        if fit_options.polish:
-            if progress_callback is not None:
-                progress_callback({"event": "polish", "iterations": None})
-            polished, polish_report = polish_observed_data(
-                flat_params,
-                diff_unchosen_chosen,
-                data_struct,
-                packing,
-                optimization_options=replace(
-                    optimization_options,
-                    maxiter=fit_options.polish_maxiter,
-                    newton_decrement_tol=POLISH_DECREMENT_TOL,
-                ),
+        # Complete post-estimation work on one inference device, and retain
+        # result arrays there so notebook sweeps do not accumulate GPU replicas.
+        inference_device = cpu_device()
+        with jax.default_device(inference_device):
+            data_struct = device_put_array_leaves(data_struct, inference_device)
+            diff_unchosen_chosen = device_put_array_leaves(
+                diff_unchosen_chosen, inference_device
             )
-            if polish_report.accepted:
-                em_vars = em_vars_from_flat(
-                    polished, diff_unchosen_chosen, data_struct, packing
+            em_vars = device_put_array_leaves(best_run.em_vars, inference_device)
+            em_history_rows = best_run.history
+            em_recursion = best_run.recursions
+
+            # EM's likelihood stopping rule need not imply stationarity. A final
+            # observed-data solve improves the score before covariance estimation.
+            if em_vars.betas is None or em_vars.shares is None:
+                raise RuntimeError("The EM run returned an incomplete parameter state.")
+            flat_params = packing.pack(em_vars.betas, em_vars.thetas, em_vars.shares)
+            polish_report: PolishReport | None = None
+            if fit_options.polish:
+                if progress_callback is not None:
+                    progress_callback({"event": "polish", "iterations": None})
+                polished, polish_report = polish_observed_data(
+                    flat_params,
+                    diff_unchosen_chosen,
+                    data_struct,
+                    packing,
+                    optimization_options=replace(
+                        optimization_options,
+                        maxiter=fit_options.polish_maxiter,
+                        newton_decrement_tol=POLISH_DECREMENT_TOL,
+                    ),
                 )
-            score_max = polish_report.score_after
+                if polish_report.accepted:
+                    em_vars = em_vars_from_flat(
+                        polished, diff_unchosen_chosen, data_struct, packing
+                    )
+                score_max = polish_report.score_after
+                if progress_callback is not None:
+                    progress_callback(
+                        {
+                            "event": "polish",
+                            "iterations": polish_report.iterations,
+                            "score_before": polish_report.score_before,
+                            "score_after": polish_report.score_after,
+                        }
+                    )
+            else:
+                score_max = observed_score_max(
+                    flat_params, diff_unchosen_chosen, data_struct, packing
+                )
+
+            em_vars, class_permutation = _canonicalize_classes(em_vars)
+            if class_permutation != tuple(range(self.num_classes)):
+                # Changing the baseline membership class changes the coordinates of
+                # its score. Check stationarity in the final reported coordinates.
+                if em_vars.betas is None:
+                    raise RuntimeError(
+                        "Canonicalization returned an incomplete parameter state."
+                    )
+                score_max = observed_score_max(
+                    packing.pack(em_vars.betas, em_vars.thetas, em_vars.shares),
+                    diff_unchosen_chosen,
+                    data_struct,
+                    packing,
+                )
+
+            # A fit has converged when the observed-data score has actually vanished.
+            # Reporting convergence from a log-likelihood change instead lets a
+            # slowly crawling EM claim an optimum it has not reached.
+            converged = bool(score_max <= fit_options.score_tol)
+            if not converged:
+                logger.warning(
+                    "The maximum absolute observed-data score per panel is %.3e, above the "
+                    "tolerance %.3g, so the estimate is not a stationary point of the "
+                    "mixture likelihood. Standard errors assume it is. Consider "
+                    "raising max_em_iter or polish_maxiter.",
+                    score_max,
+                    fit_options.score_tol,
+                )
+
+            em_history_rows = _permute_em_history(em_history_rows, class_permutation)
+            final_em_iter = max(em_recursion - 1, 0)
+            optimization_history_rows = self._optimizer_snapshot(
+                em_vars, diff_unchosen_chosen, data_struct, final_em_iter
+            )
+
+            estim_time_sec = time() - self._fit_start_time
+
+            logger.info("Estimation time: %.3f seconds", estim_time_sec)
+            result = LCLResults(
+                model_spec=self,
+                em_vars=em_vars,
+                estimation_data=data_struct,
+                em_recursion=em_recursion,
+                converged=converged,
+                inference=inference,
+                diagnostics_config=diagnostics,
+                estim_time_sec=estim_time_sec,
+                em_history=em_history_rows,
+                optimization_history=optimization_history_rows,
+                observed_score_max=score_max,
+                score_tol=fit_options.score_tol,
+                em_criterion_met=best_run.criterion_met,
+                polish_report=polish_report,
+                cluster_ids=cluster_ids,
+                num_clusters=num_clusters,
+                param_packing=packing,
+            )
+            self.convergence = result.converged
             if progress_callback is not None:
                 progress_callback(
-                    {
-                        "event": "polish",
-                        "iterations": polish_report.iterations,
-                        "score_before": polish_report.score_before,
-                        "score_after": polish_report.score_after,
-                    }
+                    {"event": "complete", "estimation_time_seconds": estim_time_sec}
                 )
-        else:
-            score_max = observed_score_max(
-                flat_params, diff_unchosen_chosen, data_struct, packing
-            )
-
-        em_vars, class_permutation = _canonicalize_classes(em_vars)
-        if class_permutation != tuple(range(self.num_classes)):
-            # Changing the baseline membership class changes the coordinates of
-            # its score. Check stationarity in the final reported coordinates.
-            if em_vars.betas is None:
-                raise RuntimeError(
-                    "Canonicalization returned an incomplete parameter state."
-                )
-            score_max = observed_score_max(
-                packing.pack(em_vars.betas, em_vars.thetas, em_vars.shares),
-                diff_unchosen_chosen,
-                data_struct,
-                packing,
-            )
-
-        # A fit has converged when the observed-data score has actually vanished.
-        # Reporting convergence from a log-likelihood change instead lets a
-        # slowly crawling EM claim an optimum it has not reached.
-        converged = bool(score_max <= fit_options.score_tol)
-        if not converged:
-            logger.warning(
-                "The maximum absolute observed-data score per panel is %.3e, above the "
-                "tolerance %.3g, so the estimate is not a stationary point of the "
-                "mixture likelihood. Standard errors assume it is. Consider "
-                "raising max_em_iter or polish_maxiter.",
-                score_max,
-                fit_options.score_tol,
-            )
-
-        em_history_rows = _permute_em_history(em_history_rows, class_permutation)
-        final_em_iter = max(em_recursion - 1, 0)
-        optimization_history_rows = self._optimizer_snapshot(
-            em_vars, diff_unchosen_chosen, data_struct, final_em_iter
-        )
-
-        estim_time_sec = time() - self._fit_start_time
-
-        logger.info("Estimation time: %.3f seconds", estim_time_sec)
-        result = LCLResults(
-            model_spec=self,
-            em_vars=em_vars,
-            estimation_data=data_struct,
-            em_recursion=em_recursion,
-            converged=converged,
-            inference=inference,
-            diagnostics_config=diagnostics,
-            estim_time_sec=estim_time_sec,
-            em_history=em_history_rows,
-            optimization_history=optimization_history_rows,
-            observed_score_max=score_max,
-            score_tol=fit_options.score_tol,
-            em_criterion_met=best_run.criterion_met,
-            polish_report=polish_report,
-            cluster_ids=cluster_ids,
-            num_clusters=num_clusters,
-            param_packing=packing,
-        )
-        self.convergence = result.converged
-        if progress_callback is not None:
-            progress_callback(
-                {"event": "complete", "estimation_time_seconds": estim_time_sec}
-            )
-        return result
+            return result
 
     def _run_em(
         self,
@@ -616,6 +628,9 @@ class LatentClassConditionalLogit(ChoiceModel):
             Final EM state, log likelihood, iteration count, history rows, and
             whether the Aitken criterion was met.
         """
+        placement = class_mesh_sharding(fit_options.num_devices)
+        diff_unchosen_chosen = device_put_array_leaves(diff_unchosen_chosen, placement)
+        data_struct = device_put_array_leaves(data_struct, placement)
         em_vars = _get_starting_vals(
             diff_unchosen_chosen,
             data_struct,

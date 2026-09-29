@@ -4,10 +4,9 @@ from collections.abc import Sequence
 
 import jax.numpy as jnp
 import numpy as np
-from equinox import filter_jit
 from jaxtyping import Array, ArrayLike, Float64, Integer
 
-from lcl._analytic_derivatives import _panel_scores_and_hessian
+from lcl._analytic_derivatives import prepare_panel_chunks, summed_derivatives
 from lcl._params import ParamPacking
 from lcl._struct import Data, DiffUnchosenChosen
 
@@ -27,7 +26,6 @@ def boundary_indices(
     return row * packing.num_classes + np.flatnonzero(distance <= BOUNDARY_DISTANCE_TOL)
 
 
-@filter_jit
 def mean_score(
     flat_params: Float64[Array, "all_params"],
     diff: DiffUnchosenChosen,
@@ -35,8 +33,10 @@ def mean_score(
     packing: ParamPacking,
 ) -> Float64[Array, "all_params"]:
     """Evaluate the mean log-likelihood score in coefficient coordinates."""
-    scores, _ = _panel_scores_and_hessian(flat_params, diff, data, packing)
-    return jnp.mean(scores, axis=0)
+    if data.num_panels is None:
+        raise ValueError("Panel identifiers are required for LCL derivatives.")
+    chunks = prepare_panel_chunks(diff, data)
+    return summed_derivatives(flat_params, chunks, packing).score / data.num_panels
 
 
 def boundary_kkt_violation(

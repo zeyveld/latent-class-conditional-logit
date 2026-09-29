@@ -6,7 +6,7 @@ from dataclasses import dataclass, field, replace
 from enum import Enum
 from numbers import Integral
 
-from jax import device_count
+from jax import local_device_count
 from lcl._typing import (
     ChoicesInput,
     DemographicsInput,
@@ -201,7 +201,7 @@ class FitOptions:
     score_tol: float = 1e-4
     polish: bool = True
     polish_maxiter: int = 25
-    num_devices: int = field(default_factory=device_count)
+    num_devices: int = field(default_factory=local_device_count)
     check_interval: int = 1
     starts: int = 1
     start_method: str = "panel_partition"
@@ -238,7 +238,7 @@ class FitOptions:
             raise ValueError(
                 "Only start_method='panel_partition' is currently supported."
             )
-        available_devices = device_count()
+        available_devices = local_device_count()
         if not 1 <= self.num_devices <= available_devices:
             raise ValueError(
                 "num_devices must be between 1 and the number of available JAX "

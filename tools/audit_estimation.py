@@ -24,6 +24,9 @@ from lcl import FitOptions, InferenceOptions
 from lcl.latent_class_conditional_logit import LatentClassConditionalLogit
 
 
+# These audit scripts also call private kernels outside the public API.
+jax.config.update("jax_enable_x64", True)
+
 def independent_likelihood(result):
     """Score the undifferenced long design with NumPy/SciPy only."""
     data, state = result.data, result.em_res
