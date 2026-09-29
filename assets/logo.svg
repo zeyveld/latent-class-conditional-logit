@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="LCL logo">
+  <title>LCL</title>
+  <desc>A decision-maker branches to three coloured alternatives — persimmon, sage, and saffron — with the chosen alternative ringed. Discrete choice as a fork in the road.</desc>
+
+  <!-- Aubergine ground -->
+  <rect x="0" y="0" width="256" height="256" rx="56" ry="56" fill="#3F2B47"/>
+
+  <!-- Trunk and three branches -->
+  <g fill="none" stroke="#F4ECDC" stroke-width="16" stroke-linecap="round">
+    <!-- trunk: root to junction -->
+    <line x1="128" y1="214" x2="128" y2="148"/>
+    <!-- left branch -->
+    <line x1="128" y1="148" x2="64"  y2="76"/>
+    <!-- centre branch (the chosen path) -->
+    <line x1="128" y1="148" x2="128" y2="54"/>
+    <!-- right branch -->
+    <line x1="128" y1="148" x2="192" y2="76"/>
+  </g>
+
+  <!-- Root and junction nodes -->
+  <circle cx="128" cy="214" r="11" fill="#F4ECDC"/>
+  <circle cx="128" cy="148" r="13" fill="#F4ECDC"/>
+
+  <!-- Terminal nodes: three latent classes -->
+  <circle cx="64"  cy="76" r="24" fill="#8FAD8A"/>
+  <circle cx="128" cy="54" r="28" fill="#E37449"/>
+  <circle cx="192" cy="76" r="24" fill="#E3B53A"/>
+
+  <!-- Selection indicator on the chosen terminal -->
+  <circle cx="128" cy="54" r="28" fill="none" stroke="#F4ECDC" stroke-width="4" stroke-opacity="0.9"/>
+</svg>
