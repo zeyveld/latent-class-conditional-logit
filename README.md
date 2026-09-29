@@ -19,6 +19,13 @@ Although I'm an economist by training, this package is intended for all social s
 
 Types are enforced at runtime by `jaxtyping` and `beartype`. A wrongly shaped design matrix should raise a readable error at the call site rather than a cryptic XLA trace.
 
+## GPU boundary fix in 0.1.45
+
+Fixes a CPU/GPU device mismatch in the final convergence check when a negative
+coefficient binds and inference is skipped or uses strict boundary handling.
+The score, parameters, and bounds now remain together on CPU for this check.
+The convergence criterion and fitted parameters are unchanged.
+
 ## Boundary prices in 0.1.42
 
 Use `InferenceOptions(covariance="clustered", boundary="projected")` to retain

@@ -241,23 +241,26 @@ class LCLResults:
             cpu = cpu_device()
             with jax.default_device(cpu):
                 boundary_data = device_put_array_leaves(self.data, cpu)
+                boundary_params = device_put_array_leaves(self.flat_params, cpu)
                 score = mean_score(
-                    device_put_array_leaves(self.flat_params, cpu),
+                    boundary_params,
                     _diff_unchosen_chosen(boundary_data),
                     boundary_data,
                     self._param_packing,
                 )
-            self.boundary_kkt_violation = boundary_kkt_violation(
-                score, list(self.boundary_parameter_indices)
-            )
-            self.observed_score_max = float(
-                jnp.max(
-                    jnp.abs(
-                        projected_score(
-                            score, self.flat_params, self._param_packing.upper_bounds()
+                # The score is committed to CPU even when fitting used GPUs.
+                # Keep parameters and bounds on CPU for the KKT projection too.
+                self.observed_score_max = float(
+                    jnp.max(
+                        jnp.abs(
+                            projected_score(
+                                score, boundary_params, self._param_packing.upper_bounds()
+                            )
                         )
                     )
                 )
+            self.boundary_kkt_violation = boundary_kkt_violation(
+                score, list(self.boundary_parameter_indices)
             )
             self.converged = bool(self.observed_score_max <= self.score_tol)
             if not self.converged:

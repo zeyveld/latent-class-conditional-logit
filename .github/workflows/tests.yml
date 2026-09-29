@@ -24,6 +24,12 @@ jobs:
       - run: uv sync --locked --python '${{ matrix.python }}'
       - run: uv run --no-sync pytest -q
       - if: matrix.python == '3.14'
+        name: Boundary checks across separate devices
+        env:
+          JAX_PLATFORMS: cpu
+          XLA_FLAGS: --xla_force_host_platform_device_count=5
+        run: uv run --no-sync pytest -q tests/test_results_device_placement.py
+      - if: matrix.python == '3.14'
         run: uv run --no-sync ruff check src/lcl tests
       - if: matrix.python == '3.14'
         run: uv run --no-sync mypy src/lcl
