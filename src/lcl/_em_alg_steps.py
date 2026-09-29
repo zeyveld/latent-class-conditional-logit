@@ -31,10 +31,13 @@ def class_mesh_sharding(num_devices: int) -> NamedSharding:
     """Return the replicated sharding the compiled EM step produces.
 
     The class-wise M-step places its inputs on a mesh, so everything the step
-    returns comes back committed to that mesh.  Starting values built outside the
-    loop are not, and JIT keys its cache on input sharding as well as shape, so
-    without normalizing them the first iteration and every later one compile
-    separately.
+    returns comes back committed to that mesh, and :func:`_em_step_impl`
+    constrains it to this replicated placement.  Starting values built outside
+    the loop are not, and JIT keys its cache on input sharding as well as shape,
+    so without normalizing them the first iteration can compile separately from
+    later iterations. Matching placement avoids that extra executable for fixed
+    shapes, dtypes, devices, and options; it does not guarantee unchanged runtime
+    or temporary storage. See :func:`_em_step_impl` for the sharding tradeoff.
 
     Parameters
     ----------
@@ -189,6 +192,20 @@ def _em_step_impl(
         Updated parameter state following the complete EM recursion.
     diagnostics : :class:`~lcl._struct.EMStepDiagnostics`
         Device-resident M-step convergence scalars.
+
+    Notes
+    -----
+    Replicating the posterior before the shares or membership update avoids
+    JAX 0.5.3 SPMD partitioner failures under x64. Replicated outputs match the
+    initial state placement, avoiding a second executable for an even class
+    split and unsupported partial output shardings in other configurations.
+
+    The explicit class-wise structural M-step remains distributed. Output
+    replication can, however, prevent newer compilers from distributing the
+    two classes within each E-step batch. Depending on the shapes and backend,
+    this can increase runtime and panel-sized temporary buffers, even while
+    reducing communication. Beta and diagnostic gathers may also be needed;
+    the cost is not limited to gathering the beta vectors.
     """
     betas = em_vars.betas
     shares = em_vars.shares
@@ -211,6 +228,17 @@ def _em_step_impl(
         num_devices,
         negative_bound,
         panels_of_cases=data.panels_of_cases,
+    )
+
+    # _update_betas shards the posterior along the class axis, and XLA would
+    # otherwise propagate that layout into the shares or membership M-step and
+    # on into the class maps that follow. In JAX 0.5.3, the SPMD partitioner
+    # can then mix s64 indices with s32 offsets under x64, failing HLO
+    # verification. This barrier leaves _update_betas's explicit shard_map
+    # intact; it does not promise unchanged parallelism in the rest of the step.
+    replicated = class_mesh_sharding(num_devices)
+    updated_class_probs_by_panel = lax.with_sharding_constraint(
+        updated_class_probs_by_panel, replicated
     )
 
     # Without demographics, update the aggregate class-share vector directly.
@@ -250,18 +278,24 @@ def _em_step_impl(
         unconditional_class_probs_by_panel,
     )
 
-    return (
-        EMVars(
-            betas=updated_betas,
-            thetas=updated_thetas,
-            shares=updated_shares,
-            unconditional_loglik=unconditional_loglik,
-            class_probs_by_panel=next_class_probs_by_panel,
+    # Match place_em_vars to reuse one executable for fixed inputs and options,
+    # and avoid unsupported partial output shardings. This can also remove
+    # useful E-step batch parallelism and increase temporary storage; see Notes.
+    return lax.with_sharding_constraint(
+        (
+            EMVars(
+                betas=updated_betas,
+                thetas=updated_thetas,
+                shares=updated_shares,
+                unconditional_loglik=unconditional_loglik,
+                class_probs_by_panel=next_class_probs_by_panel,
+            ),
+            EMStepDiagnostics(
+                beta_newton_error=beta_newton_error,
+                membership_newton_error=membership_newton_error,
+            ),
         ),
-        EMStepDiagnostics(
-            beta_newton_error=beta_newton_error,
-            membership_newton_error=membership_newton_error,
-        ),
+        replicated,
     )
 
 
@@ -562,8 +596,10 @@ def _compute_em_log_kernels(
 
     Reusing posteriors makes them live inputs to the M-step. Scanning the final
     likelihood avoids full rows-by-classes utility and probability temporaries.
-    Blocks of two improve matrix throughput for larger class counts while
-    retaining the memory bound; smaller models use one class at a time.
+    Blocks of two can improve matrix throughput for larger class counts while
+    retaining the memory bound; smaller models use one class at a time. A
+    compiler may distribute the two classes within a batch across devices,
+    although the replicated EM outputs can prevent that parallelism.
     """
     panels_of_cases, num_panels = data.panels_of_cases, data.num_panels
     if panels_of_cases is None or num_panels is None:

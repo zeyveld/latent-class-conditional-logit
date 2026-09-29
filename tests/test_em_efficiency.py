@@ -18,6 +18,7 @@ from lcl._em_alg_steps import (
     _compute_unconditional_loglik,
     _em_step,
     _update_betas,
+    class_mesh_sharding,
     place_em_vars,
 )
 from lcl._struct import EMVars
@@ -133,6 +134,75 @@ def test_startup_and_em_reuse_compilations(caplog, numeraire):
             )
             == 1
         )
+
+
+@pytest.mark.parametrize(
+    "devices,classes,dem_vars",
+    [
+        (1, 2, 0),
+        (1, 3, 0),
+        (1, 4, 0),
+        (2, 2, 0),
+        (2, 3, 0),
+        (2, 4, 0),
+        (2, 3, 14),
+        (4, 2, 0),
+        (4, 5, 14),
+        (4, 6, 14),
+        (4, 8, 0),
+    ],
+)
+def test_em_step_returns_its_input_placement(caplog, devices, classes, dem_vars):
+    if devices > jax.device_count():
+        pytest.skip("Run with XLA_FLAGS=--xla_force_host_platform_device_count=5")
+    # An even class split used to return class-sharded betas, so the second
+    # iteration saw a new input sharding and compiled the step again. Two or
+    # six classes across four devices also exposed unsupported partial output
+    # shardings in JAX 0.9.2. Wide designs exercise batched membership curvature.
+    data = _random_panel_data(
+        np.random.default_rng(907), 600 if dem_vars else 25, 3, dem_vars
+    )
+    if dem_vars:
+        assert data.num_panels * (dem_vars + 1) ** 2 * 8 >= 1024**2
+    diff = _diff_unchosen_chosen(data)
+    fit = FitOptions(num_devices=devices)
+    opt = OptimizationOptions()
+    state = place_em_vars(_get_starting_vals(diff, data, classes, fit, opt), devices)
+    replicated = class_mesh_sharding(devices)
+    _compiled_em_step.cache_clear()
+    caplog.set_level(logging.WARNING, logger="jax._src.interpreters.pxla")
+    with jax.log_compiles(True):
+        for _ in range(3):
+            state, diagnostics = _em_step(state, diff, data, classes, opt, fit)
+            jax.block_until_ready((state, diagnostics))
+            for leaf in jax.tree.leaves((state, diagnostics)):
+                assert leaf.sharding.is_equivalent_to(replicated, leaf.ndim)
+    messages = [record.getMessage() for record in caplog.records]
+    assert (
+        sum("Compiling jit(step)" in m or "Compiling step " in m for m in messages) == 1
+    )
+
+
+def test_sharded_em_step_with_batched_membership_curvature():
+    if jax.device_count() < 2:
+        pytest.skip("Run with XLA_FLAGS=--xla_force_host_platform_device_count=2")
+    # Wide demographic designs assemble the membership Hessian with a batched
+    # map over class pairs once the dense intermediate reaches 1 MiB.  Under JAX
+    # 0.5.3, a class-sharded posterior reaching that map failed HLO verification.
+    data = _random_panel_data(np.random.default_rng(911), 600, 2, 14)
+    num_dem = data.num_dem_vars + 1
+    assert data.num_panels * num_dem**2 * 8 >= 1024**2 and 3 - 1 < num_dem
+    diff = _diff_unchosen_chosen(data)
+    opt = OptimizationOptions()
+    states = []
+    for devices in (1, 2):
+        fit = FitOptions(num_devices=devices)
+        state = place_em_vars(_get_starting_vals(diff, data, 3, fit, opt), devices)
+        for _ in range(2):
+            state, _ = _em_step(state, diff, data, 3, opt, fit)
+        states.append(state)
+    for sharded, single in zip(jax.tree.leaves(states[1]), jax.tree.leaves(states[0])):
+        np.testing.assert_allclose(sharded, single, rtol=1e-8, atol=1e-9)
 
 
 @pytest.mark.parametrize(

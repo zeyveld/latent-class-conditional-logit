@@ -23,13 +23,43 @@ jobs:
           cache-dependency-glob: uv.lock
       - run: uv sync --locked --python '${{ matrix.python }}'
       - run: uv run --no-sync pytest -q
-      - if: matrix.python == '3.14'
-        name: Boundary checks across separate devices
+      - name: EM and boundary checks across separate devices
         env:
           JAX_PLATFORMS: cpu
           XLA_FLAGS: --xla_force_host_platform_device_count=5
-        run: uv run --no-sync pytest -q tests/test_results_device_placement.py
+        run: >-
+          uv run --no-sync pytest -q
+          tests/test_em_efficiency.py tests/test_results_device_placement.py
       - if: matrix.python == '3.14'
         run: uv run --no-sync ruff check src/lcl tests
       - if: matrix.python == '3.14'
         run: uv run --no-sync mypy src/lcl
+
+  jax-053:
+    name: JAX 0.5.3 multi-device compatibility
+    runs-on: ubuntu-latest
+    env:
+      UV_PYTHON: "3.12"
+      JAX_PLATFORMS: cpu
+      XLA_FLAGS: --xla_force_host_platform_device_count=5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - run: uv sync --locked --python '3.12'
+      # Override only JAX in this job; --no-sync below preserves the pins.
+      - run: uv pip install --python .venv/bin/python 'jax==0.5.3' 'jaxlib==0.5.3'
+      - name: Verify compatibility environment
+        run: |
+          uv run --no-sync python - <<'PY'
+          import jax
+          import jaxlib
+
+          assert jax.__version__ == jaxlib.__version__ == "0.5.3"
+          assert jax.device_count() == 5
+          PY
+      - run: >-
+          uv run --no-sync pytest -q
+          tests/test_em_efficiency.py tests/test_results_device_placement.py
